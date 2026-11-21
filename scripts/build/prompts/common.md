@@ -40,3 +40,13 @@ change it, and never copy its structure.
   short English, about why.
 - What needs the owner (real devices, real keys, deployment, other repositories, the open
   questions in `DECISIONS.md`) is written down, not faked.
+- **Explicit and observable** (principle 10, `PLAN.md` §4.5) is part of every task, not a task of
+  its own:
+  - states are enums with transition functions;
+  - numbers are named, with units and reasons;
+  - every queue states its bound and its overflow;
+  - tasks are named and supervised;
+  - every drop says why;
+  - every state change, restart, overflow, verdict, command and job emits a structured event.
+  - A test that injects a fault asserts both that it recovers and that the expected event and
+    verdict are visible.

@@ -14,6 +14,15 @@ phase's changes are `git diff {{BASE}}..HEAD`.
     privacy;
   - `PLAN.md`;
   - the interface design, where the phase touches the interface.
+- Check principle 10 (`PLAN.md` §4.5) on every changed file:
+  - Is every state an enum with a transition function?
+  - Is every number named?
+  - Does every queue state its bound and overflow?
+  - Is every task named and supervised?
+  - Does every drop say why?
+  - Does every state change, restart, overflow, verdict, command and job emit an event?
+  - Would someone reading only `logs/zutalk.jsonl` know what happened, and where it stalled?
+  - Do events carry only codes, ids, numbers and booleans?
 - Look for:
   - tests that do not assert what their name claims, or that pass for the wrong reason;
   - timing tests that can flake;

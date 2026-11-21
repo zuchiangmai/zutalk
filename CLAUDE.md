@@ -45,6 +45,14 @@ wrong change; stop and ask the owner.
    far it has got. A stall is seen and acted on, never waited out.
 9. **Cost does not grow with history.** What any one update costs depends on what changed and
    on the size of the screen, never on how long the recording runs or how much is kept.
+10. **Explicit and observable.** Reading the code tells what will happen: states are enums with
+   transition functions, numbers are named with their unit and their reason, every queue says
+   its bound and what happens when full, every task has a name and an owner, nothing is dropped
+   without saying why. Running code tells what it is doing: every state change, restart, full
+   queue, verdict, command and job is a structured event of codes, ids and numbers (never a word
+   of a conversation, a name or a key); counters, high-water marks and latencies are readable at
+   any moment; a stall leaves a snapshot. A fault a test injects must be both recovered from
+   and visible. (`docs/PLAN.md` §4.5.)
 
 ## Rules
 
@@ -71,7 +79,15 @@ wrong change; stop and ask the owner.
   `out` and `id` ports, run off the hub.
 - **Lists are virtualized.** Nothing in the interface does work in proportion to a recording's
   length or the library's size.
-- **Every long-running task is supervised and reports a watermark.**
+- **Every long-running task is supervised and reports a watermark.** Tasks are started only
+  through the supervision tree, with a name.
+- **Named numbers.** A timeout, capacity, budget or retry count is a named constant with its unit
+  in the name (`_MS`, `_BLOCKS`, `_BYTES`) and a comment saying why it is that number.
+- **Nothing dropped silently.** A discarded `Result` or failed send carries `// dropped: <why>`
+  on the same line; if it matters, it is a failure with a code.
+- **Events, not prints.** Diagnostics go through `tracing` as structured events (`event` code,
+  ids, numbers) into `logs/zutalk.jsonl`; no `println!`/`eprintln!` outside `main` before the log
+  exists. The fields of an event are codes, ids, numbers and booleans only.
 - Commit only when the owner asks. The owner asked on 2026-11-21 for the whole build: during it,
   each finished task is committed locally on `main`; nothing is pushed, tagged or released.
 
