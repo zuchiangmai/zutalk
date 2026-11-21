@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zutalk_core::keys::{self, Secret};
-use zutalk_core::supervise::End;
+use zutalk_core::id::keys::{self, Secret};
+use zutalk_core::rt::supervise::End;
 
 /// Where secrets live is the process's: one test at a time has it.
 static STORE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

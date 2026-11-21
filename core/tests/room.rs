@@ -6,11 +6,11 @@ mod common;
 use common::{Viewer, serve};
 use std::sync::Arc;
 use zu::SecretKey;
-use zutalk_core::keys::{Me, Ours};
-use zutalk_core::proto::{Open, Row};
-use zutalk_core::room::{PAGE, Write, link, open, pages, seal, write};
-use zutalk_core::shelf::Said;
-use zutalk_core::supervise::End;
+use zutalk_core::app::proto::{Open, Row};
+use zutalk_core::id::keys::{Me, Ours};
+use zutalk_core::out::room::{PAGE, Write, link, open, pages, seal, write};
+use zutalk_core::record::shelf::Said;
+use zutalk_core::rt::supervise::End;
 
 const KEY: [u8; 32] = [7; 32];
 

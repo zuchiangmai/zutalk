@@ -1,4 +1,4 @@
-use zutalk_core::lang::{ALL, LATIN, Profile, Script, Unit, profile, script, written_in};
+use zutalk_core::live::lang::{ALL, LATIN, Profile, Script, Unit, profile, script, written_in};
 
 fn spoken(languages: &[&str]) -> Vec<String> {
     languages.iter().map(|l| l.to_string()).collect()

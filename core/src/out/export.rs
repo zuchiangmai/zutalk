@@ -1,8 +1,8 @@
 //! A recording written out for other software. An exporter is a row of `EXPORTERS`:
 //! adding a format is adding a row.
 
-use crate::lang::profile;
-use crate::lines::Line;
+use crate::live::lang::profile;
+use crate::live::lines::Line;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 

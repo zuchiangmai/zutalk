@@ -4,8 +4,8 @@
 //! each recording's audio and each room is sealed with. Secrets live in one place, and do not
 //! print.
 
-use crate::clock::wall_ms;
-use crate::supervise::End;
+use crate::capture::clock::wall_ms;
+use crate::rt::supervise::End;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use keyring_core::{Entry, Error};
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE};

@@ -3,13 +3,13 @@
 //! last record the live draft stays its text. The rules are functions of values; the ports
 //! only carry requests to the two services and their answers back.
 
-use crate::clock::{BLOCK, Block, RATE};
-use crate::keys::{Keys, Lease, Service};
-use crate::lang::{self, Script, profile};
-use crate::lines::{Assembler, Boundary, Line, Token};
-use crate::shelf::{self, About, LINE, RECORDING, Said, Shelf};
-use crate::supervise::End;
-use crate::tape::{self, Pass};
+use crate::capture::clock::{BLOCK, Block, RATE};
+use crate::capture::tape::{self, Pass};
+use crate::id::keys::{Keys, Lease, Service};
+use crate::live::lang::{self, Script, profile};
+use crate::live::lines::{Assembler, Boundary, Line, Token};
+use crate::record::shelf::{self, About, LINE, RECORDING, Said, Shelf};
+use crate::rt::supervise::End;
 use futures_util::stream;
 use icu_segmenter::WordSegmenter;
 use reqwest::{Body, Client, Method, RequestBuilder, multipart};

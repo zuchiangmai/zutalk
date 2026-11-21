@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use zutalk_core::export::{Doc, EXPORTERS};
-use zutalk_core::lines::Line;
+use zutalk_core::live::lines::Line;
+use zutalk_core::out::export::{Doc, EXPORTERS};
 
 fn line(t0: u32, t1: u32, speaker: &str, language: &str, text: &str, tr: &[(&str, &str)]) -> Line {
     Line {

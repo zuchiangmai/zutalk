@@ -1,4 +1,4 @@
-use zutalk_core::clock::{BLOCK, Block, Clock, Gap, wall_clock_policy};
+use zutalk_core::capture::clock::{BLOCK, Block, Clock, Gap, wall_clock_policy};
 
 /// A policy with round numbers, so the tests below read easily.
 fn simple(behind_ms: u64) -> Gap {

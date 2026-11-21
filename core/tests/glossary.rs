@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zu::SecretKey;
-use zutalk_core::app::Config;
-use zutalk_core::glossary::{self, Term};
-use zutalk_core::keys;
-use zutalk_core::live::{self, Setup, Stream};
-use zutalk_core::proto::{Command, Setup as Next};
-use zutalk_core::shelf::{SHARE, Share, Shelf};
+use zutalk_core::app::hub::Config;
+use zutalk_core::app::proto::{Command, Setup as Next};
+use zutalk_core::id::keys;
+use zutalk_core::knowledge::glossary::{self, Term};
+use zutalk_core::live::lane::{self, Setup, Stream};
+use zutalk_core::record::shelf::{SHARE, Share, Shelf};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const NOW: i64 = 1_800_000_000_000;
@@ -34,7 +34,7 @@ fn terms() -> Vec<Term> {
 /// What the realtime service is told first on a connection for `stream`.
 fn told(terms: &[Term], stream: Stream) -> Value {
     let setup = Setup { model: "stt-rt-v6".into(), ..Setup::default() };
-    live::config("a-key", &stream, &glossary::live(terms, &stream, setup))
+    lane::config("a-key", &stream, &glossary::live(terms, &stream, setup))
 }
 
 fn pairs(pairs: &[(&str, &str)]) -> Value {

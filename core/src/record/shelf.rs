@@ -2,8 +2,8 @@
 //! whatever a person changes — a word, the title, a speaker's name, the recording's removal —
 //! is one more record at the same path, pointing at the one it replaces.
 
-use crate::lang::profile;
-use crate::lines::Line;
+use crate::live::lang::profile;
+use crate::live::lines::Line;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;

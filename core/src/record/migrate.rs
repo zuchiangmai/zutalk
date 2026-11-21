@@ -7,12 +7,12 @@
 //! id here is the same every time. So a move cut short is done again from the start, and one
 //! that finished, even if the recording was removed since, is never done twice.
 
-use crate::audio::Resampler;
-use crate::clock::{BLOCK, Clock, Gap, RATE};
-use crate::keys;
-use crate::proto::Writing;
-use crate::shelf::{self, About, LINE, NOTE, RECORDING, SPEAKER, Said, Shelf, Words};
-use crate::tape;
+use crate::app::proto::Writing;
+use crate::capture::audio::Resampler;
+use crate::capture::clock::{BLOCK, Clock, Gap, RATE};
+use crate::capture::tape;
+use crate::id::keys;
+use crate::record::shelf::{self, About, LINE, NOTE, RECORDING, SPEAKER, Said, Shelf, Words};
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
 use serde::{Deserialize, Serialize};

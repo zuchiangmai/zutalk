@@ -107,7 +107,7 @@ handover/
 - **新版放在 appcast 的一个频道上**：新版那一项带 `<sparkle:channel>zu</sparkle:channel>`。0.8.6 的 `allowedChannels(for:)` 只在 `handover/index.json` 存在时返回 `["zu"]`。0.8.5 及更早不认这个频道，只会更新到 0.8.6；0.8.6 交接完了才看得到新版。所以经由自动更新，没有人会越过交接。
 - 新版的构建号要大于 0.8.6 的（0.8.5 是 65，0.8.6 用 66，新版至少 67）。
 
-## 5. 新版怎么收（`core/src/migrate.rs`）
+## 5. 新版怎么收（`core/src/record/migrate.rs`）
 
 - 外壳只在 macOS 上把旧数据目录交给核心（`Config.old`，社区邀请也从这里读）。有身份登录后，枢纽在后台跑一次；之后每次登录都会再看一眼，已经搬过的不再搬。
 - 每条录音在新版的 id 是 `{started:011x}` 加旧 id 的 SHA-256 前四个字节：和本机造的 id 一个形状，而且每次都一样。所以「搬过没有」就是本人的书架上有没有这个 id 的 `talk/recording` 记录，删掉了也算搬过；不另记账。

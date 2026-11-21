@@ -39,27 +39,29 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 留多久 | 音频在本机留几天，设备偏好里选；整场记录写好之前一律不删，本人销毁除外 | `retain`、`tape` |
 | 词表 | 本人要听对、写对的人名和词：怎么说，各语言怎么写。一个词一条记录 | `glossary`、`shelf` |
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
-| 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `app` |
+| 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
 | 状态 | 界面画的唯一一个值，变了就整份发过去 | `app`、`proto` |
 
 ## 4. 模块
 
+文件的路径相对于 `core/src`（`shell`、`ui`、`server` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`live`、`record`、`knowledge`、`ai`、`out`、`id`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
+
 | 模块 | 文件 | 做什么 |
 |---|---|---|
-| `audio` | `audio.rs`、`audio/file.rs`、`clock.rs`、`supervise.rs` | 麦克风、电脑声音（cpal）、音频文件；重采样、混音、补静音、重开；采集时钟；恢复规则 |
-| `tape` | `tape.rs` | 加密的分钟块，崩溃后截掉残尾，销毁 |
-| `retain` | `retain.rs` | 音频留多久的规则；启动时和写好记录后清扫；按本人的话销毁 |
-| `live` | `live.rs` | Soniox 实时：每栏一条流、重连、换钥匙、落后时跳到直播沿 |
-| `lines` | `lines.rs`、`lang.rs` | 断句规则；每种语言一行的语言档案（含逐字显现的单位和速度） |
-| `write` | `write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾 |
-| `shelf` | `shelf.rs` | 一个人的记录：列表、读、改、删与撤销、搜索；`Writer` 往一个 pack 里接着写；不属于录音的记录（房间清单、词表、交城去向）一个读法 `Shelf::kept` |
-| `glossary` | `glossary.rs` | 词表：读写；给现场每条流的 `terms`、`translation_terms`，给整场转写的 `Plan.terms` |
-| `export` | `export.rs` | 导出器表：Markdown、SRT、VTT |
-| `room` | `room.rs` | 封帧、开帧、链接、把一条录音分页、写房间 |
-| `city` | `city.rs` | 交到城的档案馆：读城的日历、把录音作为本人的记录交给城的主机、音频分段上传 |
-| `keys` | `keys.rs` | 身份（收到的或本机造的）、秘密的存放、各服务钥匙、派生密钥、随机键（`fresh`）、对服务器的签名请求、旧版邀请的认领 |
-| `migrate` | `migrate.rs` | 旧版录音搬过来：读 0.8 交接的文件，签成本人的记录，音频解开后重新封进 tape |
-| `app` | `lib.rs`、`app.rs`、`proto.rs` | 枢纽：命令、状态、录音任务、房间任务、交城任务、搬运；什么时候装更新；与界面之间的协议 |
+| `audio` | `capture/audio.rs`、`capture/audio/file.rs`、`capture/clock.rs`、`rt/supervise.rs` | 麦克风、电脑声音（cpal）、音频文件；重采样、混音、补静音、重开；采集时钟；恢复规则 |
+| `tape` | `capture/tape.rs` | 加密的分钟块，崩溃后截掉残尾，销毁 |
+| `retain` | `record/retain.rs` | 音频留多久的规则；启动时和写好记录后清扫；按本人的话销毁 |
+| `live` | `live/lane.rs` | Soniox 实时：每栏一条流、重连、换钥匙、落后时跳到直播沿 |
+| `lines` | `live/lines.rs`、`live/lang.rs` | 断句规则；每种语言一行的语言档案（含逐字显现的单位和速度） |
+| `write` | `ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾 |
+| `shelf` | `record/shelf.rs` | 一个人的记录：列表、读、改、删与撤销、搜索；`Writer` 往一个 pack 里接着写；不属于录音的记录（房间清单、词表、交城去向）一个读法 `Shelf::kept` |
+| `glossary` | `knowledge/glossary.rs` | 词表：读写；给现场每条流的 `terms`、`translation_terms`，给整场转写的 `Plan.terms` |
+| `export` | `out/export.rs` | 导出器表：Markdown、SRT、VTT |
+| `room` | `out/room.rs` | 封帧、开帧、链接、把一条录音分页、写房间 |
+| `city` | `out/city.rs` | 交到城的档案馆：读城的日历、把录音作为本人的记录交给城的主机、音频分段上传 |
+| `keys` | `id/keys.rs` | 身份（收到的或本机造的）、秘密的存放、各服务钥匙、派生密钥、随机键（`fresh`）、对服务器的签名请求、旧版邀请的认领 |
+| `migrate` | `record/migrate.rs` | 旧版录音搬过来：读 0.8 交接的文件，签成本人的记录，音频解开后重新封进 tape |
+| `app` | `lib.rs`、`app/hub.rs`、`app/proto.rs` | 枢纽：命令、状态、录音任务、房间任务、交城任务、搬运；什么时候装更新；与界面之间的协议 |
 | `shell` | `app/src` | Tauri 外壳：两个窗口、对话框插件；应用自己的更新：看、下、装、重启 |
 | `ui` | `ui/src` | 主窗口、字幕窗、观看页（同一个入口，按 `body` 上的标记分） |
 | `server` | `server/src` | 授予、取钥与认领的账本、登录中继、房间 |

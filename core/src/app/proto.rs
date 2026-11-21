@@ -2,10 +2,10 @@
 //! live captions, sent as they come; commands, going the other way. The interface holds
 //! nothing of its own but what is being typed. The TypeScript is written by `cargo test`.
 
-pub use crate::audio::Device;
-use crate::city::{Calendar, Filing};
-use crate::glossary::Term;
-use crate::shelf::Said;
+pub use crate::capture::audio::Device;
+use crate::knowledge::glossary::Term;
+use crate::out::city::{Calendar, Filing};
+use crate::record::shelf::Said;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;

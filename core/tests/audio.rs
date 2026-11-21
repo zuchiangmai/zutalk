@@ -40,12 +40,12 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use zutalk_core::audio::{
+use zutalk_core::capture::audio::{
     Capture, Feed, Keep, Notice, Open, Pump, Resampler, STALL_MS, Source, Turner, ZERO_RUN_MS,
     devices, mix, offer, zero_run,
 };
-use zutalk_core::clock::{BLOCK, Block, Gap, GapPolicy, wall_clock_policy};
-use zutalk_core::supervise::End;
+use zutalk_core::capture::clock::{BLOCK, Block, Gap, GapPolicy, wall_clock_policy};
+use zutalk_core::rt::supervise::End;
 
 /// Round numbers: a tenth of a second of lag is jitter, more is a hole to fill, and a
 /// minute means the computer was asleep.

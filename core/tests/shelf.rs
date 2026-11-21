@@ -3,8 +3,10 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use zu::{Pack, SecretKey};
-use zutalk_core::lines::Line;
-use zutalk_core::shelf::{About, LINE, NOTE, RECORDING, SHARE, SPEAKER, Said, Share, Shelf, Words};
+use zutalk_core::live::lines::Line;
+use zutalk_core::record::shelf::{
+    About, LINE, NOTE, RECORDING, SHARE, SPEAKER, Said, Share, Shelf, Words,
+};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const ID: &str = "kx7q2m5v4tbn3hpw";

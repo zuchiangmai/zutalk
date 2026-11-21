@@ -3,13 +3,13 @@ mod hub;
 use hub::{App, Asked, STORE, config, shelf, signed_in, soniox, tape, wav};
 use std::fs;
 use std::path::Path;
-use zutalk_core::clock::{BLOCK, Block, wall_ms};
-use zutalk_core::lines::Line;
-use zutalk_core::proto::{Command, Row, Setup, State};
-use zutalk_core::retain::goes;
-use zutalk_core::shelf::{About, LINE, RECORDING, Said};
-use zutalk_core::tape::{self as tapes, Pass, Writer};
-use zutalk_core::write::Journal;
+use zutalk_core::ai::write::Journal;
+use zutalk_core::app::proto::{Command, Row, Setup, State};
+use zutalk_core::capture::clock::{BLOCK, Block, wall_ms};
+use zutalk_core::capture::tape::{self as tapes, Pass, Writer};
+use zutalk_core::live::lines::Line;
+use zutalk_core::record::retain::goes;
+use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
 
 const DAY: i64 = 86_400_000;
 const NOW: i64 = 1_800_000_000_000;
@@ -160,8 +160,10 @@ async fn once_the_record_is_written_audio_kept_only_until_then_goes() {
     let (dir, asked) = (tempfile::tempdir().expect("a folder"), Asked::default());
     let stt = soniox(&asked).await;
     let data = dir.path();
-    let mut app =
-        App::with(zutalk_core::app::Config { soniox: format!("{}/v1", stt.uri()), ..config(data) });
+    let mut app = App::with(zutalk_core::app::hub::Config {
+        soniox: format!("{}/v1", stt.uri()),
+        ..config(data)
+    });
     let setup = Setup { spoken: vec!["en".into()], keep: Some(0), ..Setup::default() };
     app.send(Command::Setup { setup });
     let file = data.join("Planning.wav");

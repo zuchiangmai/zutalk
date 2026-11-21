@@ -12,15 +12,15 @@ use tokio::time::timeout;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
-use zutalk_core::app::{Config, Core};
-use zutalk_core::audio::{Capture, Feed, Keep, Notice, Open, Source, offer};
-use zutalk_core::clock::{BLOCK, Block, Gap, wall_ms};
-use zutalk_core::keys;
-use zutalk_core::proto::{Command, Event, State};
-use zutalk_core::shelf::Shelf;
-use zutalk_core::supervise::End;
-use zutalk_core::tape;
-use zutalk_core::write::wav_header;
+use zutalk_core::ai::write::wav_header;
+use zutalk_core::app::hub::{Config, Core};
+use zutalk_core::app::proto::{Command, Event, State};
+use zutalk_core::capture::audio::{Capture, Feed, Keep, Notice, Open, Source, offer};
+use zutalk_core::capture::clock::{BLOCK, Block, Gap, wall_ms};
+use zutalk_core::capture::tape;
+use zutalk_core::id::keys;
+use zutalk_core::record::shelf::Shelf;
+use zutalk_core::rt::supervise::End;
 
 pub const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 /// Nothing listens here: every service is out of reach.

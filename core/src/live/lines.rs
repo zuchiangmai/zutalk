@@ -1,7 +1,7 @@
 //! Speech-recognition tokens become lines. The same rules run on the live stream and, after
 //! the session, on the whole-session transcription. Values in, values out: no IO, no clock.
 
-use crate::lang::{self, Script, profile};
+use crate::live::lang::{self, Script, profile};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;

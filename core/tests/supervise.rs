@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
-use zutalk_core::supervise::{End, Part, supervise};
+use zutalk_core::rt::supervise::{End, Part, supervise};
 
 /// A part that runs for a while and then ends the way the script says.
 struct Scripted {

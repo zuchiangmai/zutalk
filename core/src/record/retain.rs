@@ -3,8 +3,8 @@
 //! record is written from it, unless they destroy it themselves. The rule is a function of
 //! values; the sweep applies it at start-up and after each transcript is written.
 
-use crate::proto::{Row, State};
-use crate::tape;
+use crate::app::proto::{Row, State};
+use crate::capture::tape;
 use std::path::Path;
 
 const DAY_MS: i64 = 86_400_000;

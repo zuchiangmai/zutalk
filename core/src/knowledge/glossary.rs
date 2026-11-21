@@ -2,9 +2,9 @@
 //! in the record. Each term is one of the person's records, kept apart from the recordings: it
 //! is what they know, so it goes where they go, and nobody else signed in here reads it.
 
-use crate::lang::profile;
-use crate::live::{Setup, Stream};
-use crate::shelf::{Shelf, TERM};
+use crate::live::lane::{Setup, Stream};
+use crate::live::lang::profile;
+use crate::record::shelf::{Shelf, TERM};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

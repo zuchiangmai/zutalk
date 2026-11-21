@@ -60,3 +60,23 @@ pub async fn supervise<P: Part>(
         sleep(Duration::from_millis(backoff.next(started.elapsed().as_millis() as u64))).await;
     }
 }
+
+/// A transcript that could not be written, for a reason that may pass, is tried again: first
+/// after this, then ever more patiently, up to an hour.
+pub const AGAIN: Duration = Duration::from_secs(60);
+
+/// Tries until it ends one way or the other: after a failure that may pass, again after
+/// `AGAIN`, then ever more patiently, up to an hour.
+pub async fn again<T, F>(mut attempt: impl FnMut() -> F) -> Result<T, End>
+where
+    F: Future<Output = Result<T, End>>,
+{
+    let mut wait = AGAIN;
+    loop {
+        match attempt().await {
+            Err(End::Retry(_)) => tokio::time::sleep(wait).await,
+            done => return done,
+        }
+        wait = (wait * 2).min(Duration::from_secs(3600));
+    }
+}

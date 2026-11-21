@@ -315,7 +315,8 @@ core/src/
   capture/              L0–L2
     audio.rs  audio/file.rs  clock.rs  tape.rs（加写盘线程）
   live/                 L1
-    live.rs  lines.rs  lang.rs  frame.rs（由现在的 View 搬来，输出 Frame）
+    lane.rs  lines.rs  lang.rs  frame.rs（由现在的 View 搬来，输出 Frame）
+                        lane.rs 是原来的 live.rs：不叫 live/live.rs，因为 clippy 的 module_inception
   record/               事实
     shelf.rs  notes.rs  takes.rs  retain.rs  migrate.rs
   knowledge/

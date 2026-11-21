@@ -3,9 +3,9 @@
 //! and a slot for the latest one. Each frame is sealed here with the room's key, which travels
 //! only after `#` in a link or a QR code: the server keeps ciphertext.
 
-use crate::keys::{Ours, random};
-use crate::proto::Open;
-use crate::supervise::End;
+use crate::app::proto::Open;
+use crate::id::keys::{Ours, random};
+use crate::rt::supervise::End;
 use aes_gcm::{Aes256Gcm, aead::Aead, aead::KeyInit};
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD, Engine};
 use serde_json::json;

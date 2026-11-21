@@ -9,8 +9,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
-use zutalk_core::app::{Clip, Config, Core, Install};
-use zutalk_core::{keys, proto::Command, proto::Event};
+use zutalk_core::app::hub::{Clip, Config, Core, Install};
+use zutalk_core::app::proto::{Command, Event};
+use zutalk_core::id::keys;
 
 /// The windows listening, and the last state: a window that opens late is sent it first.
 type Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>;

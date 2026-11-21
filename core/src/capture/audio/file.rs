@@ -2,8 +2,8 @@
 //! no wall clock here; a block's position is the count of samples.
 
 use super::{Msg, Notice, Resampler, TICK};
-use crate::clock::{BLOCK, Block, Clock, Gap};
-use crate::supervise::End;
+use crate::capture::clock::{BLOCK, Block, Clock, Gap};
+use crate::rt::supervise::End;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;

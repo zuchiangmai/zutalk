@@ -5,7 +5,7 @@
 //! position is just offset. Nothing can be reordered or spliced in, and a crash can only
 //! leave a short tail on the file that was being written.
 
-use crate::clock::{BLOCK, Block};
+use crate::capture::clock::{BLOCK, Block};
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
 use std::fs::{self, File, OpenOptions};

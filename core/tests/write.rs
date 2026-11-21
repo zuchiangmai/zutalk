@@ -6,16 +6,16 @@ use std::time::Duration;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
-use zutalk_core::clock::{BLOCK, Block};
-use zutalk_core::keys::{Keys, Lease, Secret, Service};
-use zutalk_core::lines::{Line, Token};
-use zutalk_core::shelf::{About, RECORDING, Said, Shelf};
-use zutalk_core::supervise::End;
-use zutalk_core::tape::Writer;
-use zutalk_core::write::{
+use zutalk_core::ai::write::{
     Answer, Draft, GUARDS, Journal, MODELS, Plan, answers, ends, judge, lines, numbers, request,
     status, sweep, tokens, transcription, wav_header, write,
 };
+use zutalk_core::capture::clock::{BLOCK, Block};
+use zutalk_core::capture::tape::Writer;
+use zutalk_core::id::keys::{Keys, Lease, Secret, Service};
+use zutalk_core::live::lines::{Line, Token};
+use zutalk_core::record::shelf::{About, RECORDING, Said, Shelf};
+use zutalk_core::rt::supervise::End;
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const ID: &str = "kx7q2m5v4tbn3hpw";
@@ -325,7 +325,7 @@ fn draft<'a>(
     Draft { line, into, text, facts, terms: &plan.terms }
 }
 
-fn guard(name: &str) -> zutalk_core::write::Guard {
+fn guard(name: &str) -> zutalk_core::ai::write::Guard {
     GUARDS.iter().find(|(n, _)| *n == name).unwrap().1
 }
 
@@ -647,7 +647,7 @@ async fn asked(server: &MockServer) -> Vec<Value> {
     requests.iter().map(|r| r.body_json().unwrap()).collect()
 }
 
-fn read(recording: &Recording) -> zutalk_core::shelf::Recording {
+fn read(recording: &Recording) -> zutalk_core::record::shelf::Recording {
     recording.shelf.read(ID).unwrap().unwrap()
 }
 

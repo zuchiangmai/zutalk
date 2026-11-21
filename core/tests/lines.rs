@@ -1,4 +1,4 @@
-use zutalk_core::lines::{Assembler, Boundary, Line, Token};
+use zutalk_core::live::lines::{Assembler, Boundary, Line, Token};
 
 /// A settled word, as the service sends it.
 fn said(text: &str, language: &str, speaker: &str, start_ms: u32, end_ms: u32) -> Token {

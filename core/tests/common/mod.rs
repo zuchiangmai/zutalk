@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use wiremock::MockServer;
 use zu::{Cid, Codec, Doc, SecretKey, Value};
-use zutalk_core::room;
+use zutalk_core::out::room;
 use zutalk_server::{BoxFuture, Config, Directory, Invites, Minted, Refusal, Server, Upstream};
 
 /// `did:zu:made-up-n` has the key `[n; 32]`; any other DID has the key `[5; 32]`.

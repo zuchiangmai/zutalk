@@ -6,14 +6,13 @@
 //! said no, its audio as files; never its note. No request needs another proof: records are
 //! signed, and a file is taken only when a record names it.
 
-use crate::app::again;
-use crate::clock::wall_ms;
-use crate::keys::{self, Me};
-use crate::proto::Writing;
-use crate::shelf::{FILING, LINE, RECORDING, Recording, SPEAKER, Shelf};
-use crate::supervise::End;
-use crate::tape::{self, Pass};
-use crate::write::wav_header;
+use crate::ai::write::wav_header;
+use crate::app::proto::Writing;
+use crate::capture::clock::wall_ms;
+use crate::capture::tape::{self, Pass};
+use crate::id::keys::{self, Me};
+use crate::record::shelf::{FILING, LINE, RECORDING, Recording, SPEAKER, Shelf};
+use crate::rt::supervise::{End, again};
 use reqwest::{Client, Response, StatusCode, header::CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};

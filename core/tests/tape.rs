@@ -1,6 +1,6 @@
 use std::fs;
-use zutalk_core::clock::{BLOCK, Block};
-use zutalk_core::tape::{Pass, Writer, read, recover};
+use zutalk_core::capture::clock::{BLOCK, Block};
+use zutalk_core::capture::tape::{Pass, Writer, read, recover};
 
 const KEY: [u8; 32] = [7; 32];
 

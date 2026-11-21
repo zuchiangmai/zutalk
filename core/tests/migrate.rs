@@ -8,11 +8,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Once};
 use zu::{Pack, SecretKey};
-use zutalk_core::keys;
-use zutalk_core::migrate::{self, Handed};
-use zutalk_core::proto::Writing;
-use zutalk_core::shelf::{About, LINE, RECORDING, Shelf};
-use zutalk_core::tape::{self, Pass};
+use zutalk_core::app::proto::Writing;
+use zutalk_core::capture::tape::{self, Pass};
+use zutalk_core::id::keys;
+use zutalk_core::record::migrate::{self, Handed};
+use zutalk_core::record::shelf::{About, LINE, RECORDING, Shelf};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const SOMEONE: &str = "did:zu:qq7hq3xbd2lvf5jy6tkmzbxe";
