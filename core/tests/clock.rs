@@ -71,12 +71,18 @@ fn the_policy_can_end_the_recording() {
     assert_eq!(out.len(), 1);
 }
 
-/// The contract any real policy has to meet. Remove `#[ignore]` once it is written.
+/// Provisional decision 3: up to 300 ms is jitter, up to a minute is a hole filled with
+/// silence, more is a computer that was asleep.
 #[test]
-#[ignore = "wall_clock_policy is waiting for its owner"]
-fn the_real_policy_keeps_jitter_pads_stalls_and_ends_after_sleep() {
-    assert_eq!(wall_clock_policy(0), Gap::Keep);
-    assert_eq!(wall_clock_policy(20), Gap::Keep);
-    assert!(matches!(wall_clock_policy(2_000), Gap::Pad(ms) if (1_500..=2_000).contains(&ms)));
-    assert_eq!(wall_clock_policy(10 * 60_000), Gap::End);
+fn the_app_keeps_jitter_pads_a_hole_and_ends_after_a_minute_asleep() {
+    let table = [
+        (0, Gap::Keep),
+        (300, Gap::Keep),
+        (301, Gap::Pad(301)),
+        (60_000, Gap::Pad(60_000)),
+        (60_001, Gap::End),
+    ];
+    for (behind_ms, gap) in table {
+        assert_eq!(wall_clock_policy(behind_ms), gap, "{behind_ms} ms behind");
+    }
 }

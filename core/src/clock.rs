@@ -33,11 +33,23 @@ pub fn wall_ms() -> u64 {
 /// Decides what a lag of `behind_ms` means. A plain function, so tests can bring their own.
 pub type GapPolicy = fn(behind_ms: u64) -> Gap;
 
+/// Up to this much lag is a source delivering in bursts, and is left alone. The price: with a
+/// second source that is quiet (a loopback while nothing plays), the mix waits this long, plus
+/// up to a block, before it is padded. Provisional decision 3 in `docs/build/DECISIONS.md`.
+pub const JITTER_MS: u64 = 300;
+/// More lag than this means the process was not running, most likely a closed lid: the
+/// recording ends rather than fill the time with silence. Provisional decision 3.
+pub const ASLEEP_MS: u64 = 60_000;
+
 /// The policy the app records with.
 pub fn wall_clock_policy(behind_ms: u64) -> Gap {
-    // TODO(human): decide what a lag of `behind_ms` means — Keep, Pad(ms) or End.
-    let _ = behind_ms;
-    todo!("the gap policy is the owner's call")
+    if behind_ms <= JITTER_MS {
+        Gap::Keep
+    } else if behind_ms <= ASLEEP_MS {
+        Gap::Pad(behind_ms as u32)
+    } else {
+        Gap::End
+    }
 }
 
 pub struct Clock {

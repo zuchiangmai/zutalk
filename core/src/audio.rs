@@ -394,6 +394,78 @@ fn held(
     }
 }
 
+/// The pump's work, one turn at a time. `Capture::with` turns it on a thread of its own every
+/// `TICK`; a test turns it by hand, so the clock it moves and the pump that reads it never race.
+pub struct Turner {
+    pump: Pump,
+    rx: mpsc::Receiver<Msg>,
+    enders: Vec<Option<mpsc::Sender<End>>>,
+    sink: Box<dyn FnMut(Block) + Send>,
+    notice: Box<dyn FnMut(Notice) + Send>,
+    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    over: Arc<AtomicBool>,
+    attached: usize,
+    blocks: Vec<Block>,
+    rebuild: Vec<(usize, &'static str)>,
+}
+
+impl Turner {
+    /// Takes the news that has come (waiting up to `wait` for the first), steps the pump at
+    /// the clock's time, and delivers what is whole. `false`: it has stopped.
+    pub fn turn(&mut self, wait: Duration) -> bool {
+        if self.over.load(Relaxed) {
+            return false;
+        }
+        let mut stop = false;
+        // All news first, in order: what was whole at a stop is still delivered.
+        let first = match self.rx.recv_timeout(wait) {
+            Ok(msg) => Some(msg),
+            Err(RecvTimeoutError::Timeout) => None,
+            // Only after a `Stop`, which the `Capture` sends before it lets go of its sender.
+            Err(RecvTimeoutError::Disconnected) => Some(Msg::Stop),
+        };
+        for msg in first.into_iter().chain(self.rx.try_iter()) {
+            match msg {
+                Msg::Feed(i, feed, ender) => {
+                    self.pump.attach(i, *feed, (self.now_ms)());
+                    self.enders[i] = Some(ender);
+                    self.attached += 1;
+                }
+                Msg::Notice(heard) => (self.notice)(heard),
+                Msg::Pause(paused, at) => self.pump.pause(paused, at),
+                Msg::Stop => stop = true,
+            }
+        }
+        let alive = self.pump.step((self.now_ms)(), &mut self.blocks, &mut self.rebuild);
+        self.blocks.drain(..).for_each(&mut self.sink);
+        for (i, why) in self.rebuild.drain(..) {
+            if let Some(ender) = self.enders[i].take() {
+                let _ = ender.send(End::Retry(why));
+            }
+        }
+        if !alive {
+            (self.notice)(Notice::Ended);
+            stop = true;
+        }
+        if stop {
+            self.over.store(true, Relaxed);
+        }
+        !stop
+    }
+
+    /// How many devices have been handed to the pump so far.
+    pub fn attached(&self) -> usize {
+        self.attached
+    }
+}
+
+/// A turner let go of is a pump that is over, stopped or not: the sources' threads end.
+impl Drop for Turner {
+    fn drop(&mut self) {
+        self.over.store(true, Relaxed);
+    }
+}
+
 /// A running capture: the pump, or the file's reader. Dropped, it delivers what is whole and
 /// joins that one thread; the sources' threads let their devices go on their own.
 pub struct Capture {
@@ -425,52 +497,48 @@ impl Capture {
         Ok(Self::with(opens, policy, wall_ms, sink, notice))
     }
 
-    /// The same capture over any sources and any clock: how the tests drive it.
+    /// The same capture over any sources and any clock, its pump turned on a thread of its own.
     pub fn with(
         opens: Vec<Open>,
         policy: GapPolicy,
         now_ms: impl Fn() -> u64 + Send + Sync + 'static,
-        mut sink: impl FnMut(Block) + Send + 'static,
-        mut notice: impl FnMut(Notice) + Send + 'static,
+        sink: impl FnMut(Block) + Send + 'static,
+        notice: impl FnMut(Notice) + Send + 'static,
     ) -> Capture {
-        let (now_ms, over, (tx, rx)) =
-            (Arc::new(now_ms), Arc::new(AtomicBool::new(false)), mpsc::channel());
-        let (mut pump, mut enders) = (Pump::new(opens.len(), policy), vec![None; opens.len()]);
+        let (mut capture, mut turner) = Self::by_hand(opens, policy, now_ms, sink, notice);
+        capture.thread = Some(thread::spawn(move || while turner.turn(TICK) {}));
+        capture
+    }
+
+    /// The same capture, with no pump thread: whoever holds the `Turner` turns it. Dropped,
+    /// the capture only says `Stop`; the next turn takes it and returns `false`.
+    pub fn by_hand(
+        opens: Vec<Open>,
+        policy: GapPolicy,
+        now_ms: impl Fn() -> u64 + Send + Sync + 'static,
+        sink: impl FnMut(Block) + Send + 'static,
+        notice: impl FnMut(Notice) + Send + 'static,
+    ) -> (Capture, Turner) {
+        let now_ms: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(now_ms);
+        let (over, (tx, rx)) = (Arc::new(AtomicBool::new(false)), mpsc::channel());
+        let (pump, enders) = (Pump::new(opens.len(), policy), vec![None; opens.len()]);
         for (i, open) in opens.into_iter().enumerate() {
             let (now_ms, tx, over) = (now_ms.clone(), tx.clone(), over.clone());
             thread::spawn(move || hold(i, open, &*now_ms, &tx, &over));
         }
-        let theirs = now_ms.clone();
-        let thread = thread::spawn(move || {
-            let (mut blocks, mut rebuild, mut stop) = (Vec::new(), Vec::new(), false);
-            while !stop {
-                // All news first, in order: what was whole at a stop is still delivered.
-                for msg in rx.recv_timeout(TICK).into_iter().chain(rx.try_iter()) {
-                    match msg {
-                        Msg::Feed(i, feed, ender) => {
-                            pump.attach(i, *feed, theirs());
-                            enders[i] = Some(ender);
-                        }
-                        Msg::Notice(heard) => notice(heard),
-                        Msg::Pause(paused, at) => pump.pause(paused, at),
-                        Msg::Stop => stop = true,
-                    }
-                }
-                let alive = pump.step(theirs(), &mut blocks, &mut rebuild);
-                blocks.drain(..).for_each(&mut sink);
-                for (i, why) in rebuild.drain(..) {
-                    if let Some(ender) = enders[i].take() {
-                        let _ = ender.send(End::Retry(why));
-                    }
-                }
-                if !alive {
-                    notice(Notice::Ended);
-                    stop = true;
-                }
-            }
-            over.store(true, Relaxed);
-        });
-        Capture { tx, now_ms, thread: Some(thread) }
+        let turner = Turner {
+            pump,
+            rx,
+            enders,
+            sink: Box::new(sink),
+            notice: Box::new(notice),
+            now_ms: now_ms.clone(),
+            over,
+            attached: 0,
+            blocks: Vec::new(),
+            rebuild: Vec::new(),
+        };
+        (Capture { tx, now_ms, thread: None }, turner)
     }
 
     /// Paused, the sources stay open, nothing is delivered, and the clock stands from now.

@@ -41,10 +41,10 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use zutalk_core::audio::{
-    Capture, Feed, Keep, Notice, Open, Pump, Resampler, STALL_MS, Source, ZERO_RUN_MS, devices,
-    mix, offer, zero_run,
+    Capture, Feed, Keep, Notice, Open, Pump, Resampler, STALL_MS, Source, Turner, ZERO_RUN_MS,
+    devices, mix, offer, zero_run,
 };
-use zutalk_core::clock::{BLOCK, Block, Gap};
+use zutalk_core::clock::{BLOCK, Block, Gap, GapPolicy, wall_clock_policy};
 use zutalk_core::supervise::End;
 
 /// Round numbers: a tenth of a second of lag is jitter, more is a hole to fill, and a
@@ -85,17 +85,24 @@ impl Tone {
     }
 }
 
-/// The pump under a scripted clock that advances 20 ms a step, like the real thread.
+/// The pump under a scripted clock that advances 20 ms a step, like the real thread. `at`
+/// holds the time each block in `out` was delivered.
 struct Script {
     pump: Pump,
     now: u64,
     out: Vec<Block>,
+    at: Vec<u64>,
     rebuild: Vec<(usize, &'static str)>,
 }
 
 impl Script {
     fn new(inputs: usize) -> Self {
-        Script { pump: Pump::new(inputs, policy), now: 50_000, out: vec![], rebuild: vec![] }
+        Script::with(inputs, policy)
+    }
+
+    fn with(inputs: usize, policy: GapPolicy) -> Self {
+        let pump = Pump::new(inputs, policy);
+        Script { pump, now: 50_000, out: vec![], at: vec![], rebuild: vec![] }
     }
 
     /// Lets `ms` pass. `each` runs before every step: that is where sources deliver.
@@ -104,6 +111,7 @@ impl Script {
             self.now += 20;
             each(step);
             assert!(self.pump.step(self.now, &mut self.out, &mut self.rebuild));
+            self.at.resize(self.out.len(), self.now);
         }
     }
 }
@@ -250,6 +258,28 @@ fn two_sources_are_mixed_and_one_that_stalls_becomes_silence_in_the_mix() {
     let level = |n: usize| script.out[n].pcm[BLOCK / 2];
     assert_eq!(level(5), 8_192 + 4_096);
     assert_eq!(level(25), 8_192);
+    assert!(script.rebuild.is_empty());
+}
+
+#[test]
+fn with_the_app_policy_a_quiet_source_holds_the_mix_back_under_half_a_second() {
+    // The microphone speaks; the computer plays nothing, and its loopback sends nothing. Lag
+    // up to 300 ms is jitter and is not padded, so the mix waits for the quiet source until
+    // its clock pads it. This is what that costs, for the owner to see.
+    let mut script = Script::with(2, wall_clock_policy);
+    let (mut mic, feed) = Tone::open(16_000, 1);
+    script.pump.attach(0, feed, script.now);
+    let (_system, mut feed) = Tone::open(16_000, 2);
+    feed.steady = false;
+    script.pump.attach(1, feed, script.now);
+    let origin = script.now; // the first 20 ms of sound end at the first step
+    script.run(10_000, |_| mic.play(20));
+    unbroken(&script.out);
+    assert!(script.out.len() >= 95, "{} blocks in 10 s", script.out.len());
+    let late = |(block, at): (&Block, &u64)| at - (origin + block.t_ms as u64 + 100);
+    let latest = script.out.iter().zip(&script.at).map(late).max().unwrap_or(0);
+    assert!(latest <= 450, "a block came {latest} ms after it ended");
+    assert!(script.out[1..].iter().all(tuned));
     assert!(script.rebuild.is_empty());
 }
 
@@ -528,15 +558,18 @@ fn he_aac_behind_a_plain_configuration_keeps_its_speed() {
     assert!((435..=445).contains(&pitch(&blocks[5].pcm)), "the tone is at the wrong speed");
 }
 
-// ---- The capture: threads and notices, on a clock the test moves by hand ----
+// ---- The capture: threads and notices, on a clock the test moves and a pump it turns ----
 //
-// Time is the capture's clock port, moved by the test, and a device is a ring the test fills.
-// What a test checks does not depend on how busy the machine is: real time only bounds how
-// long a test waits for a thread to answer.
+// Time is the capture's clock port, moved by the test; a device is a ring the test fills; and
+// the test turns the pump itself, so the clock and the pump take turns and never race. What a
+// test checks does not depend on how threads are scheduled: real time only bounds how long a
+// test waits for a source's thread to answer, and while it waits the clock stands still.
 
 /// How long a thread may take to answer before the test says it never did.
 const WAIT: Duration = Duration::from_secs(5);
 const START: u64 = 50_000;
+/// Room in the test's channels for anything a test here delivers: a sink never blocks.
+const ROOM: usize = 4_096;
 
 /// A device as the test holds it: the ring it fills, and how it says it broke.
 struct Played {
@@ -545,7 +578,7 @@ struct Played {
 }
 
 /// A microphone at 16 kHz the test plays: each time it is opened, it is handed over.
-fn device(opened: &mpsc::Sender<Played>) -> Open {
+fn device(opened: &mpsc::SyncSender<Played>) -> Open {
     let opened = opened.clone();
     Box::new(move |ender| {
         let (ring, feed) = Feed::new(16_000, 1)?;
@@ -554,141 +587,178 @@ fn device(opened: &mpsc::Sender<Played>) -> Open {
     })
 }
 
-/// A capture under test, and what it delivered: each block with the time it came at.
+/// A capture under test with its pump in the test's hand, and what it delivered: each block
+/// with the time it came at.
 struct Run {
     capture: Capture,
+    turner: Turner,
     clock: Arc<AtomicU64>,
     blocks: mpsc::Receiver<(Block, u64)>,
     heard: Vec<(Block, u64)>,
     notices: mpsc::Receiver<Notice>,
+    devices: usize, // handed over to the test so far
 }
 
 impl Run {
     fn start(opens: Vec<Open>) -> Run {
-        let ((blocks, heard), (notices, told)) = (mpsc::channel(), mpsc::channel());
+        let ((blocks, heard), (notices, told)) =
+            (mpsc::sync_channel(ROOM), mpsc::sync_channel(ROOM));
         let clock = Arc::new(AtomicU64::new(START));
         let (theirs, stamp) = (clock.clone(), clock.clone());
-        let capture = Capture::with(
+        let (capture, turner) = Capture::by_hand(
             opens,
             policy,
             move || theirs.load(SeqCst),
-            move |block| _ = blocks.send((block, stamp.load(SeqCst))),
-            move |notice| _ = notices.send(notice),
+            move |block| blocks.try_send((block, stamp.load(SeqCst))).expect("no room for a block"),
+            move |notice| notices.try_send(notice).expect("no room for a notice"),
         );
-        Run { capture, clock, blocks: heard, heard: Vec::new(), notices: told }
+        Run { capture, turner, clock, blocks: heard, heard: Vec::new(), notices: told, devices: 0 }
     }
 
-    fn now(&self) -> u64 {
-        self.clock.load(SeqCst)
+    /// One turn of the pump, waiting up to `wait` for news; what it delivered is kept.
+    fn turn(&mut self, wait: Duration) -> bool {
+        let going = self.turner.turn(wait);
+        self.heard.extend(self.blocks.try_iter());
+        going
     }
 
-    /// Lets `ms` pass, 20 ms at a time, the device (if one is given) playing `level`.
-    fn play(&self, mut device: Option<&mut Played>, ms: u64, level: f32) {
+    /// Lets `ms` pass, 20 ms a step: the device (if one is given) plays `level`, the clock
+    /// moves, the pump turns.
+    fn play(&mut self, mut device: Option<&mut Played>, ms: u64, level: f32) {
         for _ in 0..ms / 20 {
             if let Some(device) = device.as_deref_mut() {
                 offer(&mut device.ring, vec![level; 320].into_iter());
             }
             self.clock.fetch_add(20, SeqCst);
+            assert!(self.turn(Duration::ZERO), "the capture ended");
         }
     }
 
-    /// Waits until `n` blocks have come in all.
-    fn until(&mut self, n: usize) {
-        while self.heard.len() < n {
-            self.heard.push(self.blocks.recv_timeout(WAIT).expect("too few blocks came"));
+    /// Turns the pump, the clock standing still, until `done` has something.
+    fn wait<T>(&mut self, what: &str, mut done: impl FnMut(&mut Run) -> Option<T>) -> T {
+        let waited = Instant::now();
+        loop {
+            if let Some(found) = done(self) {
+                return found;
+            }
+            assert!(waited.elapsed() < WAIT, "{what}");
+            self.turn(Duration::from_millis(1));
         }
     }
 
-    fn notice(&self) -> Notice {
-        self.notices.recv_timeout(WAIT).expect("no notice came")
+    fn notice(&mut self) -> Notice {
+        self.wait("no notice came", |run| run.notices.try_recv().ok())
     }
 
-    /// Stops it, at once. Returns every block it delivered, and the notices not waited for.
-    fn stop(mut self) -> (Vec<(Block, u64)>, Vec<Notice>) {
-        let started = Instant::now();
-        self.capture.stop();
-        assert!(started.elapsed() < Duration::from_secs(1), "the stop was held up");
-        // Stopped means stopped: the one thread is joined, and nothing comes afterwards.
-        self.heard.extend(self.blocks.try_iter());
-        (self.heard, self.notices.try_iter().collect())
+    /// The device once it is opened again, and its feed is in the pump's hands.
+    fn opened(&mut self, rx: &mpsc::Receiver<Played>) -> Played {
+        let played = self.wait("the device was never opened", |_| rx.try_recv().ok());
+        self.devices += 1;
+        self.attached(self.devices);
+        played
     }
-}
 
-fn opened(rx: &mpsc::Receiver<Played>) -> Played {
-    rx.recv_timeout(WAIT).expect("the device was never opened")
+    /// Waits until `n` devices have reached the pump in all.
+    fn attached(&mut self, n: usize) {
+        self.wait("the device never reached the pump", |run| {
+            (run.turner.attached() >= n).then_some(())
+        });
+    }
+
+    /// Stops it: the capture goes, and the next turn is the last. Returns every block it
+    /// delivered, and the notices not waited for.
+    fn stop(self) -> (Vec<(Block, u64)>, Vec<Notice>) {
+        let Run { capture, mut turner, blocks, mut heard, notices, .. } = self;
+        drop(capture);
+        assert!(!turner.turn(Duration::ZERO), "the stop was not taken");
+        heard.extend(blocks.try_iter());
+        // Stopped means stopped: nothing comes afterwards.
+        assert!(!turner.turn(Duration::ZERO));
+        assert!(blocks.try_recv().is_err(), "a block came after the stop");
+        (heard, notices.try_iter().collect())
+    }
 }
 
 fn blocks(heard: Vec<(Block, u64)>) -> Vec<Block> {
     heard.into_iter().map(|(block, _)| block).collect()
 }
 
+/// Gives a source's thread time to do what it must not, the clock standing still.
+fn nothing_from<T>(rx: &mpsc::Receiver<T>) -> bool {
+    rx.recv_timeout(Duration::from_millis(100)).is_err()
+}
+
 #[test]
 fn a_source_that_dies_is_reported_padded_and_opened_again() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(ROOM);
     let mut run = Run::start(vec![device(&tx)]);
-    let mut mic = opened(&rx);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 400, 0.5);
+    assert_eq!(run.heard.len(), 4);
     // Unplugged: it says so, and its ring goes with it.
     _ = mic.ender.send(End::Retry("test.unplugged"));
     drop(mic);
     assert_eq!(run.notice(), Notice::Restarted("test.unplugged"));
     // It is opened again a quarter of a second later, by the capture's clock.
     run.play(None, 240, 0.0);
-    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(), "opened again too soon");
+    assert!(nothing_from(&rx), "opened again too soon");
     run.play(None, 20, 0.0);
-    let mut mic = opened(&rx);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 1_140, 0.5);
-    run.until(17);
     let (heard, notices) = run.stop();
     assert!(notices.is_empty(), "{notices:?}");
     let blocks = blocks(heard);
     unbroken(&blocks);
-    assert!((17..=18).contains(&blocks.len()), "{} blocks in 1.8 s", blocks.len());
+    // 1.8 s, less the 60 ms the clock had not padded yet when the sound came back: under
+    // 100 ms, the policy here keeps that as jitter.
+    assert_eq!(blocks.len(), 17);
     assert!(!blocks[..4].iter().any(silent), "no sound before it died");
     assert!(blocks[4..6].iter().all(silent), "the hole was not padded");
-    assert!(!blocks[7..].iter().any(silent), "the sound never came back");
+    assert!(!blocks[6..].iter().any(silent), "the sound never came back");
 }
 
 #[test]
 fn a_stall_the_pump_hears_ends_the_device_on_its_own_thread() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(ROOM);
     let mut run = Run::start(vec![device(&tx)]);
-    let mut mic = opened(&rx);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 1_000, 0.5);
-    run.until(10);
-    // The stream stays open, but nothing comes any more: the pump's verdict goes to the
-    // source's thread, which lets the device go and opens it again.
-    run.play(None, STALL_MS + 100, 0.0);
-    let mut mic = loop {
-        if let Ok(played) = rx.recv_timeout(Duration::from_millis(20)) {
-            break played;
-        }
-        run.play(None, 20, 0.0);
-        assert!(run.now() < START + 20_000, "never opened again");
-    };
+    assert_eq!(run.heard.len(), 10);
+    // The stream stays open, but nothing comes any more: the pump's verdict, five seconds
+    // after the last sound, goes to the source's thread, which lets the device go and opens
+    // it again a quarter of a second later.
+    run.play(None, STALL_MS, 0.0);
     assert_eq!(run.notice(), Notice::Restarted("audio.stalled"));
-    let before = (run.now() - START) as usize / 100;
+    run.play(None, 240, 0.0);
+    assert!(nothing_from(&rx), "opened again too soon");
+    run.play(None, 20, 0.0);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 1_000, 0.5);
-    run.until(before + 9);
-    let blocks = blocks(run.stop().0);
-    unbroken(&blocks);
-    assert!(blocks[blocks.len() - 5..].iter().all(|b| !silent(b)), "the sound never came back");
-}
-
-#[test]
-fn a_source_that_cannot_be_opened_is_fatal_and_the_other_one_carries_on() {
-    let (tx, rx) = mpsc::channel();
-    let denied: Open = Box::new(|_| Err(End::Fatal("test.denied")));
-    let mut run = Run::start(vec![device(&tx), denied]);
-    let mut mic = opened(&rx);
-    assert_eq!(run.notice(), Notice::Fatal("test.denied"));
-    // Both: the microphone is recorded, mixed with the silence of the source that is not there.
-    run.play(Some(&mut mic), 700, 0.5);
-    run.until(5);
     let (heard, notices) = run.stop();
     assert!(notices.is_empty(), "{notices:?}");
     let blocks = blocks(heard);
     unbroken(&blocks);
+    // 7.26 s, less the 60 ms of jitter, as above.
+    assert_eq!(blocks.len(), 72);
+    assert!(!blocks[..10].iter().any(silent), "no sound before it stalled");
+    assert!(blocks[10..62].iter().all(silent), "the stall was not padded");
+    assert!(!blocks[62..].iter().any(silent), "the sound never came back");
+}
+
+#[test]
+fn a_source_that_cannot_be_opened_is_fatal_and_the_other_one_carries_on() {
+    let (tx, rx) = mpsc::sync_channel(ROOM);
+    let denied: Open = Box::new(|_| Err(End::Fatal("test.denied")));
+    let mut run = Run::start(vec![device(&tx), denied]);
+    let mut mic = run.opened(&rx);
+    assert_eq!(run.notice(), Notice::Fatal("test.denied"));
+    // Both: the microphone is recorded, mixed with the silence of the source that is not there.
+    run.play(Some(&mut mic), 700, 0.5);
+    let (heard, notices) = run.stop();
+    assert!(notices.is_empty(), "{notices:?}");
+    let blocks = blocks(heard);
+    unbroken(&blocks);
+    assert_eq!(blocks.len(), 7);
     assert!(!blocks.iter().any(silent));
 }
 
@@ -704,39 +774,36 @@ fn a_device_that_is_no_longer_the_right_one_is_opened_again() {
         let looks = theirs.clone();
         Ok((feed, Box::new(move || (looks.fetch_add(1, SeqCst) == 1).then_some("test.moved"))))
     });
-    let at_least = |count: &AtomicUsize, n: usize| {
-        let waited = Instant::now();
-        while count.load(SeqCst) < n {
-            assert!(waited.elapsed() < WAIT, "still {} of {n}", count.load(SeqCst));
-            thread::sleep(Duration::from_millis(1));
-        }
-    };
-    let run = Run::start(vec![open]);
-    at_least(&opens, 1);
+    let mut run = Run::start(vec![open]);
+    run.attached(1);
     run.play(None, 980, 0.0);
     thread::sleep(Duration::from_millis(100));
     assert_eq!(looks.load(SeqCst), 0, "asked before a second was up");
     run.play(None, 20, 0.0);
-    at_least(&looks, 1);
+    run.wait("it was never asked", |_| (looks.load(SeqCst) == 1).then_some(()));
     run.play(None, 1_000, 0.0);
     assert_eq!(run.notice(), Notice::Restarted("test.moved"));
-    run.play(None, 260, 0.0);
-    at_least(&opens, 2);
+    run.play(None, 240, 0.0);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(opens.load(SeqCst), 1, "opened again too soon");
+    run.play(None, 20, 0.0);
+    run.attached(2);
+    assert_eq!((opens.load(SeqCst), looks.load(SeqCst)), (2, 2));
     assert!(run.stop().1.is_empty());
 }
 
 #[test]
 fn paused_the_clock_stands_still_and_resumed_it_goes_on() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(ROOM);
     let mut run = Run::start(vec![device(&tx)]);
-    let mut mic = opened(&rx);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 300, 0.5);
-    run.until(3);
+    assert_eq!(run.heard.len(), 3);
     run.capture.pause();
     run.play(None, 600, 0.0);
+    assert_eq!(run.heard.len(), 3, "blocks were delivered while paused");
     run.capture.resume();
     run.play(Some(&mut mic), 400, 0.5);
-    run.until(7);
     let heard = run.stop().0;
     // Had the clock run on, the pause would be six blocks of silence in the middle.
     assert!(heard.iter().all(|(_, at)| !(START + 301..START + 900).contains(at)));
@@ -748,15 +815,18 @@ fn paused_the_clock_stands_still_and_resumed_it_goes_on() {
 
 #[test]
 fn a_closed_lid_ends_the_capture_out_loud() {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(ROOM);
     let mut run = Run::start(vec![device(&tx)]);
-    let mut mic = opened(&rx);
+    let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 300, 0.5);
-    run.until(3);
-    // Two minutes asleep: the gap policy ends it, and says so.
-    run.play(None, 120_000, 0.0);
+    assert_eq!(run.heard.len(), 3);
+    // Two minutes asleep: the clock jumps while nothing runs, then the pump turns once. The
+    // gap policy ends it, and says so.
+    run.clock.fetch_add(120_000, SeqCst);
+    assert!(!run.turn(Duration::ZERO), "it slept through");
     assert_eq!(run.notice(), Notice::Ended);
-    let (heard, _) = run.stop();
+    let (heard, notices) = run.stop();
+    assert!(notices.is_empty(), "{notices:?}");
     assert_eq!(heard.len(), 3, "the time asleep was delivered");
 }
 
@@ -764,14 +834,14 @@ fn a_closed_lid_ends_the_capture_out_loud() {
 fn a_device_that_hangs_in_the_system_holds_up_nothing() {
     // Closing a CoreAudio tap or a WASAPI loopback has hung before. Here one device never
     // finishes closing and another never finishes opening: the third source is recorded, and
-    // the stop returns at once.
+    // the stop waits for the pump thread alone. This one runs the real pump thread.
     struct Stuck;
     impl Drop for Stuck {
         fn drop(&mut self) {
             thread::sleep(Duration::from_secs(3_600));
         }
     }
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(ROOM);
     let closing: Open = Box::new(|ender| {
         let (_, feed) = Feed::new(16_000, 1)?;
         _ = ender.send(End::Retry("test.unplugged"));
@@ -782,12 +852,30 @@ fn a_device_that_hangs_in_the_system_holds_up_nothing() {
         thread::sleep(Duration::from_secs(3_600));
         Err(End::Done)
     });
-    let mut run = Run::start(vec![device(&tx), closing, opening]);
-    let mut mic = opened(&rx);
-    assert_eq!(run.notice(), Notice::Restarted("test.unplugged"));
-    run.play(Some(&mut mic), 800, 0.5);
-    run.until(5);
-    let (_, notices) = run.stop();
+    let ((blocks, heard), (notices, told)) = (mpsc::sync_channel(ROOM), mpsc::sync_channel(ROOM));
+    let clock = Arc::new(AtomicU64::new(START));
+    let theirs = clock.clone();
+    let capture = Capture::with(
+        vec![device(&tx), closing, opening],
+        policy,
+        move || theirs.load(SeqCst),
+        move |block| blocks.try_send(block).expect("no room for a block"),
+        move |notice| notices.try_send(notice).expect("no room for a notice"),
+    );
+    let mut mic = rx.recv_timeout(WAIT).expect("the device was never opened");
+    assert_eq!(told.recv_timeout(WAIT), Ok(Notice::Restarted("test.unplugged")));
+    for _ in 0..40 {
+        offer(&mut mic.ring, vec![0.5; 320].into_iter());
+        clock.fetch_add(20, SeqCst);
+    }
+    // The clock stands at 800 ms; however the pump thread was scheduled, it drains all of it.
+    for _ in 0..5 {
+        heard.recv_timeout(WAIT).expect("too few blocks came");
+    }
+    let started = Instant::now();
+    capture.stop();
+    assert!(started.elapsed() < WAIT, "the stop was held up");
+    let notices: Vec<Notice> = told.try_iter().collect();
     assert!(notices.is_empty(), "{notices:?}");
 }
 
