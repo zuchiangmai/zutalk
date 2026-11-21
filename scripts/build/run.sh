@@ -66,13 +66,13 @@ agent() {
   hold
   local prompt
   prompt="$(render "$@")"
-  say "开始 $name（$model）"
+  say "开始 ${name}（${model}）"
   local started=$SECONDS
   timeout "$LIMIT" pi --print --model "$model" --thinking high \
     --session-dir "$OUT/sessions" --name "zutalk-build $name" -- "$prompt" \
     >"$OUT/logs/$name.log" 2>&1
   local code=$?
-  say "结束 $name：退出码 $code，用时 $(((SECONDS - started) / 60)) 分钟"
+  say "结束 ${name}：退出码 ${code}，用时 $(((SECONDS - started) / 60)) 分钟"
   return $code
 }
 
