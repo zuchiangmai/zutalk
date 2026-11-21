@@ -73,6 +73,18 @@ agent() {
     >"$OUT/logs/$name.log" 2>&1
   local code=$?
   say "结束 ${name}：退出码 ${code}，用时 $(((SECONDS - started) / 60)) 分钟"
+  # The API refusing is not the agent failing: no fix attempt can get past it.
+  if [ "$code" -ne 0 ] && grep -qE 'credit balance is too low|"type":"(authentication_error|permission_error)"' "$OUT/logs/$name.log"; then
+    settle "Keep what $name had done when the API refused it, to be carried on"
+    stop "API 拒绝了 ${name}（额度或钥匙），见 $OUT/logs/$name.log；补上后重跑"
+  fi
+  if [ "$code" -ne 0 ] && grep -qE '"type":"(rate_limit_error|overloaded_error|api_error)"' "$OUT/logs/$name.log"; then
+    settle "Keep what $name had done when the API was busy, to be carried on"
+    say "API 忙，10 分钟后重试 ${name}"
+    sleep 600
+    agent "$model" "$name" "$@"
+    return $?
+  fi
   return $code
 }
 
