@@ -205,12 +205,15 @@ pub fn app(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
-/// Serve on `listener`, and sweep every minute, until the process ends.
+/// How often the rooms are swept: once a minute. Origin to be traced.
+const SWEEP_EVERY_MS: u64 = 60_000;
+
+/// Serve on `listener`, and sweep every `SWEEP_EVERY_MS`, until the process ends.
 pub async fn serve(listener: tokio::net::TcpListener, server: Arc<Server>) -> std::io::Result<()> {
     let sweeper = server.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(SWEEP_EVERY_MS)).await;
             let started = Instant::now();
             sweeper.sweep(now());
             debug!("server.sweep", ms = started.elapsed().as_millis() as u64);

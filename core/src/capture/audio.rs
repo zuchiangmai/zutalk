@@ -19,13 +19,15 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::{path::PathBuf, sync::Arc, thread, time::Duration};
 
-/// How often the pump drains the rings, and so the most a block waits for it.
-const TICK: Duration = Duration::from_millis(20);
+/// How often the pump drains the rings, and so the most a block waits for it: a fifth of a
+/// 100 ms block.
+const TICK_MS: u64 = 20;
 /// How often an open device is asked whether it is still the one that would be picked.
 const LOOK_MS: u64 = 1_000;
 /// A steady source that sent nothing this long has stopped, whatever the system says (long
 /// enough for a headset to change profile); one that sent only exact zeros this long is deaf.
 pub const STALL_MS: u64 = 5_000;
+/// Exact zeros this long make a source deaf (see above). Origin to be traced.
 pub const ZERO_RUN_MS: u64 = 10_000;
 /// What a source's trouble is called (none, denied, gone, changed): microphone, computer.
 /// What the system does with a source it refuses is not always an error: macOS opens a
@@ -345,7 +347,7 @@ fn hold(
     let (mut backoff, mut due) = (Backoff::default(), 0);
     while !over.load(Relaxed) {
         if now_ms() < due {
-            thread::sleep(TICK);
+            thread::sleep(Duration::from_millis(TICK_MS));
             continue;
         }
         let (opened, (ender, ended)) = (now_ms(), mpsc::channel());
@@ -380,7 +382,7 @@ fn held(
     over: &AtomicBool,
 ) -> Option<End> {
     loop {
-        match ended.recv_timeout(TICK) {
+        match ended.recv_timeout(Duration::from_millis(TICK_MS)) {
             Ok(end) => return Some(end),
             Err(RecvTimeoutError::Timeout) if !over.load(Relaxed) => {}
             Err(_) => return None,
@@ -395,7 +397,7 @@ fn held(
 }
 
 /// The pump's work, one turn at a time. `Capture::with` turns it on a thread of its own every
-/// `TICK`; a test turns it by hand, so the clock it moves and the pump that reads it never race.
+/// `TICK_MS`; a test turns it by hand, so the clock it moves and the pump that reads it never race.
 pub struct Turner {
     pump: Pump,
     rx: mpsc::Receiver<Msg>,
@@ -506,7 +508,8 @@ impl Capture {
         notice: impl FnMut(Notice) + Send + 'static,
     ) -> Capture {
         let (mut capture, mut turner) = Self::by_hand(opens, policy, now_ms, sink, notice);
-        capture.thread = Some(thread::spawn(move || while turner.turn(TICK) {}));
+        capture.thread =
+            Some(thread::spawn(move || while turner.turn(Duration::from_millis(TICK_MS)) {}));
         capture
     }
 

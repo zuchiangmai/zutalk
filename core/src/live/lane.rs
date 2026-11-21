@@ -19,18 +19,24 @@ use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-const BLOCK_MS: u32 = (BLOCK as u64 * 1000 / RATE) as u32;
-/// A dial or a write that takes longer than this is a dead connection.
-const PATIENCE: Duration = Duration::from_secs(10);
-/// While paused the service is sent no audio, and closes a connection that says nothing.
-const KEEPALIVE: Duration = Duration::from_secs(10);
-/// How long the last words may take to come once the audio has ended.
-const TAIL: Duration = Duration::from_secs(5);
+const BLOCK_MS: u32 = (BLOCK as u64 * 1000 / RATE) as u32; // a block's length, worked out
+/// A dial or a write that takes longer than this is a dead connection. 0.8's, for both.
+const PATIENCE_MS: u64 = 10_000;
+/// While paused the service is sent no audio, and closes a connection that says nothing: a
+/// keepalive this often. 0.8's.
+const KEEPALIVE_MS: u64 = 10_000;
+/// How long the last words may take to come once the audio has ended. 0.8's drain time.
+const TAIL_MS: u64 = 5_000;
 /// Kept up over minutes, the service takes audio in at the speed of speech and no faster, so
 /// what is late stays late. More blocks than this waiting, or a service this far behind what
-/// it was sent, is not live any more.
+/// it was sent, is not live any more. 15 s is the most 0.8 would catch up (LESSONS.md, Soniox).
 const BACKLOG: usize = 20;
+/// See above: 0.8's 15 s window to catch up in (LESSONS.md, Soniox).
 const BEHIND_MS: u32 = 15_000;
+/// A connection near its key's cap gives way at a pause in its last minute. 0.8's handover lead.
+const HAND_OVER_LEAD_MS: u64 = 60_000;
+/// …and with this much left, whether a pause came or not. 0.8's handover margin.
+const HAND_OVER_MARGIN_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct Setup {
@@ -175,8 +181,8 @@ pub fn failure(code: u16, name: &str) -> End {
 /// Whether a connection this old, on a key good for `cap`, gives way to a fresh one now: at
 /// a pause in its last minute, and with a quarter of a minute left whether one came or not.
 pub fn hand_over(age: Duration, cap: Duration, pause: bool) -> bool {
-    let (lead, margin) =
-        (Duration::from_secs(60).min(cap / 4), Duration::from_secs(15).min(cap / 10));
+    let lead = Duration::from_millis(HAND_OVER_LEAD_MS).min(cap / 4);
+    let margin = Duration::from_millis(HAND_OVER_MARGIN_MS).min(cap / 10);
     age + margin >= cap || (pause && age + lead >= cap)
 }
 
@@ -255,7 +261,8 @@ pub async fn run<K: Keys>(
     let stopped = async {
         let _ = stop.wait_for(|mode| *mode == Mode::Stopped).await;
         // A connection has this long to bring the last words. With none, there are none.
-        let _ = timeout(TAIL + PATIENCE, lane.lock()).await;
+        let last_words_ms = TAIL_MS + PATIENCE_MS;
+        let _ = timeout(Duration::from_millis(last_words_ms), lane.lock()).await;
     };
     // What `supervise` is given owns what it uses: borrowing here, the lane could not be
     // proved `Send`, and so could not run beside the rest of the app.
@@ -280,7 +287,9 @@ async fn open<K: Keys>(lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
     }
     let lease = lane.keys.lease(Service::Soniox).await?;
     let dialed = Instant::now(); // before the socket opens: the service's count starts later
-    let dial = timeout(PATIENCE, connect_async(lane.setup.endpoint.as_str())).await;
+    let dial =
+        timeout(Duration::from_millis(PATIENCE_MS), connect_async(lane.setup.endpoint.as_str()))
+            .await;
     let Ok(Ok((ws, _))) = dial else { return Err(End::Retry("connect")) };
     let hello = config(lease.key.expose(), &lane.kind, &lane.setup).to_string();
     let (cap, feed) = (lease.session_cap, Feed::default());
@@ -371,7 +380,7 @@ impl<K: Keys> Conn<K> {
                     if let Some(end) = self.ending {
                         return Err(end); // the last words did not come in time
                     }
-                    self.wake = Instant::now() + KEEPALIVE;
+                    self.wake = Instant::now() + Duration::from_millis(KEEPALIVE_MS);
                     self.send(Message::text(r#"{"type":"keepalive"}"#)).await?;
                 }
             }
@@ -379,7 +388,7 @@ impl<K: Keys> Conn<K> {
     }
 
     async fn send(&mut self, message: Message) -> Result<(), End> {
-        let sent = timeout(PATIENCE, self.ws.send(message)).await;
+        let sent = timeout(Duration::from_millis(PATIENCE_MS), self.ws.send(message)).await;
         if matches!(sent, Ok(Ok(()))) { Ok(()) } else { Err(End::Retry("socket")) }
     }
 
@@ -398,7 +407,7 @@ impl<K: Keys> Conn<K> {
         if self.ending.replace(end).is_some() {
             return Ok(());
         }
-        self.wake = Instant::now() + TAIL;
+        self.wake = Instant::now() + Duration::from_millis(TAIL_MS);
         self.send(Message::text("")).await
     }
 

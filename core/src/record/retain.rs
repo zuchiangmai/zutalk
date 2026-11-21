@@ -7,7 +7,7 @@ use crate::app::proto::{Row, State};
 use crate::capture::tape;
 use std::path::Path;
 
-const DAY_MS: i64 = 86_400_000;
+const DAY_MS: i64 = 86_400_000; // a day: `keep` is counted in days
 
 /// Whether a recording's audio goes now: once its record is `written`, when it is `keep` days
 /// old (none: never, until the person destroys it). A start in the future is no age at all.

@@ -7,6 +7,10 @@ use zu::Doc;
 use zutalk_server::{BoxFuture, Config, Directory, Invites, OpenRouter, Refusal, Server};
 use zutalk_server::{Soniox, serve};
 
+/// How long a DID's host has to give its document; the same as for any upstream
+/// (`ledger.rs`). Origin to be traced.
+const DIRECTORY_WAIT_MS: u64 = 10_000;
+
 /// DID documents fetched where `zu::did::url` says, each time: only requests that spend or
 /// make something are checked, and those are few.
 struct Resolver(reqwest::Client);
@@ -19,7 +23,8 @@ impl Directory for Resolver {
         );
         Box::pin(async move {
             let url = zu::did::url(did, false).map_err(|_| signer)?;
-            let fetched = self.0.get(url).timeout(Duration::from_secs(10)).send().await;
+            let fetched =
+                self.0.get(url).timeout(Duration::from_millis(DIRECTORY_WAIT_MS)).send().await;
             let fetched = fetched.and_then(|answer| answer.error_for_status()).map_err(|_| away)?;
             zu::did::resolve(did, &fetched.bytes().await.map_err(|_| away)?).map_err(|_| signer)
         })

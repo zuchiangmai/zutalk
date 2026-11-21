@@ -1,7 +1,7 @@
 //! An audio file: the same blocks as a live recording, as fast as the file decodes. There is
 //! no wall clock here; a block's position is the count of samples.
 
-use super::{Msg, Notice, Resampler, TICK};
+use super::{Msg, Notice, Resampler, TICK_MS};
 use crate::capture::clock::{BLOCK, Block, Clock, Gap};
 use crate::rt::supervise::End;
 use std::path::Path;
@@ -89,7 +89,11 @@ pub(super) fn run(
     let (mut mono, mut pcm, mut blocks, mut paused) = (Vec::new(), Vec::new(), Vec::new(), false);
     let mut resampler: Option<(u32, Resampler)> = None;
     loop {
-        match said.recv_timeout(if paused { TICK } else { Duration::ZERO }) {
+        match said.recv_timeout(if paused {
+            Duration::from_millis(TICK_MS)
+        } else {
+            Duration::ZERO
+        }) {
             Ok(Msg::Pause(now, _)) => paused = now,
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             _ => {}

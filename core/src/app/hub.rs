@@ -31,9 +31,11 @@ use zutalk_log::Level;
 
 const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
-const FRAME: Duration = Duration::from_millis(100); // captions are drawn at most this often
+/// Captions are drawn at most this often: once a 100 ms block, as new words come no faster.
+const FRAME_MS: u64 = 100;
 const KEEP: usize = 12; // the finished lines a column keeps on screen
-const SLOT: Duration = Duration::from_millis(250); // a live room is written at most this often
+/// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
+const SLOT_MS: u64 = 250;
 
 /// How sound is heard: the one port the tests replace.
 pub type Hear =
@@ -720,7 +722,7 @@ fn open(recording: Recording, tapes: &Path) -> Open {
 }
 
 /// Keeps a live room's slot showing what the captions show: the latest, at most every
-/// `SLOT`, and nothing between recordings. Its trouble is said once, when it changes.
+/// `SLOT_MS`, and nothing between recordings. Its trouble is said once, when it changes.
 async fn slot(ours: Ours, id: String, mut live: watch::Receiver<Vec<Column>>, tx: Sender) {
     let key = match keys::derive("room", &id) {
         Ok(key) => key,
@@ -736,7 +738,7 @@ async fn slot(ours: Ours, id: String, mut live: watch::Receiver<Vec<Column>>, tx
             wrote.into_iter().for_each(|end| drop(tx.send(Msg::Say(code(end)))));
             said = wrote;
         }
-        tokio::time::sleep(SLOT).await;
+        tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
     }
 }
 
@@ -941,7 +943,7 @@ impl Task {
 }
 
 fn tick() -> tokio::time::Interval {
-    let mut tick = tokio::time::interval(FRAME);
+    let mut tick = tokio::time::interval(Duration::from_millis(FRAME_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick
 }

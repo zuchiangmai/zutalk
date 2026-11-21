@@ -56,7 +56,7 @@ const CAP_CHARS: usize = 240;
 const CLOSERS: [char; 10] = ['"', '\'', '”', '’', '」', '』', ')', '）', ']', '】'];
 const BATCH: usize = 40; // lines in one request to a translator
 const CONTEXT: usize = 20; // lines said before them, to understand them by
-const POLL: Duration = Duration::from_secs(2);
+const POLL_MS: u64 = 2_000; // how often a whole-session job is asked if it is done: as 0.8 did
 const UNCLEAR: &str = "unclear";
 const OFFLINE: End = End::Retry("offline");
 const BAD_REPLY: End = End::Retry("bad-reply");
@@ -532,7 +532,7 @@ impl<'a, K: Keys> Port<'a, K> {
             match self.ask(self.to(Method::GET, &job)).await?["status"].as_str() {
                 Some("completed") => break,
                 Some("error") => return Err(End::Retry("transcription-failed")),
-                _ => tokio::time::sleep(POLL).await,
+                _ => tokio::time::sleep(Duration::from_millis(POLL_MS)).await,
             }
         }
         let transcript = self.ask(self.to(Method::GET, &format!("{job}/transcript"))).await?;

@@ -16,6 +16,11 @@ use zu::{Cid, Codec, Pack, Record, Value};
 const QUOTA: Refusal = Refusal(StatusCode::PAYMENT_REQUIRED, "quota");
 const UPSTREAM: Refusal = Refusal(StatusCode::BAD_GATEWAY, "upstream");
 const CLAIMED: Refusal = Refusal(StatusCode::CONFLICT, "claimed");
+/// How long an upstream (the old invite service, Soniox, OpenRouter) has to answer before the
+/// asker is told `upstream`. Origin to be traced.
+const UPSTREAM_WAIT_MS: u64 = 10_000;
+/// How long an OpenRouter key lives before OpenRouter ends it. Origin to be traced.
+const OPENROUTER_KEY_LIFE_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -255,7 +260,11 @@ impl Invites {
     async fn retire(&self, token: &str) -> Result<u32, Refusal> {
         let request = self.http.post(format!("{}/v1/retire", self.url)).bearer_auth(&self.key);
         let request = request.json(&json!({ "access_token": token }));
-        let answer = request.timeout(Duration::from_secs(10)).send().await.map_err(|_| UPSTREAM)?;
+        let answer = request
+            .timeout(Duration::from_millis(UPSTREAM_WAIT_MS))
+            .send()
+            .await
+            .map_err(|_| UPSTREAM)?;
         if answer.status() == StatusCode::NOT_FOUND {
             return Err(Refusal(StatusCode::NOT_FOUND, "invite"));
         }
@@ -271,7 +280,8 @@ impl Invites {
 
 /// Ask an upstream with its master key. Neither the key nor a failed answer goes anywhere.
 async fn ask(request: reqwest::RequestBuilder, key: &str) -> Result<serde_json::Value, Refusal> {
-    let answer = request.bearer_auth(key).timeout(Duration::from_secs(10)).send().await;
+    let answer =
+        request.bearer_auth(key).timeout(Duration::from_millis(UPSTREAM_WAIT_MS)).send().await;
     let answer = answer.ok().filter(|answer| answer.status().is_success()).ok_or(UPSTREAM)?;
     answer.json().await.map_err(|_| UPSTREAM)
 }
@@ -328,7 +338,7 @@ impl Upstream for OpenRouter {
 
     fn mint<'a>(&'a self, name: &'a str, micros: u64) -> BoxFuture<'a, Result<Minted, Refusal>> {
         Box::pin(async move {
-            let expires = SystemTime::now() + Duration::from_secs(3600);
+            let expires = SystemTime::now() + Duration::from_millis(OPENROUTER_KEY_LIFE_MS);
             let expires = humantime::format_rfc3339_seconds(expires).to_string();
             let body = json!({ "name": name, "limit": micros as f64 / 1e6, "expires_at": expires });
             let made = ask(self.http.post(format!("{}/keys", self.url)).json(&body), &self.key);

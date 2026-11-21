@@ -209,6 +209,16 @@ fn keep(seed: &[u8; 32], did: String) -> Result<Me, End> {
 /// elsewhere. did.md asks for that before going on; the owner chose to remind them later.
 const UNSAVED: &str = "rotation.unsaved";
 
+/// How long the directory has to take a new DID. Origin to be traced.
+const CREATE_WAIT_MS: u64 = 30_000;
+/// How often a sign-in asks the relay whether the other device has sent the key. Origin to
+/// be traced.
+const SIGN_IN_POLL_MS: u64 = 1_000;
+/// How long a sign-in code stays good: five minutes to scan it. Origin to be traced.
+const SIGN_IN_WAIT_MS: u64 = 300_000;
+/// The issuer says a connection's cap in seconds (`session_cap_s`); time here is in ms.
+const MS_PER_S: u64 = 1_000;
+
 /// A Zu identity made on this device for someone who has none (did-zu.md § DID Creation): a
 /// signing key, and a rotation key that is kept here too. Nothing is kept unless the
 /// directory at `directory` took the DID.
@@ -219,7 +229,7 @@ pub async fn create(http: &Client, directory: &str) -> Result<Me, End> {
     let made = did::create(&rotation, &SecretKey::from_seed(&seed).public());
     let (did, op) = made.map_err(|_| End::Fatal("id.sign"))?;
     let post = http.post(format!("{directory}/{did}")).header(CONTENT_TYPE, "application/json");
-    let sent = post.body(op).timeout(Duration::from_secs(30)).send().await;
+    let sent = post.body(op).timeout(Duration::from_millis(CREATE_WAIT_MS)).send().await;
     match sent.map_err(|_| End::Retry("offline"))?.status() {
         status if status.is_success() => {}
         status if status.is_server_error() => return Err(End::Retry("server")),
@@ -298,7 +308,7 @@ impl SignIn {
 
     /// Waits for the key, checks it is a current key of its DID, and keeps it.
     pub async fn finish(&self, http: &Client) -> Result<Me, End> {
-        let (deadline, offline) = (wall_ms() + 300_000, |_| End::Retry("offline"));
+        let (deadline, offline) = (wall_ms() + SIGN_IN_WAIT_MS, |_| End::Retry("offline"));
         let sealed = loop {
             let reply = http.get(&self.0.room).send().await.map_err(offline)?;
             match reply.status() {
@@ -306,7 +316,7 @@ impl SignIn {
                 StatusCode::NOT_FOUND if wall_ms() < deadline => {}
                 _ => return Err(End::Fatal("id.expired")),
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(SIGN_IN_POLL_MS)).await;
         };
         let received = self.0.open(&sealed, None).map_err(|_| End::Fatal("id.sealed"))?;
         let url = did::url(&received.did, false).map_err(|_| End::Fatal("id.did"))?;
@@ -371,7 +381,10 @@ impl Ours {
     async fn issue(&self, service: Service) -> Result<(Lease, u64), End> {
         let issued = self.ask("lease", "talk/lease", json!({ "service": service.name() })).await?;
         let key = Secret::new(issued["key"].as_str().ok_or(End::Retry("server"))?);
-        let session_cap = issued["session_cap_s"].as_u64().map(Duration::from_secs);
+        let session_cap = issued["session_cap_s"].as_u64().map(|cap_s| {
+            let cap_ms = cap_s.saturating_mul(MS_PER_S);
+            Duration::from_millis(cap_ms)
+        });
         Ok((Lease { key, session_cap }, issued["left"].as_u64().unwrap_or(0)))
     }
 }

@@ -30,8 +30,11 @@ pub trait Part {
 pub struct Backoff(u64);
 
 impl Backoff {
+    /// A blip costs no more than a quarter second of reopening. Origin to be traced.
     const FIRST_MS: u64 = 250;
+    /// The cap 0.8's Soniox stream doubled up to (1, 2, 4, then 8 s for ever).
     const LONGEST_MS: u64 = 8_000;
+    /// A run this long was healthy, and the next wait starts short again. Origin to be traced.
     const HEALTHY_MS: u64 = 30_000;
 
     /// The wait in ms after a part that ran for `ran_ms`.
@@ -57,26 +60,30 @@ pub async fn supervise<P: Part>(
         };
         let End::Retry(why) = end else { return end };
         broke(why);
-        sleep(Duration::from_millis(backoff.next(started.elapsed().as_millis() as u64))).await;
+        let wait_ms = backoff.next(started.elapsed().as_millis() as u64);
+        sleep(Duration::from_millis(wait_ms)).await;
     }
 }
 
 /// A transcript that could not be written, for a reason that may pass, is tried again: first
-/// after this, then ever more patiently, up to an hour.
-pub const AGAIN: Duration = Duration::from_secs(60);
+/// after a minute (long enough for a network to come back), then ever more patiently.
+pub const AGAIN_MS: u64 = 60_000;
+/// The longest wait between two tries: an hour, so a failure that passes overnight is caught
+/// before morning, and a process left running does not try more than 24 times a day.
+pub const AGAIN_LONGEST_MS: u64 = 3_600_000;
 
 /// Tries until it ends one way or the other: after a failure that may pass, again after
-/// `AGAIN`, then ever more patiently, up to an hour.
+/// `AGAIN_MS`, then ever more patiently, up to `AGAIN_LONGEST_MS`.
 pub async fn again<T, F>(mut attempt: impl FnMut() -> F) -> Result<T, End>
 where
     F: Future<Output = Result<T, End>>,
 {
-    let mut wait = AGAIN;
+    let mut wait_ms = AGAIN_MS;
     loop {
         match attempt().await {
-            Err(End::Retry(_)) => tokio::time::sleep(wait).await,
+            Err(End::Retry(_)) => tokio::time::sleep(Duration::from_millis(wait_ms)).await,
             done => return done,
         }
-        wait = (wait * 2).min(Duration::from_secs(3600));
+        wait_ms = (wait_ms * 2).min(AGAIN_LONGEST_MS);
     }
 }

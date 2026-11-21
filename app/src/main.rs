@@ -18,8 +18,9 @@ use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
 type Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>;
 /// A newer version, downloaded, its signature checked against the key in the config.
 type Ready = Arc<Mutex<Option<(Update, Vec<u8>)>>>;
-/// How long between looks for a newer version, after the one at start-up.
-const LOOK: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long between looks for a newer version, after the one at start-up: six hours
+/// (DESIGN.md, updates). Origin to be traced.
+const LOOK_MS: u64 = 6 * 60 * 60 * 1_000;
 
 #[tauri::command]
 fn dispatch(command: Command, core: State<Core>) {
@@ -46,7 +47,7 @@ fn fan(app: &AppHandle, windows: &Windows, event: Event) {
     windows.0.retain(|channel| channel.send(event.clone()).is_ok());
 }
 
-/// Looks for a newer version at start-up and every `LOOK` until one is downloaded, then tells
+/// Looks for a newer version at start-up and every `LOOK_MS` until one is downloaded, then tells
 /// the core. Trouble is told once, until a look goes well.
 async fn look(app: AppHandle, ready: Ready) {
     let mut told = false;
@@ -66,7 +67,7 @@ async fn look(app: AppHandle, ready: Ready) {
                 app.state::<Core>().looked(Err("update"));
             }
         }
-        tokio::time::sleep(LOOK).await;
+        tokio::time::sleep(Duration::from_millis(LOOK_MS)).await;
     }
 }
 
