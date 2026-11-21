@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ZuTalk",
+  "identifier": "xyz.voice.zutalk",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "ZuTalk",
+        "url": "index.html",
+        "width": 1000,
+        "height": 720,
+        "minWidth": 380,
+        "minHeight": 480
+      },
+      {
+        "label": "captions",
+        "title": "ZuTalk",
+        "url": "captions.html",
+        "width": 900,
+        "height": 220,
+        "visible": false,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true
+      }
+    ],
+    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png"],
+    "macOS": { "bundleVersion": "67", "signingIdentity": "-" }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": ["https://github.com/zuchiangmai/ZuTalk/releases/latest/download/latest.json"]
+    }
+  }
+}

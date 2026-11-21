@@ -1,0 +1,44 @@
+[package]
+name = "zutalk-core"
+description = "Everything ZuTalk knows and does. No UI, no Tauri."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aes-gcm = "0.11.1"
+base64 = "0.23.1"
+cpal = "~0.18.2"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+keyring-core = "1.0.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "multipart", "stream"] }
+rtrb = "0.4.1"
+rubato = "5.1.0"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "mp3", "aac", "isomp4", "flac", "ogg", "vorbis"] }
+tokio = { version = "1.54.1", features = ["rt", "time", "macros", "sync", "net"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+ts-rs = "12.0.1"
+zeroize = "1.9.1"
+zu = { version = "0.9.0", path = "../zu" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["test-util", "rt-multi-thread"] }
+wiremock = "0.6.5"
+zutalk-server = { path = "../server" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "~0.18.2", features = ["pipewire"] }
+dbus-secret-service-keyring-store = "1.0.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"

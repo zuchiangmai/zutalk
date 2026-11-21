@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>身份 · 需要时才问</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top"><span class="word">ZuTalk</span></div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音"><p class="read" style="margin: 28px 10px; font-size: 15px; color: var(--ink3)">还没有录音</p></nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true" style="background: var(--sunk); color: var(--ink3)"><svg class="i s" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path></svg></span>
+<span class="me" style="font-family: var(--f-ui)">还没有身份</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+</header>
+<section class="stage">
+<span class="rec" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></span>
+<div class="stage-t">开始录音</div>
+<div class="setup">
+<span class="set-k">说</span><div class="set-v"><span class="pill on">中文</span><span class="pill on">English</span></div>
+<span class="set-k">字幕</span><div class="set-v"><span class="pill on">中文</span><span class="pill on">English</span><span class="pill on">ไทย</span></div>
+<span class="set-k">声音</span><div class="set-v"><span class="pill">麦克风</span></div>
+</div>
+</section>
+</main>
+
+<div class="scrim">
+<div class="dialog" role="dialog" aria-labelledby="ask-t" aria-describedby="ask-d">
+<h2 id="ask-t" class="dialog-t">欢迎使用 ZuTalk</h2>
+<p id="ask-d" class="dialog-d">这台设备上还没有身份。</p>
+<div class="dialog-a">
+<a class="btn ghost" href="Login.dc.html">登录</a>
+<a class="btn" href="Recovery.dc.html">新建身份</a>
+</div>
+<a class="icon-btn dialog-x" href="Main.dc.html" aria-label="关闭"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></a>
+</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // There is no sign-in wall. Without an identity the app opens and can be looked at; this
+  // sheet comes up only when something is about to be signed (here: pressing 开始录音).
+  // Closed with neither button, nothing more is asked and what was pressed is not done.
+  renderVals() { return { theme: this.props.theme ?? 'light' }; }
+}
+</script>
+</body>
+</html>

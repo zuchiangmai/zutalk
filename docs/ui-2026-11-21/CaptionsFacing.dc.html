@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>字幕窗 · 对照</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="dark" style="width: 960px; height: 460px; display: flex; flex-direction: column; background: #012A1F; overflow: hidden">
+
+<section lang="th" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; padding: 18px 36px 26px; transform: rotate(180deg)">
+<span class="cap-h">ไทย</span>
+<p class="read" style="margin: 0; font-size: 18px; line-height: 1.45; color: var(--ink3)">เราอยากต่อสัญญาอีกหนึ่งปี ค่าเช่าคงราคาเดิมได้ไหม</p>
+<p class="read" style="margin: 0; font-size: 32px; line-height: 1.4; color: #fff">ได้ครับ แต่ขอเก็บค่ามัดจำเพิ่มอีกหนึ่งเดือน<span class="caret"></span></p>
+</section>
+
+<div style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line)">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<span class="seg"><button class="seg-i">最新一句</button><button class="seg-i on">对照</button></span>
+<button class="icon-btn" aria-label="关闭字幕窗"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</div>
+
+<section lang="zh-Hans" style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; padding: 18px 36px 26px">
+<span class="cap-h">中文</span>
+<p class="read" style="margin: 0; font-size: 18px; line-height: 1.45; color: var(--ink3)">我们想再续一年，房租可以维持现在的价格吗？</p>
+<p class="read" style="margin: 0; font-size: 32px; line-height: 1.4; color: #fff">可以，但想多收一个月押金。<span class="caret"></span></p>
+</section>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":960,"height":460}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

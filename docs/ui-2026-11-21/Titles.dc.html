@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>标题与话题 · 自动生成</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row" href="Reader.dc.html">
+<span class="row-t">读书会：《看不见的城市》第三夜</span>
+<span class="row-m"><span class="num">42:18</span><span>中文 · English · ไทย</span></span>
+</a>
+<a class="row on" href="Titles.dc.html">
+<span class="row-t">{{typed}}</span>
+<span class="row-m"><span class="num">18:05</span><span>中文 · ไทย</span></span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="6">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<span class="seg" role="tablist"><button class="seg-i on" role="tab" aria-selected="true">文字稿</button><button class="seg-i" role="tab" aria-selected="false">笔记</button></span>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<article class="doc" style="position: relative">
+<div style="display: flex; align-items: flex-start; gap: 10px">
+<h1 class="title auto" style="margin: 0; flex: 1; min-height: 1.3em">{{typed}}<sc-if value="{{typing}}" hint-placeholder-val="{{false}}"><span class="caret" style="background: var(--accent)"></span></sc-if></h1>
+<button class="icon-btn" aria-label="换一个标题" aria-expanded="true" style="margin-top: 2px; background: var(--soft2); color: var(--accent)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.6L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.6L20 16M20 20v-4h-4"></path></svg></button>
+</div>
+<div class="meta"><span>今天 15:10</span><span class="num">18:05</span><span>中文 · ไทย</span><span class="tag">音频</span></div>
+
+<div class="topics" aria-label="话题" style="max-width: 380px">
+<sc-for list="{{topics}}" as="t" hint-placeholder-count="4">
+<button class="topic {{t.cls}}" aria-pressed="{{t.on}}" onClick="{{t.pick}}">{{t.name}}<span class="num">{{t.at}}</span></button>
+</sc-for>
+</div>
+
+<div class="pop" style="top: 44px; right: 40px; width: 340px; padding: 6px">
+<div class="menu" style="min-width: 0; padding: 0">
+<sc-for list="{{cands}}" as="c" hint-placeholder-count="4">
+<button class="menu-i" style="height: auto; min-height: 40px; padding: 8px 10px; align-items: baseline" onClick="{{c.pick}}">
+<span class="tag" style="flex: none">{{c.src}}</span>
+<span class="read" style="flex: 1; font-size: 15px; line-height: 1.4">{{c.text}}</span>
+<sc-if value="{{c.on}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--accent); align-self: center"><path d="m5 12 5 5 9-10"></path></svg></sc-if>
+</button>
+</sc-for>
+</div>
+</div>
+
+<ol class="tl" style="margin-top: 56px">
+<sc-for list="{{lines}}" as="l" hint-placeholder-count="5">
+<li class="{{l.cls}}">
+<div class="who"><b>{{l.who}}</b><span class="num">{{l.t}}</span></div>
+<div><p class="said" lang="{{l.lang}}">{{l.a}}</p><p class="tr">{{l.b}}</p></div>
+</li>
+</sc-for>
+</ol>
+</article>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // A title comes from the best source there is: what the person wrote, the event the
+  // recording falls in, a summary of the whole transcript, the file's name, the first sentence.
+  // One a machine chose is set in regular weight; only a person's title is bold.
+  state = { k: 0, pick: 0, topic: -1 };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 100); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const C = [
+      ['文字稿', '和房东谈续租：押金多一个月'],
+      ['文字稿', '续租一年，房租不变'],
+      ['开头', '我们想再续一年，房租可以维持现在的价格吗？'],
+    ];
+    const T = [['续一年', '0:05'], ['房租不变', '0:40'], ['多一个月押金', '1:12'], ['下周签合同', '3:30']];
+    const L = [
+      ['我', '0:05', 'zh-Hans', '我们想再续一年，房租可以维持现在的价格吗？', 'เราอยากต่อสัญญาอีกหนึ่งปี ค่าเช่าคงราคาเดิมได้ไหม', 0],
+      ['房东', '0:40', 'th', 'ได้ครับ ราคาเดิม', '可以，价格不变。', 1],
+      ['房东', '1:12', 'th', 'แต่ขอเก็บค่ามัดจำเพิ่มอีกหนึ่งเดือน', '但想多收一个月押金。', 2],
+      ['我', '1:30', 'zh-Hans', '押金可以分两个月付吗？', 'ค่ามัดจำแบ่งจ่ายสองเดือนได้ไหม', 2],
+      ['房东', '3:30', 'th', 'ได้ครับ เซ็นสัญญาสัปดาห์หน้า', '可以，下周签合同。', 3],
+    ];
+    const { k, pick, topic } = this.state;
+    const full = Array.from(C[pick][1]);
+    // Typed out once, held for a while, then typed again so the motion can be seen on a canvas.
+    const n = Math.min(full.length, Math.max(0, (k % 140) - 6));
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      typed: full.slice(0, n).join(''), typing: n < full.length,
+      cands: C.map(([src, text], i) => ({ src, text, on: i === pick, pick: () => this.setState({ pick: i, k: 0 }) })),
+      topics: T.map(([name, at], i) => ({ name, at, on: i === topic, cls: i === topic ? 'on' : '', pick: () => this.setState({ topic: i === topic ? -1 : i }) })),
+      lines: L.map(([who, t, lang, a, b, of]) => ({ who, t, lang, a, b, cls: of === topic ? 'hit' : '' })),
+      rows: [
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

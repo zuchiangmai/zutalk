@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>主持 · 开场前</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<sc-if value="{{out}}" hint-placeholder-val="{{true}}">
+<div class="band" role="status">
+<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"></circle><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"></path></svg>
+<b>这一场对外</b>
+<span class="sep"></span>
+<span class="chip">观众字幕</span>
+<span>{{event.title}}</span>
+<span class="spacer"></span>
+<a class="pill" href="Main.dc.html">取消主持</a>
+</div>
+</sc-if>
+<sc-if value="{{quiet}}" hint-placeholder-val="{{false}}">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="tag">录完可交到：{{event.title}}</span>
+<span class="spacer"></span>
+<a class="pill quiet" href="Main.dc.html">取消主持</a>
+</header>
+</sc-if>
+
+<section class="stage" style="justify-content: flex-start; padding-top: 30px">
+<a class="rec" href="HostLive.dc.html" aria-label="开始主持"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></a>
+<div class="stage-t">开始主持</div>
+
+<div class="sheet" style="margin-top: 22px">
+<div class="sheet-row">
+<span class="k">活动</span>
+<button class="pill wide" onClick="{{nextEvent}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{event.title}}</span><span style="display: inline-flex; align-items: center; gap: 8px; font: 12px var(--f-ui); color: var(--ink3)">{{event.when}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></button>
+</div>
+<div class="sheet-row" style="align-items: start">
+<span class="k" style="padding-top: 8px">观众</span>
+<div style="display: flex; flex-direction: column; gap: 12px; min-width: 0">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+<button class="pill {{capCls}}" aria-pressed="{{out}}" onClick="{{toggleCaptions}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"></rect><path d="M7 14h4M13 14h4"></path></svg>字幕</button>
+<sc-if value="{{out}}" hint-placeholder-val="{{true}}"><span class="tag"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3 20a6 6 0 0 1 12 0M16 5a3 3 0 0 1 0 6M21 20a6 6 0 0 0-4-5.6"></path></svg><span class="num">3</span> 人在等</span></sc-if>
+</div>
+<sc-if value="{{out}}" hint-placeholder-val="{{true}}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 14px; animation: zt-unfold .42s var(--e-out) both">
+<div class="qr"><svg viewBox="0 0 25 25" width="92" height="92" role="img" aria-label="链接的二维码" shape-rendering="crispEdges"><path d="{{qr}}" fill="#0A0A0A"></path></svg></div>
+<div style="display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 180px">
+<span class="field mono" style="display: flex; align-items: center; overflow: hidden; white-space: nowrap">zutalk.example/r/2b7e…#Xq9…</span>
+<div style="display: flex; gap: 8px"><button class="pill">复制链接</button><button class="pill">放大二维码</button></div>
+</div>
+</div>
+</sc-if>
+</div>
+</div>
+<div class="sheet-row">
+<span class="k">档案馆</span>
+<div style="display: flex; flex-wrap: wrap; gap: 8px"><span class="tag"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"></rect><path d="M5 9v10h14V9M10 13h4"></path></svg>录完再定</span></div>
+</div>
+</div>
+
+<div class="setup" style="max-width: 560px; margin-top: 18px; padding: 0 20px">
+<span class="set-k">说</span>
+<div class="set-v"><span class="pill on">中文</span><span class="pill on">English</span></div>
+<span class="set-k">字幕</span>
+<div class="set-v"><span class="pill on">中文</span><span class="pill on">English</span><span class="pill on">ไทย</span></div>
+</div>
+</section>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // Hosting lives here and nowhere else: this state is never written to settings or disk,
+  // so leaving this screen for any other is what ends it.
+  state = { event: 0, captions: true };
+  renderVals() {
+    const EVENTS = [
+      { title: '开放麦：下个月的城', when: '清迈 · 今天 19:30' },
+      { title: '周三分享会：社区厨房', when: '清迈 · 今天 21:00' },
+      { title: '泰语角', when: '清迈 · 明天 10:00' },
+    ];
+    const qr = (seed) => {
+      const n = 25; let s = seed, d = '';
+      const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+      const corner = (x, y) => (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+        let on;
+        if (corner(x, y)) {
+          const fx = x < 8 ? x : x - (n - 7), fy = y < 8 ? y : y - (n - 7);
+          on = fx >= 0 && fx <= 6 && fy >= 0 && fy <= 6 && (fx === 0 || fx === 6 || fy === 0 || fy === 6 || (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4));
+        } else on = rnd() > 0.52;
+        if (on) d += 'M' + x + ' ' + y + 'h1v1h-1z';
+      }
+      return d;
+    };
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    const out = this.state.captions;
+    return {
+      theme: this.props.theme ?? 'light',
+      event: EVENTS[this.state.event],
+      nextEvent: () => this.setState({ event: (this.state.event + 1) % EVENTS.length }),
+      out, quiet: !out, capCls: out ? 'on' : '',
+      toggleCaptions: () => this.setState({ captions: !out }),
+      qr: qr(7719),
+      rows: [
+        day('今天'),
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

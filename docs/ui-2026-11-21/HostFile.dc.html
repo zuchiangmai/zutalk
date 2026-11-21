@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>主持 · 交到档案馆</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row on" href="HostFile.dc.html">
+<span class="row-t">开放麦：下个月的城</span>
+<span class="row-m"><span class="num">1:12:40</span><span>中文 · English · ไทย</span>
+<sc-if value="{{isFiled}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+</span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<sc-if value="{{notFiled}}" hint-placeholder-val="{{true}}">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="tag">观众字幕已停</span>
+</sc-if>
+<sc-if value="{{isFiled}}" hint-placeholder-val="{{false}}">
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>已交到档案馆</span>
+</sc-if>
+<span class="spacer"></span>
+<span class="seg" role="tablist"><button class="seg-i on" role="tab" aria-selected="true">文字稿</button><button class="seg-i" role="tab" aria-selected="false">笔记</button></span>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<article class="doc">
+<h1 class="title" style="margin: 0">开放麦：下个月的城</h1>
+<div class="meta"><span>今天 19:30</span><span class="num">1:12:40</span><span>中文 · English · ไทย</span><span class="tag">音频</span></div>
+
+<section class="card" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-top: 20px">
+<span style="display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--soft2); color: var(--accent)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 5 5 9-10"></path></svg></span>
+<span style="font-size: 15px; font-weight: 600">录好了</span>
+<span class="num" style="font-size: 15px; color: var(--ink2)">1:12:40</span>
+<span class="spacer"></span>
+<button class="btn"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>复制</button>
+<button class="pill">导出<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></section>
+
+<sc-if value="{{isReview}}" hint-placeholder-val="{{true}}">
+<section class="card" style="display: flex; flex-direction: column; gap: 16px; margin-top: 12px; animation: zt-unfold .42s var(--e-out) both">
+<h2 class="h" style="margin: 0">交到档案馆</h2>
+<div style="display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 14px 16px; align-items: center">
+<span class="k">活动</span>
+<div><button class="pill">清迈 · 开放麦：下个月的城<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></div>
+<span class="k">转写稿</span>
+<div class="set-v"><span class="tag">中文</span><span class="tag">English</span><span class="tag">ไทย</span><span class="tag">说话人的名字</span></div>
+<span class="k">全程录音</span>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+<button class="pill {{audioCls}}" aria-pressed="{{audio}}" onClick="{{toggleAudio}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 9v6M16 5v14M20 10v4"></path></svg>{{audioLabel}}</button>
+<span class="k num">1:12:40 · 约 139 MB</span>
+</div>
+</div>
+<div class="banner"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>交上去是公开的。全程录音交了删不掉。</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px">
+<button class="btn lg hold {{holdCls}}" onPointerDown="{{holdStart}}" onPointerUp="{{holdEnd}}" onPointerLeave="{{holdEnd}}"><span class="fill"></span><span class="lbl">按住交出</span></button>
+<button class="pill quiet" onClick="{{keep}}">不交</button>
+</div>
+</section>
+</sc-if>
+
+<sc-if value="{{isGrace}}" hint-placeholder-val="{{false}}">
+<section class="card" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; color: var(--accent)" role="status">
+<svg class="ring" viewBox="0 0 22 22" aria-hidden="true"><circle class="bg" cx="11" cy="11" r="9"></circle><circle class="fg" cx="11" cy="11" r="9"></circle></svg>
+<span style="font-size: 15px; font-weight: 600; color: var(--ink)">8 秒后交出</span>
+<span class="tag">{{summary}}</span>
+<span class="spacer"></span>
+<button class="btn ghost" onClick="{{undo}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3"></path></svg>撤销</button>
+</section>
+</sc-if>
+
+<sc-if value="{{isFiled}}" hint-placeholder-val="{{false}}">
+<section class="card" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-top: 12px; animation: zt-unfold .42s var(--e-out) both" role="status">
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>已交</span>
+<span class="read" style="font-size: 15px">清迈 · 开放麦：下个月的城</span>
+<span class="tag">{{summary}}</span>
+<span class="spacer"></span>
+<button class="pill">打开</button>
+</section>
+</sc-if>
+
+<sc-if value="{{isKept}}" hint-placeholder-val="{{false}}">
+<div style="display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--ink3); font-size: 12.5px">
+<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>没有交
+<button class="pill quiet" onClick="{{reopen}}">交到活动</button>
+</div>
+</sc-if>
+
+<ol class="tl">
+<li><div class="who"><b>主持人</b><span class="num">0:08</span></div><div><p class="said">下个月，共享厨房想从每周三天开到五天。</p><p class="tr" lang="en">Next month, the shared kitchen hopes to open five days a week instead of three.</p></div></li>
+<li><div class="who"><b>主持人</b><span class="num">0:21</span></div><div><p class="said">需要再多四位愿意排班的人。</p><p class="tr" lang="en">We need four more people willing to take shifts.</p></div></li>
+</ol>
+</article>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // Nothing is filed by starting or by stopping: this card is where it is decided, once per
+  // recording. Text and audio go together unless audio is turned off here. A full hold starts a
+  // grace period that can still be undone.
+  state = { audio: true, phase: 'review', holding: false };
+  componentWillUnmount() { clearTimeout(this.held); clearTimeout(this.grace); }
+  renderVals() {
+    const { audio, phase, holding } = this.state;
+    const holdEnd = () => { clearTimeout(this.held); if (this.state.holding) this.setState({ holding: false }); };
+    const holdStart = () => {
+      this.setState({ holding: true });
+      this.held = setTimeout(() => {
+        this.setState({ holding: false, phase: 'grace' });
+        this.grace = setTimeout(() => this.setState({ phase: 'filed' }), 8000);
+      }, 1400);
+    };
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      isReview: phase === 'review', isGrace: phase === 'grace', isFiled: phase === 'filed', isKept: phase === 'kept',
+      notFiled: phase !== 'filed',
+      audio, audioCls: audio ? 'on' : '', audioLabel: audio ? '一起交' : '不交',
+      toggleAudio: () => this.setState({ audio: !audio }),
+      holdCls: holding ? 'holding' : '',
+      summary: audio ? '转写稿 · 全程录音' : '只有转写稿',
+      holdStart, holdEnd,
+      undo: () => { clearTimeout(this.grace); this.setState({ phase: 'review' }); },
+      keep: () => this.setState({ phase: 'kept' }),
+      reopen: () => this.setState({ phase: 'review', audio: true }),
+      rows: [
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

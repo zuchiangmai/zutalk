@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>录音中 · 只在本机</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row on" href="Live.dc.html">
+<span class="row-t">正在录音</span>
+<span class="row-m"><span class="dot live"></span><span class="num">{{clock}}</span><span>中文 · English · ไทย</span></span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main {{pausedCls}}">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<a class="pill quiet" href="LiveNotes.dc.html"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4M14 6l4 4"></path></svg>笔记</a>
+<button class="pill quiet"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"></rect><path d="M7 14h4M13 14h4"></path></svg>字幕窗</button>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<section class="caps">
+<div class="cap-col" lang="zh-Hans">
+<h3 class="cap-h">中文</h3>
+<sc-for list="{{zhOld}}" as="o" hint-placeholder-count="3"><p class="cap-old">{{o.text}}</p></sc-for>
+<p class="cap-tail">{{zhTail}}<span class="caret"></span></p>
+</div>
+<div class="cap-col" lang="en">
+<h3 class="cap-h">ENGLISH</h3>
+<sc-for list="{{enOld}}" as="o" hint-placeholder-count="3"><p class="cap-old">{{o.text}}</p></sc-for>
+<p class="cap-tail">{{enTail}}<span class="caret"></span></p>
+</div>
+<div class="cap-col" lang="th">
+<h3 class="cap-h">ไทย</h3>
+<sc-for list="{{thOld}}" as="o" hint-placeholder-count="3"><p class="cap-old">{{o.text}}</p></sc-for>
+<p class="cap-tail">{{thTail}}<span class="caret"></span></p>
+</div>
+</section>
+
+<div class="capsule">
+<span class="dot live"></span>
+<span class="clock">{{clock}}</span>
+<span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+<span class="status" role="status">{{status}}</span>
+<a class="pill" href="LiveNotes.dc.html"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"></path></svg>标记</a>
+<button class="pill" onClick="{{togglePause}}">{{pauseLabel}}</button>
+<a class="btn" href="Result.dc.html"><svg class="i s fill" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"></rect></svg>停止</a>
+</div>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  state = { k: 0, paused: false };
+  componentDidMount() {
+    // The line being said is revealed unit by unit; a finished line moves up and dims.
+    this.timer = setInterval(() => { if (!this.state.paused) this.setState({ k: this.state.k + 1 }); }, 90);
+  }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const SCRIPT = [
+      ['我们从第三章开始。', "Let's start from chapter three.", 'เราเริ่มจากบทที่สามกันนะ'],
+      ['上次停在那座只存在于记忆里的城。', 'Last time we stopped at the city that exists only in memory.', 'ครั้งก่อนเราหยุดที่เมืองซึ่งมีอยู่แค่ในความทรงจำ'],
+      ['有人想先说说自己读到的感受吗？', 'Would anyone like to share how it felt to read it?', 'มีใครอยากเล่าความรู้สึกตอนอ่านก่อนไหม'],
+      ['我觉得他写的每一座城，其实都是同一座。', 'I think every city he writes about is really the same one.', 'ฉันคิดว่าทุกเมืองที่เขาเขียนถึง จริง ๆ แล้วคือเมืองเดียวกัน'],
+      ['对，所以读到后面，会觉得是在读一个人的回忆。', "Right, so later on it feels like reading one person's memories.", 'ใช่ พออ่านไปเรื่อย ๆ จะรู้สึกเหมือนอ่านความทรงจำของคนคนหนึ่ง'],
+      ['那我们今天就从「回忆」这个词讲起。', 'Then let us begin today with the word "memory".', 'งั้นวันนี้เราเริ่มจากคำว่า "ความทรงจำ" กัน'],
+    ];
+    const SAY = 34, PER = 46;
+    const k = this.state.k, n = Math.floor(k / PER), at = k % PER;
+    const line = (i) => SCRIPT[i % SCRIPT.length];
+    const cut = (text, part, byWord) => {
+      const units = byWord ? text.split(' ') : Array.from(text);
+      return units.slice(0, Math.round(units.length * part)).join(byWord ? ' ' : '');
+    };
+    const col = (j, byWord, lag) => ({
+      old: [n - 3, n - 2, n - 1].filter((i) => i >= 0).map((i) => ({ text: line(i)[j] })),
+      tail: cut(line(n)[j], Math.max(0, Math.min(1, (at - lag) / SAY)), byWord),
+    });
+    const zh = col(0, false, 0), en = col(1, true, 4), th = col(2, false, 6);
+    const secs = 12 * 60 + 48 + Math.floor(k * 0.09);
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      clock: Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0'),
+      zhOld: zh.old, zhTail: zh.tail, enOld: en.old, enTail: en.tail, thOld: th.old, thTail: th.tail,
+      pausedCls: this.state.paused ? 'paused' : '',
+      status: this.state.paused ? '已暂停' : '正在录音',
+      pauseLabel: this.state.paused ? '继续' : '暂停',
+      togglePause: () => this.setState({ paused: !this.state.paused }),
+      rows: [
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

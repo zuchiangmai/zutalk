@@ -1,0 +1,63 @@
+{
+  "v": 3,
+  "assetGroups": {
+    "brand": {
+      "files": {},
+      "name": "brand",
+      "order": []
+    },
+    "logos": {
+      "files": {},
+      "name": "logos",
+      "order": []
+    },
+    "notes": {
+      "files": {},
+      "name": "notes",
+      "order": []
+    },
+    "partners": {
+      "files": {},
+      "name": "partners",
+      "order": []
+    },
+    "qr": {
+      "files": {},
+      "name": "qr",
+      "order": []
+    }
+  },
+  "blobs": {},
+  "createdOnFiles": {
+    "at": "2026-11-06T14:59:59.970Z",
+    "v": 1
+  },
+  "docs": {
+    "readme": "project/README.md",
+    "sections": [
+      "project/ui_kits/event-site/README.md",
+      "project/ui_kits/social-kit/README.md"
+    ]
+  },
+  "editing": "off",
+  "groups": [
+    "brand",
+    "logos",
+    "notes",
+    "partners",
+    "qr"
+  ],
+  "layout": "files",
+  "libraries": [],
+  "namespace": "Ds4seasDesignSystem_af6e46",
+  "sections": {},
+  "source": {
+    "app": "claude-design",
+    "exportedAt": "2026-11-06T14:59:59.970Z",
+    "map": "project/migration-map.json",
+    "projectId": "af6e4657-4b6d-4606-928f-1629ddfde74b",
+    "url": "https://claude.ai/design/p/af6e4657-4b6d-4606-928f-1629ddfde74b",
+    "v": 1
+  },
+  "title": "4seas Design System"
+}

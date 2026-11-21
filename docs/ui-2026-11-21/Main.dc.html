@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>首页 · 开始录音</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+</header>
+
+<section class="stage">
+<a class="rec" href="Live.dc.html" aria-label="开始录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></a>
+<div class="stage-t">开始录音</div>
+
+<div class="setup">
+<span class="set-k">说</span>
+<div class="set-v">
+<sc-for list="{{spoken}}" as="l" hint-placeholder-count="2">
+<button class="pill on" onClick="{{l.drop}}" aria-label="{{l.label}}">{{l.name}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</sc-for>
+<button class="pill add" onClick="{{addSpoken}}" aria-label="添加说的语言"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+</div>
+<span class="set-k">字幕</span>
+<div class="set-v">
+<sc-for list="{{shown}}" as="l" hint-placeholder-count="3">
+<button class="pill on" onClick="{{l.drop}}" aria-label="{{l.label}}">{{l.name}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</sc-for>
+<button class="pill add" onClick="{{addShown}}" aria-label="添加字幕语言"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+</div>
+<span class="set-k">主题</span>
+<div class="set-v">
+<button class="pill on" aria-label="去掉读书会 · 看不见的城市">读书会 · 看不见的城市<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+<a class="pill add" href="Knowledge.dc.html" aria-label="从知识库里选主题"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<span class="set-k">声音</span>
+<div class="set-v">
+<button class="pill" onClick="{{nextSound}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg>{{sound}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+</div>
+</div>
+
+<div class="stage-foot">
+<button class="pill quiet"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"></path></svg>导入</button>
+<a class="pill quiet" href="HostArm.dc.html"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"></circle><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"></path></svg>主持活动</a>
+</div>
+</section>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  state = { spoken: ['zh', 'en'], shown: ['zh', 'en', 'th'], sound: 0 };
+  renderVals() {
+    const NAMES = { zh: '中文', en: 'English', th: 'ไทย', ja: '日本語', ko: '한국어', fr: 'Français', de: 'Deutsch', es: 'Español' };
+    const ALL = Object.keys(NAMES);
+    const SOUNDS = ['麦克风', '电脑里的声音', '麦克风和电脑声音'];
+    const pills = (key) => this.state[key].map((l) => ({
+      name: NAMES[l], label: '去掉' + NAMES[l],
+      drop: () => this.setState({ [key]: this.state[key].filter((x) => x !== l) }),
+    }));
+    const add = (key) => () => {
+      const next = ALL.find((l) => !this.state[key].includes(l));
+      if (next) this.setState({ [key]: [...this.state[key], next] });
+    };
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      rows: [
+        day('今天'),
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+      spoken: pills('spoken'), shown: pills('shown'),
+      addSpoken: add('spoken'), addShown: add('shown'),
+      sound: SOUNDS[this.state.sound],
+      nextSound: () => this.setState({ sound: (this.state.sound + 1) % SOUNDS.length }),
+    };
+  }
+}
+</script>
+</body>
+</html>

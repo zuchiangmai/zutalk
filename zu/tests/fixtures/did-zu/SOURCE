@@ -1,0 +1,10 @@
+Audit logs for testing a validator of did:plc operation logs, which did:zu shares.
+
+From   https://github.com/4seas-community/did-method-zu, interop_tests/audit_log/
+       (commit 6e06ac43cd02c26e4a1909d32437babdb19aeebf), the DIDs written as did:zu.
+       Their canonical home is https://github.com/did-method-plc/go-didplc, testdata/.
+Terms  MIT or Apache-2.0, at your option. Copyright (c) 2022-2026 Bluesky Social PBC.
+
+Left out: three logs that carry the handles of persons (a valid log of two operations, the
+one log with a legacy creation, the one with a signature encoded as DER). tests/did.rs
+makes logs of its own for what the last two cover.

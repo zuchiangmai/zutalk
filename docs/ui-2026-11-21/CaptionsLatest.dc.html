@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>字幕窗 · 最新一句</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="dark" style="width: 960px; height: 260px; display: flex; flex-direction: column; padding: 14px 28px 24px; background: #012A1F; overflow: hidden">
+
+<div style="display: flex; align-items: center; gap: 8px; min-height: 30px">
+<sc-if value="{{out}}" hint-placeholder-val="{{false}}">
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>对外</span>
+</sc-if>
+<span class="spacer"></span>
+<button class="icon-btn" aria-label="字幕窗的设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8M14 5v4M8 15v4"></path></svg></button>
+<button class="icon-btn" aria-label="关闭字幕窗"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</div>
+
+<div style="flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; align-items: end">
+<div lang="zh-Hans" style="display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; min-width: 0">
+<span class="cap-h">中文</span>
+<p class="read" style="margin: 0; font-size: 17px; line-height: 1.4; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{zhOld}}</p>
+<p class="read" style="margin: 0; min-height: 2.7em; font-size: 30px; line-height: 1.35; color: #fff">{{zhTail}}<span class="caret"></span></p>
+</div>
+<div lang="en" style="display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; min-width: 0">
+<span class="cap-h">ENGLISH</span>
+<p class="read" style="margin: 0; font-size: 17px; line-height: 1.4; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{enOld}}</p>
+<p class="read" style="margin: 0; min-height: 2.7em; font-size: 30px; line-height: 1.35; color: #fff">{{enTail}}<span class="caret"></span></p>
+</div>
+<div lang="th" style="display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; min-width: 0">
+<span class="cap-h">ไทย</span>
+<p class="read" style="margin: 0; font-size: 17px; line-height: 1.4; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{thOld}}</p>
+<p class="read" style="margin: 0; min-height: 2.7em; font-size: 30px; line-height: 1.35; color: #fff">{{thTail}}<span class="caret"></span></p>
+</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"out":{"editor":"boolean","default":false},"$preview":{"width":960,"height":260}}'>
+class Component extends DCLogic {
+  state = { k: 0 };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 90); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const SCRIPT = [
+      ['我们从第三章开始。', "Let's start from chapter three.", 'เราเริ่มจากบทที่สามกันนะ'],
+      ['有人想先说说读到的感受吗？', 'Would anyone like to share how it felt?', 'มีใครอยากเล่าความรู้สึกก่อนไหม'],
+      ['他写的每一座城，其实都是同一座。', 'Every city he writes about is the same one.', 'ทุกเมืองที่เขาเขียนถึงคือเมืองเดียวกัน'],
+    ];
+    const SAY = 30, PER = 44;
+    const k = this.state.k, n = Math.floor(k / PER), at = k % PER;
+    const line = (i) => SCRIPT[i % SCRIPT.length];
+    const cut = (text, part, byWord) => {
+      const units = byWord ? text.split(' ') : Array.from(text);
+      return units.slice(0, Math.round(units.length * part)).join(byWord ? ' ' : '');
+    };
+    const tail = (j, byWord, lag) => cut(line(n)[j], Math.max(0, Math.min(1, (at - lag) / SAY)), byWord);
+    const old = (j) => (n > 0 ? line(n - 1)[j] : '');
+    return {
+      out: this.props.out ?? false,
+      zhOld: old(0), zhTail: tail(0, false, 0),
+      enOld: old(1), enTail: tail(1, true, 4),
+      thOld: old(2), thTail: tail(2, false, 6),
+    };
+  }
+}
+</script>
+</body>
+</html>

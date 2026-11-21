@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>精修稿 · 录完以后写的那一版</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row on" href="Refine.dc.html">
+<span class="row-t">读书会：《看不见的城市》第三夜</span>
+<span class="row-m"><span class="num">42:18</span><span>中文 · English · ไทย</span>
+<sc-if value="{{pGoing}}" hint-placeholder-val="{{false}}"><span class="shimmer" style="margin-left: auto">精修中</span></sc-if>
+<sc-if value="{{draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已交"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<span class="seg" role="tablist"><button class="seg-i on" role="tab" aria-selected="true">文字稿</button><button class="seg-i" role="tab" aria-selected="false">笔记</button></span>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<article class="doc" style="position: relative">
+<h1 class="title" style="margin: 0">读书会：《看不见的城市》第三夜</h1>
+<div class="meta"><span>今天 19:32</span><span class="num">42:18</span><span>中文 · English · ไทย</span><span class="tag">音频</span></div>
+
+<sc-if value="{{pDone}}" hint-placeholder-val="{{true}}">
+<div class="acts">
+<button class="btn"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>复制</button>
+<span class="seg" role="radiogroup" aria-label="版本"><button class="seg-i {{fineCls}}" role="radio" aria-checked="{{isFine}}" onClick="{{showFine}}">精修稿</button><button class="seg-i {{liveCls}}" role="radio" aria-checked="{{isLive}}" onClick="{{showLive}}">现场稿</button></span>
+<button class="pill {{cmpCls}}" aria-pressed="{{cmp}}" onClick="{{toggleCmp}}">对比</button>
+<span class="k">精修稿 20:31 写好</span>
+<span class="spacer"></span>
+<button class="pill on" aria-expanded="true">导出<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+</div>
+<div class="pop menu" style="top: 118px; right: 40px">
+<div class="set-v" style="padding: 6px 10px 8px"><span class="tag">{{verName}}</span><span class="tag">中文</span><span class="tag">English</span></div>
+<hr>
+<button class="menu-i">Markdown (.md)</button>
+<button class="menu-i">SRT (.srt)</button>
+<button class="menu-i">WebVTT (.vtt)</button>
+</div>
+</sc-if>
+
+<sc-if value="{{pGoing}}" hint-placeholder-val="{{false}}">
+<div class="acts" role="status">
+<span class="steps" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></span>
+<span class="shimmer">正在精修 · 转成文字</span>
+<span class="spacer"></span>
+<span class="tag">现场稿</span>
+</div>
+</sc-if>
+
+<sc-if value="{{pNone}}" hint-placeholder-val="{{false}}">
+<div class="acts">
+<button class="btn">精修</button>
+<span class="tag">用社区额度</span>
+<span class="spacer"></span>
+<span class="tag">现场稿</span>
+</div>
+</sc-if>
+
+<sc-if value="{{pFail}}" hint-placeholder-val="{{false}}">
+<div class="acts" role="status">
+<span class="tag warn">精修没写成</span>
+<span class="k">服务没有及时回应</span>
+<button class="pill">再试</button>
+<span class="spacer"></span>
+<span class="tag">现场稿</span>
+</div>
+</sc-if>
+
+<ol class="tl">
+<sc-for list="{{lines}}" as="l" hint-placeholder-count="4">
+<li>
+<div class="who"><sc-if value="{{isFine}}" hint-placeholder-val="{{true}}"><b>{{l.who}}</b></sc-if><span class="num">{{l.t}}</span></div>
+<div>
+<p class="said">{{l.pre}}<sc-if value="{{cmp}}" hint-placeholder-val="{{true}}"><mark class="find">{{l.chg}}</mark></sc-if><sc-if value="{{plain}}" hint-placeholder-val="{{false}}"><span>{{l.chg}}</span></sc-if>{{l.post}}</p>
+<sc-if value="{{isFine}}" hint-placeholder-val="{{true}}"><p class="tr">{{l.tr}}</p></sc-if>
+</div>
+</li>
+</sc-for>
+</ol>
+</article>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"phase":{"editor":"enum","options":["写好","精修中","没精修","没写成"],"default":"写好"},"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // Two versions of one recording: what was shown while it was said, and what was written
+  // afterwards from the whole audio. The later one is what is read, copied and exported once it
+  // exists; the first stays one press away, and "对比" shows where they differ.
+  state = { ver: 'fine', cmp: true };
+  renderVals() {
+    const phase = this.props.phase ?? '写好';
+    const done = phase === '写好';
+    const fine = done && this.state.ver === 'fine';
+    const L = [
+      ['主持人', '0:12', '我们从第三', '张', '章', '开始。上次停在那座只存在于记忆里的城。', "Let's start from chapter three. Last time we stopped at the city that exists only in memory."],
+      ['说话人 2', '0:31', 'I think every city he writes about is really the same one.', '', '', '', '我觉得他写的每一座城，其实都是同一座。'],
+      ['主持人', '0:44', '对，所以读到后面，会觉得是在读一个人的', '回一', '回忆', '。', "Right, so later on it feels like reading one person's memories."],
+      ['说话人 3', '1:05', '我想问一下，书里的', '科汗', '可汗', '到底相不相信他？', 'May I ask: does the Khan in the book actually believe him?'],
+    ];
+    const cmp = done && this.state.cmp;
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      pDone: done, pGoing: phase === '精修中', pNone: phase === '没精修', pFail: phase === '没写成',
+      draft: phase === '没精修' || phase === '没写成',
+      isFine: fine, isLive: !fine, fineCls: fine ? 'on' : '', liveCls: fine ? '' : 'on',
+      showFine: () => this.setState({ ver: 'fine' }), showLive: () => this.setState({ ver: 'live' }),
+      cmp, plain: !cmp, cmpCls: cmp ? 'on' : '', toggleCmp: () => this.setState({ cmp: !this.state.cmp }),
+      verName: fine ? '精修稿' : '现场稿',
+      lines: L.map(([who, t, pre, live, fin, post, tr]) => ({ who, t, pre, chg: fine ? fin : live, post, tr })),
+      rows: [
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
