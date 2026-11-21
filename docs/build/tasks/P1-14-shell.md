@@ -1,0 +1,118 @@
+# P1-14 外壳：一个任务独占推送，命令全部 async，没有锁
+
+## 目标
+
+做完以后：
+
+1. 外壳里没有同步的命令、没有 `Mutex`、没有要主线程回话的窗口查询。主线程不会被等，也不等别人。
+2. 往窗口推东西的是一个任务，订阅者的表和每种值的最新一份都只在它手里。页面重新加载，旧的通道被换掉；新窗口一订阅就拿到小状态和每个信号现在的值。
+3. 推送的规则是一个不认识 Tauri 的状态机（`Fan`），从 `app/tests/pump.rs` 穷举交错来测。
+4. 外壳报「推到第几帧」，界面报「画到第几帧」；`dispatch` 把拒绝的原因直接还给界面。
+5. `scripts/build/rules/shell.sh` 守着第 1 条。
+
+这是 `PLAN.md` §7 的 I5，和 I4 的后一半。
+
+## 背景
+
+- 设计：`docs/build/phases/P1.md` §3.9；为什么不用 `arc-swap` 和 `loom`：§2 末尾。`PLAN.md` §4.2「外壳 `fan` 拿着锁调用 `is_visible()`」一行、§4.4「页面重新加载零成本」。
+- `app/src/main.rs`（P1-06 至 P1-08 之后）：
+  - `Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>`；`subscribe` 是同步命令，在主线程上拿这把锁；`fan` 拿着同一把锁调 `window.is_visible()`，而这个查询要主线程回话。两边一碰就是死锁：0.8「录音中主线程卡死被强制退出」的同一类毛病；
+  - `dispatch` 是同步命令；
+  - `Ready = Arc<Mutex<Option<(Update, Vec<u8>)>>>`，`installer` 拿着锁装更新；
+  - `setup` 里 `block_on`；P1-06 加的那个把 `Outlet` 转给 `fan` 的任务。
+- `Outlet`（六个 `Reading`，可克隆）、`Core::send`（返回 `Result`）、`Core::looked`（async）、`Core::pushed`、`Core::drawn`。
+- `app/Cargo.toml`：现在只有一个二进制目标；`tokio` 只开了 `time`。`app/tests/updates.rs` 只读配置文件。
+- Tauri 的 `Channel::send`：8 KB 以内的消息直接注入页面，不阻塞；页面重新加载后，旧通道的 `send` 不一定报错，所以「发不出去才丢」不够，要按窗口换。
+- 界面：`ui/src/lib/core.svelte.ts` 的 `tauri`（`invoke('dispatch')`、`invoke('subscribe', { channel })`）和 `take`。
+
+## 做法
+
+### 库目标
+
+1. `app` 加 `src/lib.rs`，里面 `pub mod pump;`（`windows`、`updates` 也可以放进库里）。`main.rs` 只剩接线。`app/Cargo.toml` 的 `tokio` 加 `sync`、`macros`（测试再加 `test-util`、`rt`）。
+
+### `pump.rs`
+
+2. 照 `P1.md` §3.9 的签名：`Sink`、`Fan`、`run`。
+   - `Fan::join(window, sink)`：这个窗口原来的通道被换掉；新的先收到 `State`（有的话），再按固定的次序收到每种信号最新的一份。提示不补。
+   - `Fan::push(event)`：记成这一种的最新一份（提示不记）；发给每个通道；通道说 `false` 就拿掉。同一种信号只往前走：序号不比上次发出去的大，就不发。
+   - `Fan` 是纯的状态机：不起任务、不读时钟、不认识 Tauri。
+3. `run`：一个循环，同时等：新的订阅、`Outlet` 的六个 `Reading`。
+   - 每推一帧，调一次「推到第几帧」（传进来的函数；`main.rs` 给的是 `core.pushed`）；
+   - `said`：自己记着发到第几条，新的每条发一个 `Event::Notice`；落后太多（超过 `Notices::KEEP`）就从还留着的最旧一条接着发；
+   - 字幕窗：记着自己上次要它显示还是隐藏；`State.captions` 和记着的不一样时，调一次「显示/隐藏」（传进来的函数），再记下。从不问窗口现在什么样；
+   - `ZUTALK_WATER_LOG`：设了的话，每份 `Water` 序列化成一行，`try_send` 给一个专门往文件里追加的任务（有上限的队列，满了丢）。只有数字和代码，没有文字。
+4. 推送任务崩了要重起，窗口不用重新订阅：订阅的口和 `Fan` 由外面一层拿着，里面一层崩了再进。办法自己选（`zutalk_core::rt::supervise` 可以用）。
+
+### 命令
+
+5. 三个命令，全是 `async fn`：
+
+   ```rust
+   #[tauri::command]
+   async fn dispatch(command: Command, core: State<'_, Core>) -> Result<(), String>;      // Err: the code
+   #[tauri::command]
+   async fn subscribe(window: WebviewWindow, channel: Channel<Event>, joins: State<'_, Joins>) -> Result<(), String>;
+   #[tauri::command]
+   async fn drawn(seq: u64, core: State<'_, Core>) -> Result<(), String>;
+   ```
+
+   `subscribe` 只是把 `(窗口的标签, 通道)` 发给推送任务（有上限的 `mpsc`，8，等）。`impl Sink for Channel<Event>`。
+
+### 窗口与更新
+
+6. `windows.rs`：现在只有「让字幕窗显示/隐藏」一个函数（`show()`、`hide()` 是往主线程投递，不等回话）。P3、P5 在这里加大小、位置、穿透点击。
+7. `updates.rs`：一个任务拿着下好的更新。它照旧启动时和每 6 小时看一次，找到了 `core.looked(..).await`。给核心的 `Install` 端口是一个闭包：把「装吧」和一个回话的口（`sync_channel(1)`）发给这个任务，然后等回话；任务装上了就重启应用（闭包永远等不到回话），装不上就回话，闭包返回。没有锁。（核心从 P1-13 起是在阻塞线程上调这个端口的，等得起。）
+8. `setup` 里不 `block_on`：`Core::start` 只起任务，进入运行时的上下文就够了。
+
+### 界面（最小）
+
+9. `ui/src/lib/core.svelte.ts`：
+   - `send`：`invoke('dispatch')` 被拒绝时，把代码 `say` 出来；
+   - 收到 `Frame` 信号时记下它的序号；每秒看一次，序号比上次报的大就 `invoke('drawn', { seq })`。把「该不该报、报哪个」写成一个纯函数，好测；
+   - `Bus` 的类型跟着改；`ui/dev/mock.ts` 的假核心不用报。
+
+### 规则脚本
+
+10. `scripts/build/rules/shell.sh`，对 `app/src`：
+    - 每个 `#[tauri::command]` 后面的函数是 `async fn`；
+    - 没有 `Mutex`、`RwLock`、`.lock()`、`block_on`；
+    - 没有要主线程回话的窗口查询：`is_visible`、`is_focused`、`is_minimized`、`is_maximized`、`inner_size`、`outer_size`、`inner_position`、`outer_position`、`scale_factor`、`current_monitor`、`primary_monitor`、`available_monitors`；
+    - 违反就打印「文件:行」并以非零退出。
+
+## 先写的测试
+
+`app/tests/pump.rs`：
+
+1. `every_interleaving_ends_with_each_window_holding_the_latest`。两串动作：订阅的一串 `[join(main, a), join(captions, b), join(main, c)]`（第三个是页面重新加载），推送的一串 `[State₁, Frame 1, Session 1, Frame 2, Notice x, State₂, Frame 3]`。保持各自内部的次序，把两串所有的交错（120 种）都跑一遍，每一种都断言：
+   - `b` 和 `c` 各自最后收到的 `State` 是 `State₂`，最后收到的 `Frame` 是 3 号；
+   - 每个通道收到的 `Frame` 序号严格递增；
+   - `c` 订阅以后，`a` 再没有收到任何东西；
+   - `Notice x` 只被当时订阅着的通道收到，各一次；之后订阅的没有补到它。
+2. `a_page_that_is_gone_is_let_go`：通道说 `false` 以后不再被发。
+3. `a_signal_older_than_the_last_one_sent_is_not_sent`。
+4. `a_window_that_joins_late_gets_the_state_and_every_signals_latest`（暂停的时钟，真的 `run`，寄存器由测试自己建）：先 `set` 好各个寄存器，再订阅：收到的头几条正是 `State` 和每种信号最新的一份；之后每 `set` 一次收到一条；「推到第几帧」被叫到的序号和帧的序号一致。
+5. `a_reload_while_frames_are_coming_loses_nothing_and_the_old_channel_goes_quiet`：帧每 100 虚拟毫秒来一份，中间同一个窗口再订阅一次：新通道第一条 `Frame` 就是当时最新的；旧通道此后一条也没有。
+6. `the_captions_window_follows_the_state_and_is_never_asked`：`State.captions` 依次是假、真、真、假：「显示/隐藏」被调的是 `[真, 假]`。
+7. `codes_are_said_once_each`：`said` 里连着来 3 条；再来 20 条（超过留着的 16 条）而推送任务这期间没有机会跑：发出去的没有重复，最后一条是最新的。
+8. `a_channel_that_panics_does_not_end_the_pump`：一个 `send` 会 panic 的通道订阅进来；别的窗口照样收到之后的帧。
+
+`ui/tests/store.test.ts`（或新文件）：
+
+9. 「画到第几帧，一秒报一次，没动就不报」：那个纯函数的表格测试。
+10. 「被拒绝的命令说出代码」：假的 `Bus` 的 `send` 以 `busy` 拒绝，`store.notices` 里多一条。
+
+规则脚本的证明（写进报告）：把现在的 `main.rs`（改之前）喂给 `shell.sh`，它报出同步命令、`Mutex`、`is_visible`、`block_on`。
+
+## 验收
+
+- `scripts/build/check.sh` 全绿（`shell.sh` 在其中）。
+- `grep -rn "Mutex\|is_visible\|block_on" app/src` 没有结果。
+- 报告里写明：门禁里跑不了真的窗口；真机上要看的两件事（开发模式下连按十次重新加载，字幕和状态都接得上；录音中开关字幕窗二十次不卡）交给负责人，并已记进给 P1-15 的清单。
+
+## 不做
+
+- 字幕窗的大小、位置、穿透点击、舞台全屏（P3、P5）。
+- 界面「信号先存下来，每帧只处理最新的」（P3）；不换框架。
+- 观看页、房间。
+- 不动 `app/tauri.conf.json`、更新的清单脚本和 `app/tests/updates.rs` 的断言。
