@@ -1,4 +1,4 @@
-# P1-11 hub 的邮箱有上限；每条命令留一条事件
+# P1-13 hub 的邮箱有上限；每条命令留一条事件
 
 ## 目标
 
@@ -8,11 +8,11 @@
 2. 界面的命令从不等：邮箱满了，当场拒绝，`busy`。
 3. hub 处理的每条命令在日志里有一条 `command.done`（种类、当场的结果、用了多久）；处理一条消息超过预算，有一条 `hub.turn.slow`。
 
-这是 `PLAN.md` §7 的 I4 的一部分（采集的通道和 lint 是 P1-12，「外壳没有同步命令」是 P1-21），也是 §4.5.2「每条命令（种类、结果代码、用时）」。
+这是 `PLAN.md` §7 的 I4 的一部分（采集的通道和 lint 是 P1-14，「外壳没有同步命令」是 P1-23），也是 §4.5.2「每条命令（种类、结果代码、用时）」。
 
 ## 背景
 
-- 每条队列的名字、上限和满了怎么办，在 `docs/build/phases/P1.md` §3.7；队列怎么造在 §3.13.9；事件在 §3.13.3（标着 P1-11 的三行）；hub 的预算在 §3.8。
+- 每条队列的名字、上限和满了怎么办，在 `docs/build/phases/P1.md` §3.7；队列怎么造在 §3.13.9；事件在 §3.13.3（标着 P1-13 的三行）；hub 的预算在 §3.8。
 - `rt::queue`（P1-04）：`bounded`、`Full`、`Tx::offer`、`send`、`send_blocking`、`with`。
 - `core/src/app/hub.rs`：`Core(mpsc::UnboundedSender<Msg>)`、`type Sender`、`Core::send`、`Core::looked`；往邮箱里发的地方散在各个任务里：登录和认领的结果、房间的结果、城的日历、交城的进度和结果、搬运的进度（在 `spawn_blocking` 里）和结果、整场转写的进度和结果、一场录音结束了。P1-05 给这些发送处补了 `// dropped:`（「邮箱没有上限」那个理由从这一件起不成立了）。
 - `Hub::run` 收信的循环；`take(msg)` 处理一条；`command(command) -> Result<(), &'static str>`。
@@ -37,7 +37,7 @@
 3. 结果和事实（登录的结果、一场录音结束了、整场转写写好了…）：`results.send(msg).await`；在阻塞调用里用 `send_blocking`。发不进去只有一种可能：hub 已经结束，那时同一行写 `// dropped: the hub has ended`。
 4. 进度（`Writing`、`Filing`、`Moving`）：`progress.offer(msg)`，被退回就丢，同一行 `// dropped: the next one replaces it`。
 5. `Core::looked` 改成 `async fn`，走 `results`：外壳找到新版本这件事不能丢。
-6. 外壳（最小改动）：`dispatch` 里 `core.send` 返回 `Err(code)` 时，经现有的 `fan` 发一个 `Event::Notice(code)`；`look` 里 `.await` 那个 `looked`。P1-21 再让 `dispatch` 把结果直接还给界面。
+6. 外壳（最小改动）：`dispatch` 里 `core.send` 返回 `Err(code)` 时，经现有的 `fan` 发一个 `Event::Notice(code)`；`look` 里 `.await` 那个 `looked`。P1-23 再让 `dispatch` 把结果直接还给界面。
 7. `ui/lang` 里 `code.busy` 已经有词（「服务忙」一类），意思对得上就沿用；对不上就改这八处的词。
 
 ### 每条命令一条事件
@@ -45,9 +45,9 @@
 8. `Command` 加 `kind(&self) -> &'static str`：变体的名字（`Start`、`Pause`、`Change`…），一个 `match`。`Msg` 同样加一个 `kind()`（`Do` 给命令的种类；其余是 `Ended`、`Writing`、`Wrote`…）。
 9. hub 的循环里，处理每条消息的前后各读一次 `std::time::Instant`（这是那一层薄壳，不是规则；处理的函数自己不读钟）：
    - 分布 `hub.turn_us` 记这一圈的微秒；计数 `hub.turns` 加一；
-   - 是命令：一条 `command.done`（`kind`、`code`、`took_us`）。`code` 是 `command(..)` 当场的结果：`ok`，或者拒绝它的代码（这时用 `warn!`）。`ok` 的意思是「收下了」：要落盘的活后来做没做成，是那件活自己的事件（P1-17 的 `job.done`）。计数 `commands.done` 加一；
-   - 超过 `HUB_TURN_BUDGET_US`（1000：`PLAN.md` §4.1 给 hub 的预算，一条命令一毫秒）：一条 `warn!("hub.turn.slow", kind, took_us)`，计数 `hub.turns.slow` 加一。**现在它会常见**：hub 还在自己读写磁盘（P1-17、P1-18 搬走）。这正是它该说的话；不要为了让日志安静而调高预算。
-10. 命令被拒绝时说给人听的那个代码照旧（`said.say(code)`，P1-09）。
+   - 是命令：一条 `command.done`（`kind`、`code`、`took_us`）。`code` 是 `command(..)` 当场的结果：`ok`，或者拒绝它的代码（这时用 `warn!`）。`ok` 的意思是「收下了」：要落盘的活后来做没做成，是那件活自己的事件（P1-19 的 `job.done`）。计数 `commands.done` 加一；
+   - 超过 `HUB_TURN_BUDGET_US`（1000：`PLAN.md` §4.1 给 hub 的预算，一条命令一毫秒）：一条 `warn!("hub.turn.slow", kind, took_us)`，计数 `hub.turns.slow` 加一。**现在它会常见**：hub 还在自己读写磁盘（P1-19、P1-20 搬走）。这正是它该说的话；不要为了让日志安静而调高预算。
+10. 命令被拒绝时说给人听的那个代码照旧（`said.say(code)`，P1-11）。
 
 ## 显式与可观测
 
@@ -56,7 +56,7 @@
 - **数**：`HUB_MAIL_MSGS`（256）、`HUB_TURN_BUDGET_US`（1000）。
 - **队列**：`hub.mail`，`queue::bounded`；命令 `Full::Reject`，结果 `Full::Wait`，进度 `Full::Drop`。
 - **任务**：不起新的。`spawn.sh` 的欠账不变。
-- **欠账**：`bounded.sh` 里 `core/src/app/hub.rs` 那一行减掉邮箱的那几处（`unbounded_channel` 和 `UnboundedSender` 的类型）；剩下音频的 `broadcast` 和 lane 的 `mpsc`（P1-14 还）。
+- **欠账**：`bounded.sh` 里 `core/src/app/hub.rs` 那一行减掉邮箱的那几处（`unbounded_channel` 和 `UnboundedSender` 的类型）；剩下音频的 `broadcast` 和 lane 的 `mpsc`（P1-16 还）。
 - **隐私**：`command.done` 只带种类，不带命令的内容（`Change` 的新标题、`Search` 的词、`Export` 的路径都不进日志）。
 
 ## 先写的测试
@@ -78,7 +78,7 @@
 
 ## 不做
 
-- 不动采集的通道，不加 `clippy.toml`（P1-12）。
-- 不加 tape 和草稿的队列（P1-13），不加 desk 的队列（P1-17）。
-- 不把 hub 的 IO 搬走（P1-17、P1-18）：`hub.turn.slow` 这一件只是让它看得见。
-- 不把外壳的命令改成 async（P1-21）。
+- 不动采集的通道，不加 `clippy.toml`（P1-14）。
+- 不加 tape 和草稿的队列（P1-15），不加 desk 的队列（P1-19）。
+- 不把 hub 的 IO 搬走（P1-19、P1-20）：`hub.turn.slow` 这一件只是让它看得见。
+- 不把外壳的命令改成 async（P1-23）。

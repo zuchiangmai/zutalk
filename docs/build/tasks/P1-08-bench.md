@@ -1,4 +1,4 @@
-# P1-06 台架：在现在的代码上跑起来，让它失败
+# P1-08 台架：在现在的代码上跑起来，让它失败
 
 ## 目标
 
@@ -14,11 +14,12 @@
 ## 背景
 
 - 设计在 `docs/build/phases/P1.md` §2（量法，和「看得见」那张表）、§3.2（端口）、§3.10（台架）、§3.13.13（测试怎么看见事件）、§3.13.14（隐私测试）。先读这几节。
+- **台架不登录**（`P1.md` §3.10、§3.14）：P1-06、P1-07 已经让录音不要登录。本机身份签记录，自带的钥匙出字。E9 的那一小时就是这样录的，台架量的也该是它。
 - 地基（P1-03 至 P1-05）已经有了：`zutalk_log::capture`、`files`；`Core::stats()`；核心的根树。现在核心发的事件还很少（`task.*`、`stats.*`）：各部件的事件由后面改它们的任务加。
 - `core/src/app/hub.rs`：`Config`（`hear: Hear` 现在是函数指针）；`Task::listen` 里直接 `tape::Writer::create`、`(self.config.hear)(…)`、为每条流 `tokio::spawn(live::run(…))`；`Core::start(config, out)` 的 `out` 回调收 `Event`。
 - `core/src/live/lane.rs`：`open` 里 `connect_async(endpoint)`；`Conn.ws` 的类型是 `WebSocketStream<MaybeTlsStream<TcpStream>>`；`run` 的签名。
 - `core/src/capture/audio.rs`：`Capture`（`pause`、`resume`、`Drop` 即停止）。`core/src/capture/tape.rs`：`Writer`。
-- 现有的测试台：`core/tests/hub/mod.rs`（`signed_in`、`shelf`、`config`、`App`、整场转写服务的替身 `soniox`）、`core/tests/common/mod.rs`（旧版留下的资料夹 `old_library`）、`core/tests/live.rs`（lane 对着本机套接字上的脚本服务；`REAL_FRAMES` 是真服务发过的帧）。
+- 现有的测试台：`core/tests/hub/mod.rs`（`signed_in`、`nobody`、`local_did`、`local_shelf`、`shelf`、`config`、`App`、整场转写服务的替身 `soniox`）、`core/tests/common/mod.rs`（旧版留下的资料夹 `old_library`）、`core/tests/live.rs`（lane 对着本机套接字上的脚本服务；`REAL_FRAMES` 是真服务发过的帧）。
 - `docs/LESSONS.md`「新仓库里用真服务重新量到的」：静音时服务每 1.0–1.2 秒报一次进度；token 的 `end_ms − start_ms` 恒为 60 毫秒；47 秒连续讲话没有一个 `<end>`。服务的替身照这些做。
 - 0.8 的回放夹具是真人的录音，不能进这个仓库。台架的话是编出来的。
 
@@ -45,12 +46,12 @@
 - **服务**的延迟是参数，默认：音频到了 300 虚拟毫秒后回猜的词，700 毫秒后回定下的词，句末 400 毫秒后回 `<end>`；token 的时间在**这条连接自己的钟**上（从 0 数它收到的音频），和真服务一样。
 - **带子**的闸等人放开时有一个真实时间的上限（10 秒），到了就 panic：现在的代码在话筒的任务上直接写 tape，没有这个上限测试会挂死，而不是失败。闸放在守卫里，测试怎么结束它都会被放开。
 - **话筒**除了按钟交块，还能「一口气交 n 块」（采集的钟是它自己的）。
-- **探针**对外只给「每个词第一次出现的虚拟时间」「每一帧」「现在的状态句」「说过的代码」。它现在读 `out` 回调里的 `Event::Live` 和 `State.session.status`；P1-09 会把它改成读 `Outlet`。所以把「从哪里读」挡在台架的一两个函数后面，测试本身不碰 `Event`。
+- **探针**对外只给「每个词第一次出现的虚拟时间」「每一帧」「现在的状态句」「说过的代码」。它现在读 `out` 回调里的 `Event::Live` 和 `State.session.status`；P1-11 会把它改成读 `Outlet`。所以把「从哪里读」挡在台架的一两个函数后面，测试本身不碰 `Event`。
 - 收协议事件（`out` 回调里的 `Event`）的通道用有上限的（比如 1024），满了 panic。
 - **日志的事件**：`Bench::start` 在 `Core::start` 之前装捕获（`zutalk_log::capture(Level::Info)`；8 小时那一条也用 `Info`，别用 `Debug`：捕获有上限），给测试 `bench.seen`。`Seen` 握着这个线程的守卫，不是 `Send`：它留在测试函数自己手里，不进任何任务。每条台架测试结束时（写在 `Bench` 的一个收尾函数里，每条测试都调）断言 `seen.refused() == 0`、`seen.lost() == 0`。
 - **统计**：`bench.tally()` 就是 `core.stats().tally()`；给一个按名字取一行的小函数。
 - 三条用多线程运行时的 `i2_*`：核心里从树上起的任务会把捕获带着走；还没搬到树上的（裸的 `tokio::spawn`，欠账表里的那些）在别的线程上说的话现在收不到，这是预期的：它们的事件和搬家是同一件任务加的。台架自己的替身任务不发事件。
-- 钥匙库是进程里的一个：这个文件里的测试用一把静态的 `tokio::sync::Mutex` 排队（照 `hub/mod.rs` 的 `STORE`）。登录的人、自带的 Soniox 钥匙照 `hub::signed_in()`。
+- 钥匙库是进程里的一个：这个文件里的测试用一把静态的 `tokio::sync::Mutex` 排队（照 `hub/mod.rs` 的 `STORE`）。钥匙库照 `hub::nobody()`（P1-06）：没有人登录，本机身份的种子是写死的，自带一把 Soniox 钥匙；读草稿用 `hub::local_shelf(data)`。`Config.server` 是到不了的地址。`Bench::start` 的选项里有一项「不放钥匙」（那一场只录音，`captions.no_key`）：这一件只留这个选项和一条最小的测试（下表里 `without_a_key_the_bench_records_sound_and_no_caption` 一行），P1-16、P1-17 用它。收尾函数里另断言 `state.me` 是空的：台架上的每一条都是在没有人登录的核心上跑的。
 
 ### 3. 测试（`core/tests/liveness.rs`）
 
@@ -64,8 +65,9 @@
 | `i6_a_lane_that_dies_comes_back_and_marks_what_it_missed` | 第 20 秒让服务的替身在 lane 的任务里 panic（`Wire` 的 `poll_next` 里）。5 虚拟秒内新的词又上屏；草稿里有一行空缺（`…`，不完整）盖住没听到的那一段；崩之前说完的行都在 | 暂停 |
 | `i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence` | 第 20 秒让带子的 `append` panic 一次。录音没有结束；停止以后用 `tape::read` 读回来：长度等于录音的长度，丢的那一块是静音，前后的块原样 | 暂停 |
 | `i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection` | 服务收音频但一个字不回。20 虚拟秒内 lane 换了一条连接，词又上屏；草稿里有空缺 | 暂停 |
-| `nothing_said_or_secret_reaches_the_log` | 照 `P1.md` §3.13.14：用真的写文件的口（`zutalk_log::files`，级别 `Debug`，临时目录），录两虚拟分钟，中间让 lane 崩一次、改一次标题、搜一次，停止，刷盘。每一行是一个 JSON 对象，每个值是数、布尔或过得了 `is_plain` 的字符串，没有 `"!"`；找不到话里的任何一个词（原话和译文）、标题、说话人的标签、搜的词、登录的那个人的 DID 和句柄、那把服务钥匙、数据目录的路径；日志不是空的（有 `task.start`）。如果 lane 崩的那一步在现在的代码上会让测试走不下去，先不注入这个故障，留一行注释指给 P1-07 加回来 | 暂停 |
+| `nothing_said_or_secret_reaches_the_log` | 照 `P1.md` §3.13.14：用真的写文件的口（`zutalk_log::files`，级别 `Debug`，临时目录），录两虚拟分钟，中间让 lane 崩一次、改一次标题、搜一次，停止，刷盘。每一行是一个 JSON 对象，每个值是数、布尔或过得了 `is_plain` 的字符串，没有 `"!"`；找不到话里的任何一个词（原话和译文）、标题、说话人的标签、搜的词、本机身份的 `did:key`（`hub::local_did()`）、那把服务钥匙、数据目录的路径；日志不是空的（有 `task.start`、`identity.who`）。如果 lane 崩的那一步在现在的代码上会让测试走不下去，先不注入这个故障，留一行注释指给 P1-09 加回来 | 暂停 |
 | `the_search_for_leaks_finds_one` | 查漏的那个函数，喂给它一行带着一个词的日志、一行带着钥匙的、一行值是 `"!"` 的、一行嵌了对象的：四行都报出来；一行干净的不报 | — |
+| `without_a_key_the_bench_records_sound_and_no_caption` | 台架「不放钥匙」起一场，说 30 虚拟秒的话，停止：状态句一直是 `AudioOnly { why: "captions.no_key" }`；没有一帧带着栏；服务的替身一次也没有被拨；带子的块数等于话筒交出的块数 | 暂停 |
 | `i8_what_one_change_sends_does_not_grow_with_the_library` | 资料库里 5 条和 100 条录音两种情况下，改一条的标题，量随后发出的 `State` 的字节数：两者之比 ≤ 1.2。直接标 `#[ignore = "P2：状态瘦身"]` | 真实 |
 
 **每条注入故障的测试，除了表里写的「恢复了」，还要断言「看得见」**：照 `P1.md` §2 第二张表里它那一行的事件、判断、提示和计数，一项不少地写进测试（`i2_*` 三条、`i6_*` 两条、`i7_a_service_…` 一条）。这些事件现在还没有人发，所以：
@@ -84,7 +86,7 @@
 每一条都跑（挂起的用 `-- --ignored` 单独跑），把结果写进报告：通过，或者怎么失败（断言的输出）。然后：
 
 - 通过的：不挂起，留在门禁里。
-- 失败的：`#[ignore = "P1-NN：<它等什么>"]`。让它通过的任务，预计是：`i1_*` → P1-08（一帧有了上限）；`i2_a_tape_…` → P1-13；`i2_a_job_…` → P1-17；`i6_a_lane_…` → P1-07（`supervise` 接住 panic）；`i6_a_tape_writer_…` → P1-13；`i7_a_service_…_and_it_shows` → P1-15；`i2_background_…_and_it_shows` → P1-19。预计只是预计：以跑出来的为准；哪一条失败的原因和预计的不一样，报告里写清楚，并把 `NN` 指到真正该修它的任务（见 `P1.md` §5 的表）。
+- 失败的：`#[ignore = "P1-NN：<它等什么>"]`。让它通过的任务，预计是：`i1_*` → P1-10（一帧有了上限）；`i2_a_tape_…` → P1-15；`i2_a_job_…` → P1-19；`i6_a_lane_…` → P1-09（`supervise` 接住 panic）；`i6_a_tape_writer_…` → P1-15；`i7_a_service_…_and_it_shows` → P1-17；`i2_background_…_and_it_shows` → P1-21。预计只是预计：以跑出来的为准；哪一条失败的原因和预计的不一样，报告里写清楚，并把 `NN` 指到真正该修它的任务（见 `P1.md` §5 的表）。
 - 一条预计会过的没过，而且原因是现在代码的毛病：照样挂起、写明、指到该修的任务。原因是台架自己的毛病：修台架。
 
 ### 5. 8 小时那一条的耗时
@@ -100,7 +102,7 @@
 - **事件、统计**：这一件在 `core/src` 里只加三个端口，是接线，不加事件，不数数。它给的是「看」的那一头：台架的捕获、`bench.tally()`、隐私测试。
 - **数**：台架里的延迟（300、700、400、1100 毫秒）、闸的上限（10 秒）都是带单位的常量，注释写来历（`LESSONS.md` 的哪一条）。测试代码不归 `numbers.sh` 管，但台架是后面十几件任务都要读的东西，照同样的规矩写。
 - **端口**：`Config` 新加的 `dial`、`reels` 和换了类型的 `hear` 各有一行注释。
-- **任务、队列**：`core/src` 里不新起任务、不新造通道（`spawn.sh`、`bounded.sh` 的欠账表不许变大）。`Task::listen` 里现有的裸 `tokio::spawn(live::run(…))` 原样留着，P1-14 搬。
+- **任务、队列**：`core/src` 里不新起任务、不新造通道（`spawn.sh`、`bounded.sh` 的欠账表不许变大）。`Task::listen` 里现有的裸 `tokio::spawn(live::run(…))` 原样留着，P1-16 搬。
 
 ## 先写的测试
 
@@ -119,6 +121,6 @@
 - 不修任何一条失败的测试所指的毛病：那是后面的任务。
 - 不加 `turmoil`、`hdrhistogram`、随机数库。
 - 不把真人的录音或 0.8 的夹具音频搬进来。
-- 不写 `i7_offline_…`、`i7_a_capture_that_stops_…`：它们要用的东西还不存在（P1-15 写采集那条，P1-16 写断网那条）。
+- 不写 `i7_offline_…`、`i7_a_capture_that_stops_…`：它们要用的东西还不存在（P1-17 写采集那条，P1-18 写断网那条）。
 - 不给核心的任何部件加事件：那是改它的任务的事。
-- 不改 `Core::start` 的签名（P1-09 改）。
+- 不改 `Core::start` 的签名（P1-11 改）。

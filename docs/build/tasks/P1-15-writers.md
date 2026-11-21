@@ -1,4 +1,4 @@
-# P1-13 落盘离开现场的路：写 tape、写草稿各隔一条有上限的队列
+# P1-15 落盘离开现场的路：写 tape、写草稿各隔一条有上限的队列
 
 ## 目标
 
@@ -13,14 +13,14 @@
 
 ## 背景
 
-- 设计：`docs/build/phases/P1.md` §3.6（**为什么是 async 任务加一批一个阻塞调用，不是自己起的线程，也不是长活的阻塞调用**，先读这一条）、§3.7（两条队列的名字、上限和满了怎么办）、§3.13.9（队列怎么造）、§3.13.10（`Tree::keep`、`Tree::blocking`）、§3.13.3（标着 P1-13 的三行）、§2 第二张表里这一件管的四行。`PLAN.md` §4.1 的 L2 一行、§4.2「泵线程直接写 tape」一行。
+- 设计：`docs/build/phases/P1.md` §3.6（**为什么是 async 任务加一批一个阻塞调用，不是自己起的线程，也不是长活的阻塞调用**，先读这一条）、§3.7（两条队列的名字、上限和满了怎么办）、§3.13.9（队列怎么造）、§3.13.10（`Tree::keep`、`Tree::blocking`）、§3.13.3（标着 P1-15 的三行）、§2 第二张表里这一件管的四行。`PLAN.md` §4.1 的 L2 一行、§4.2「泵线程直接写 tape」一行。
 - `core/src/app/hub.rs` 的 `Task::listen`：
   - `tape::Writer` 经 `Config.reels` 建好，被 `sink` 闭包拿着，`sink` 在采集的线程上每块调一次 `append`；
   - 循环里对第一条流每一行说完的 `draft.put(..)`（`shelf::Writer`，写文件），结束时 `draft.sync()`；
-  - 终止的事实经 `ended` 这个 `watch` 交回（P1-10）。
+  - 终止的事实经 `ended` 这个 `watch` 交回（P1-12）。
 - `core/src/capture/tape.rs`：`Writer::create`、`append`（要求块按次序、没有洞）、`recover`（截掉残尾，返回长度）、`Reel`、`Reels`。一块封好以后大小固定，位置就是偏移，nonce 就是位置：**少写一块，后面的全都读不出来**。
 - `core/src/record/shelf.rs`：`Shelf::open(id, LINE)` 给一个 `Writer`，`put`、`sync`。
-- `core/src/rt/supervise.rs`：`Tree`（P1-05）、`supervise`、`Restarts`、`Tree::keep`（P1-07）。`core/src/rt/queue.rs`（P1-04）。
+- `core/src/rt/supervise.rs`：`Tree`（P1-05）、`supervise`、`Restarts`、`Tree::keep`（P1-09）。`core/src/rt/queue.rs`（P1-04）。
 - 导入文件时 `sink` 跑在读文件的线程上（`core/src/capture/audio/file.rs` 的 `run`），它读得比写得快。
 - 台架：`core/tests/bench/mod.rs` 的带子替身有一道闸，能堵住、放开、让 `append` panic 一次。
 
@@ -36,7 +36,7 @@
 - 写出错或 panic（`blocking` 给回 `Broke`）：这一批算丢了，写入口扔掉，照 `supervise`（`Backoff`、`Restarts`）重开。丢的那一批留一条 `warn!("keep.lost", part, n = 这一批几个, why)`（`why` 是错误的代码，或 `panic`），计数 `keep.lost_batches` 加一。到了重启上限就结束，并把原因交给调用者（一个回调或返回值）。
 - 发的口都丢掉以后：把队列里剩下的写完，收尾，结束。调用者能等它结束。
 - 它用 `tokio::time`，不读别的时钟；不 `use crate::` 除 `rt` 以外的任何东西（`rt` 的规矩）。
-- 它不自己 `tokio::spawn`：从给它的那棵树上 `keep`（P1-07），所以它的每次转换有 `part.state`，放弃有 `part.gave_up`，重开的次数进 `part.restarts`，都不用它自己写。这一件里，那棵树是 hub 从根上分出来、交给录音任务的 `recording` 子树（`root.child("recording")`）；P1-14 把这场录音其余的任务也挂上去。
+- 它不自己 `tokio::spawn`：从给它的那棵树上 `keep`（P1-09），所以它的每次转换有 `part.state`，放弃有 `part.gave_up`，重开的次数进 `part.restarts`，都不用它自己写。这一件里，那棵树是 hub 从根上分出来、交给录音任务的 `recording` 子树（`root.child("recording")`）；P1-16 把这场录音其余的任务也挂上去。
 
 ### tape
 
@@ -45,7 +45,7 @@
    - `append(block)`：块正好接上，就写；块在后面，先补封好的静音块直到接上（跨分钟也一样），并发一条 `warn!("tape.pad", from_ms, blocks)`（`tape.rs` 是做 IO 的模块，可以自己发；它在阻塞调用里跑，`Tree::blocking` 把日志带过去了）；块在前面（重开之前已经写过），跳过。「接上、在后面、在前面」是一个纯函数的三种结果，有表格测试。
    - 原有的行为不变：一分钟写完同步一次；`Drop` 时同步。
 2. 录音任务用 `keep` 起写 tape 的部件：`open` 是 `(config.reels)(dir, key)`，队列 `tape`，上限 `TAPE_QUEUE_BLOCKS`（600）。每写完一批，计数 `tape.blocks` 加这一批的块数；`tape.padded_blocks` 加补的静音块数（`Reel::append` 的返回值带不出这个数的话，由真的 `tape::Writer` 自己拿一个 `Counter`）。
-3. `sink` 里：现场的声源用 `Full::End` 的那一头 `offer`，被退回就把 `tape` 写进 `ended`（这场录音结束，已经落盘的留着；`queue.full` 是队列自己发的，`recording.end` 带着 `tape` 是 P1-10 已经有的）；`Source::File` 用 `with(Full::Wait)` 的那一头 `send_blocking`。`sink` 里只剩：算电平、放进队列、`audio.send`。
+3. `sink` 里：现场的声源用 `Full::End` 的那一头 `offer`，被退回就把 `tape` 写进 `ended`（这场录音结束，已经落盘的留着；`queue.full` 是队列自己发的，`recording.end` 带着 `tape` 是 P1-12 已经有的）；`Source::File` 用 `with(Full::Wait)` 的那一头 `send_blocking`。`sink` 里只剩：算电平、放进队列、`audio.send`。
 4. 写 tape 的部件到了重启上限：同样以 `tape` 结束这场录音。
 5. 停止：采集停了、`sink` 丢了以后，等写 tape 的部件写完剩下的再去封（`seal`）。
 
@@ -57,7 +57,7 @@
 
 ### 词
 
-9. `ui/lang/*.json` 里 `code.tape.slow`、`code.draft.behind` 在 P1-07 已加；没有的话在这里补上。
+9. `ui/lang/*.json` 里 `code.tape.slow`、`code.draft.behind` 在 P1-09 已加；没有的话在这里补上。
 
 ## 先写的测试
 
@@ -108,7 +108,7 @@
 
 ## 不做
 
-- 不把录音任务拆到 `app/recording.rs`，不把 lane 和组帧搬到树上，不加水位表（P1-14）。
-- 不加看守和 `judge` 的动作（P1-15）；`Tape`、`Draft` 两格的判断那时才有。
+- 不把录音任务拆到 `app/recording.rs`，不把 lane 和组帧搬到树上，不加水位表（P1-16）。
+- 不加看守和 `judge` 的动作（P1-17）；`Tape`、`Draft` 两格的判断那时才有。
 - 不动整场转写读 tape 的那一头（`tape::read`、`Pass`）。
-- hub 自己的磁盘读写不动（P1-17、P1-18）。
+- hub 自己的磁盘读写不动（P1-19、P1-20）。

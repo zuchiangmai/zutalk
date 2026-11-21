@@ -1,4 +1,4 @@
-# P1-22 外壳和界面也报：主线程心跳，画到第几帧，帧间隔
+# P1-24 外壳和界面也报：主线程心跳，画到第几帧，帧间隔
 
 ## 目标
 
@@ -12,9 +12,9 @@
 
 ## 背景
 
-- 设计：`docs/build/phases/P1.md` §3.13.7（心跳）、§3.13.8（帧间隔）、§3.13.11（`Beat` 是一个状态机）、§3.13.3（标着 P1-22 的两行）、§3.5（`Shell`、`Screen` 两格的预算）。
-- 外壳（P1-21 之后）：`app/src/lib.rs`、`pump.rs`、`windows.rs`、`updates.rs`；外壳的树 `shell`；命令 `dispatch`、`subscribe`；`shell.sh` 禁的是**等**主线程回话的调用。
-- `Core::drawn(seq)`（P1-14）：一次原子写，`Screen` 那一格的位置。现在没人调。`Core::stats()`。
+- 设计：`docs/build/phases/P1.md` §3.13.7（心跳）、§3.13.8（帧间隔）、§3.13.11（`Beat` 是一个状态机）、§3.13.3（标着 P1-24 的两行）、§3.5（`Shell`、`Screen` 两格的预算）。
+- 外壳（P1-23 之后）：`app/src/lib.rs`、`pump.rs`、`windows.rs`、`updates.rs`；外壳的树 `shell`；命令 `dispatch`、`subscribe`；`shell.sh` 禁的是**等**主线程回话的调用。
+- `Core::drawn(seq)`（P1-16）：一次原子写，`Screen` 那一格的位置。现在没人调。`Core::stats()`。
 - Tauri：`AppHandle::run_on_main_thread(closure)` 把闭包投到主线程的事件循环，立刻返回；主线程卡着的时候闭包就排着。
 - 界面：`ui/src/lib/core.svelte.ts`（`store`、`take`、`tauri`）；`ui/src/ui/Captions.svelte` 画字幕。界面现在没有自己的 `requestAnimationFrame` 循环（「信号每帧只处理最新一份」是 P3 的）。
 
@@ -85,7 +85,7 @@
 - **数**：`BEAT_EVERY_MS`、`BEAT_STALLED_MS`（Rust）；`FRAME_GAP_MS`、`REPORT_EVERY_MS`（TypeScript）。四个都是 `PLAN.md` §4.5.2 定的。
 - **队列**：没有。在路上的心跳最多一个；界面的回报每秒最多一次、失败不排队。
 - **任务**：外壳的树上多一个 `shell.beat`。
-- **水位**：`Screen` 这一格从此有位置（`Core::drawn`）；它的预算（5 秒不动是「慢」，没有动作）在 `BUDGETS` 里，P1-07 已经写好。
+- **水位**：`Screen` 这一格从此有位置（`Core::drawn`）；它的预算（5 秒不动是「慢」，没有动作）在 `BUDGETS` 里，P1-09 已经写好。
 - **`shell.sh`**：照旧通过。`run_on_main_thread` 只投不等。
 
 ## 先写的测试
@@ -111,7 +111,7 @@
 ## 验收
 
 - `scripts/build/check.sh` 全绿。
-- 报告里写明：门禁里没有真的主线程和真的浏览器。真机上要看的两件事交给负责人，记进给 P1-24 的清单：
+- 报告里写明：门禁里没有真的主线程和真的浏览器。真机上要看的两件事交给负责人，记进给 P1-26 的清单：
   - 录音中把应用的主线程弄停几秒（比如开着一个系统的打开文件对话框，或者用调试器暂停几秒）：`logs/zutalk.jsonl` 里有一条 `shell.main_thread.stalled` 和一条 `shell.main_thread.back`；
   - 录音中把主窗口切到后台再切回来：没有因此多出 `ui.frame.gap`；正常录十分钟，`ui.frame.gap` 的条数写下来。
 - `ui` 里新加的循环不做和历史长度成正比的事（审查：`vitals.ts` 里没有数组）。

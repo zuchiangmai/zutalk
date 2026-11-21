@@ -1,4 +1,4 @@
-# P1-16 连不上不是无限重试：时限、「停了」、重连
+# P1-18 连不上不是无限重试：时限、「停了」、重连
 
 ## 目标
 
@@ -12,10 +12,10 @@
 
 ## 背景
 
-- 设计：`docs/build/phases/P1.md` §3.5（`Dead` 的规则）、§3.6（重启上限、`Reconnect`）、§3.13.3（标着 P1-16 的两行）、§2 第二张表里这一件管的两行。`PLAN.md` §4.2 最后一行、§4.3 末段、附表里「取钥匙卡了 14 分钟」一行。
-- `core/src/live/lane.rs`：`open` 里 `lane.keys.lease(Service::Soniox).await?` 没有时限；拨号已经有 `timeout(PATIENCE_MS)`；`run` 在监督以 `Fatal` 结束后说 `Link::Stopped(code)`；lane 的 `Gauge`（P1-14）；踢的口（P1-15）。
-- `core/src/rt/supervise.rs`（P1-07）：`Restarts`、`part.gave_up`。
-- `core/src/app/recording.rs`（P1-14、P1-15）：`recording` 子树、看守、`Phase`。
+- 设计：`docs/build/phases/P1.md` §3.5（`Dead` 的规则）、§3.6（重启上限、`Reconnect`）、§3.13.3（标着 P1-18 的两行）、§2 第二张表里这一件管的两行。`PLAN.md` §4.2 最后一行、§4.3 末段、附表里「取钥匙卡了 14 分钟」一行。
+- `core/src/live/lane.rs`：`open` 里 `lane.keys.lease(Service::Soniox).await?` 没有时限；拨号已经有 `timeout(PATIENCE_MS)`；`run` 在监督以 `Fatal` 结束后说 `Link::Stopped(code)`；lane 的 `Gauge`（P1-16）；踢的口（P1-17）。
+- `core/src/rt/supervise.rs`（P1-09）：`Restarts`、`part.gave_up`。
+- `core/src/app/recording.rs`（P1-16、P1-17）：`recording` 子树、看守、`Phase`。
 - `core/src/app/hub.rs`：`Core::start` 里 `reqwest::Client::builder().build()` 没有任何超时；这个客户端也用来传整场转写的音频和交城，所以不能设「整个请求最多多久」。
 - 界面：`ui/src/ui/Live.svelte` 的状态句；`ui/dev/mock.ts` 的 `handlers` 对每个命令都要有一项（类型检查守着）。
 
@@ -25,9 +25,9 @@
 
 1. **取钥匙的时限**：`timeout(PATIENCE_MS, lease)`，到时是 `End::Retry("keys")`。`PATIENCE_MS` 的注释补一句：取钥匙、拨号、写一帧都用它。
 2. **每开一次连接一条事件**：`open` 的出口（成和不成都经过的一处）发 `lane.open`（`lane`、`code`、`keys_ms`、`dial_ms`）。`code` 是 `ok`，或者这一次没成的原因（`keys`、`connect`、`key`…），没成时用 `warn!`。两个用时用 `tokio::time::Instant`（是等待，不是干活），同时记进分布 `lane.keys_ms`、`lane.dial_ms`；没走到拨号那一步时 `dial_ms` 是 0。
-3. **到了重启上限**：监督返回 `Fatal(why)`（P1-07，它自己发 `part.gave_up`），lane 说 `Link::Stopped(why)`，它的 `Gauge` 记 `ended(why)`。`judge` 给出 `Dead{why}` 和一次 `Tell(why)`；看守照 P1-15 发 `judge.verdict`。同一格、同一个原因的现场在变成 `Stalled` 时已经留过，变成 `Dead` 不再留（`due` 管着）。
-4. **`Command::Reconnect`**：hub 交给录音任务；录音任务把已经结束（而录音还没停）的每条 lane 重新起起来，仍然用它原来的名字挂在 `recording` 子树上，并发一条 `info!("lane.reconnect", lane)`。新的 lane 从旧的 `Sent` 水位接着（`lane::run` 能带着起点的 `edge` 和原因开始），所以它第一块到来时说一段空缺，盖住停着的那段时间；它的 `Gauge` 的 `ended` 清掉。没有录音时：`recording.none`。没有停了的 lane 时：什么也不做，命令照样是 `ok`。
-   - 录音的状态机（`Phase`）不为它多一个状态：重连只在 `Recording`、`Paused` 里有效，`Closing` 以后来的 `Reconnect` 不做事。把这一行加进 P1-14 的转换表测试。
+3. **到了重启上限**：监督返回 `Fatal(why)`（P1-09，它自己发 `part.gave_up`），lane 说 `Link::Stopped(why)`，它的 `Gauge` 记 `ended(why)`。`judge` 给出 `Dead{why}` 和一次 `Tell(why)`；看守照 P1-17 发 `judge.verdict`。同一格、同一个原因的现场在变成 `Stalled` 时已经留过，变成 `Dead` 不再留（`due` 管着）。
+4. **`Command::Reconnect`**：hub 交给录音任务；录音任务把已经结束（而录音还没停）的每条 lane 重新起起来，仍然用它原来的名字挂在 `recording` 子树上，并发一条 `info!("lane.reconnect", lane)`。新的 lane 从旧的 `Sent` 水位接着（`lane::run` 能带着起点的 `edge` 和原因开始），所以它第一块到来时说一段空缺，盖住停着的那段时间；它的 `Gauge` 的 `ended` 清掉。没有录音时：`recording.none`。没有停了的 lane 时：什么也不做，命令照样是 `ok`。一场本来就没有 lane 的录音（来自文件、没选字幕语言、`captions.no_key`）也是「没有停了的 lane」：`Reconnect` 不给它起 lane。录音中途填了钥匙要不要开始出字，是以后的事（`P1.md` §3.14.8 第 3 条）。
+   - 录音的状态机（`Phase`）不为它多一个状态：重连只在 `Recording`、`Paused` 里有效，`Closing` 以后来的 `Reconnect` 不做事。把这一行加进 P1-16 的转换表测试。
 
 ### 超时
 
@@ -35,13 +35,13 @@
 
 ### 界面（最小）
 
-6. `Live.svelte`：有一栏是 `Dead` 时，在状态句旁给一个「重连」按钮，发 `Reconnect`。`ui/lang/*.json` 加这个按钮的词和 `code.keys`（`code.silent`、`code.shell` P1-07 已加）。`ui/dev/mock.ts` 的 `handlers` 加 `Reconnect`。
+6. `Live.svelte`：有一栏是 `Dead` 时，在状态句旁给一个「重连」按钮，发 `Reconnect`。`ui/lang/*.json` 加这个按钮的词和 `code.keys`（`code.silent`、`code.shell` P1-09 已加）。`ui/dev/mock.ts` 的 `handlers` 加 `Reconnect`。
 
 ## 显式与可观测
 
 - **事件**：`lane.open`、`lane.reconnect`。写进 `docs/EVENTS.md`。`part.gave_up`、`judge.verdict`、`command.done`（`kind = "Reconnect"`）是已有的。
 - **统计**：分布 `lane.keys_ms`、`lane.dial_ms`。
-- **数**：`CONNECT_TIMEOUT_MS`、`READ_TIMEOUT_MS`；`PATIENCE_MS`（已有）。重启上限的三个数在 `Restarts`（P1-07），这一件不改。
+- **数**：`CONNECT_TIMEOUT_MS`、`READ_TIMEOUT_MS`；`PATIENCE_MS`（已有）。重启上限的三个数在 `Restarts`（P1-09），这一件不改。
 - **队列、任务**：不造新的队列。重新起的 lane 是 `recording` 子树上的任务，名字不变。
 - **0.8 那次事故在日志里的样子**（写进报告，从测试第 2 条的捕获里抄）：一串 `lane.open`（`code = "keys"`、`keys_ms = 10000`）和 `part.state`（退避越来越长），第 20 秒一条 `judge.verdict`（到 `Stalled`，`why = "keys"`、`action = "tell"`）和一组 `stall.snapshot`，到上限时一条 `part.gave_up` 和一条 `judge.verdict`（到 `Dead`）。不用猜它在干什么。
 
@@ -64,6 +64,7 @@
 `core/tests/app.rs`：
 
 4. `reconnect_with_nothing_recording_says_so`：`recording.none`；`command.done`（`kind = "Reconnect"`、`code = "recording.none"`）。
+4a. `reconnect_starts_nothing_for_a_recording_that_never_had_captions`：没有钥匙的一场里 `OwnKey` 填上钥匙，再 `Reconnect`：`command.done`（`code = "ok"`）；没有 `lane.reconnect`、没有 `lane.open`；状态句还是 `AudioOnly { why: "captions.no_key" }`。停止以后再 `Start`：这一场的 `recording.start` 里 `captions` 是 `live`。
 
 `core/tests/recording.rs`：
 
@@ -71,7 +72,7 @@
 
 ## 验收
 
-- `scripts/build/check.sh` 全绿。`core/tests/liveness.rs` 里不再有 `ignore = "P1-16`。
+- `scripts/build/check.sh` 全绿。`core/tests/liveness.rs` 里不再有 `ignore = "P1-18`。
 - `grep -n "lease(" core/src/live/lane.rs` 的那一行在 `timeout` 里面。
 - 报告里贴第 1 条测试里三个时刻的 `Water`（JSON）：说出 `connect` 的那一秒、变成 `Dead` 的那一秒、重连成功后的那一秒；再贴「0.8 那次事故在日志里的样子」那一段真的日志行。
 
@@ -80,4 +81,4 @@
 - 不做「网络回来了自己重连」：到了上限就等人点。
 - 不改预算表和重启上限的数字。
 - 设备那一层的重开不设上限，不动。
-- 不给整场转写、交城的请求加整体的时限（它们有自己的进度和再试，P1-19）。
+- 不给整场转写、交城的请求加整体的时限（它们有自己的进度和再试，P1-21）。

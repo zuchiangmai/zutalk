@@ -42,7 +42,7 @@
   - 往哪里写是这个 crate 里面的一个口（给它一个「打开下一个文件」的函数），测试能换成一个带闸的，好确定地把队列堵满。
   - `echo`：同一行也打到标准错误。
 - **`install(dir, name, level, echo) -> io::Result<Guard>`**：建目录、起写线程、设成全进程默认的接收者、挂 panic 钩子。第二次调用是错误。`Guard` 丢掉时把队列里剩下的写完（最多等 `LOG_FLUSH_WAIT_MS`，2000），停掉写线程。
-- **`files(dir, name, level, limits) -> io::Result<(Scope, Guard)>`**：同一个写文件的口，但不设成全进程的；`scope.enter()` 把它设成这个线程此刻的接收者，守卫丢掉就撤掉。隐私测试用它（P1-06）。
+- **`files(dir, name, level, limits) -> io::Result<(Scope, Guard)>`**：同一个写文件的口，但不设成全进程的；`scope.enter()` 把它设成这个线程此刻的接收者，守卫丢掉就撤掉。隐私测试用它（P1-08）。
 - **`flush(wait_ms) -> bool`**：让全进程的那一个把到此为止的都写到盘上，最多等这么久。没有装就是 `true`。
 - **`lost()`、`refused()`**：全进程那一个丢了几行、退回了几个字段。
 - **panic 钩子**：一条 `app.panic`：线程的名字（`Id`）、文件（`Id`）、行号。**不带消息。** 然后 `flush`，再调原来的钩子。
@@ -52,7 +52,7 @@
 
 ### 2. 外壳装上
 
-`app/src/main.rs`（最小的改动；P1-21 重写外壳）：
+`app/src/main.rs`（最小的改动；P1-23 重写外壳）：
 
 - 核心的 `Config` 加一个字段 `log: Level`（默认 `Info`）和 `Config::from_env(self) -> Self`：读 `ZUTALK_LOG`（`debug` 或 `info`；别的值当 `info`）。这是全核心唯一读环境变量的地方，注释里写明。再加 `Config::logs(&self) -> PathBuf`（`<data>/logs`）。顺手给 `Config` 现有的每个字段补齐一行注释。
 - `setup` 里：数据目录 → `Config::new(..).from_env()` → `zutalk_log::install(&config.logs(), "zutalk", config.log, cfg!(debug_assertions))` → `info!("app.start", version = env!("CARGO_PKG_VERSION"), os = std::env::consts::OS, arch = std::env::consts::ARCH, level = …)` → 然后才是开钥匙库、起核心。`Guard` 交给 Tauri 管着（`app.manage`），应用退出时丢掉。
@@ -112,7 +112,7 @@
 - `scripts/build/check.sh` 全绿，`events.sh` 在其中。
 - `cargo tree -p zutalk-core -e normal --depth 1 | grep tracing` 没有结果（核心不直接依赖它）；`zutalk-log` 的直接依赖只有 `tracing` 和 `serde_json`。
 - 报告里：一行真的日志（从测试 1 的文件里抄）；`log/src` 多少行；门禁的耗时（改之前、改之后）。
-- 在本机起一次服务器的可执行文件到「听上端口」为止再停掉（`cargo run -p zutalk-server`，数据目录用临时的），贴出它写的 `server.start` 那一行。**外壳不要启动**（会弹权限框，没人点）：它的接线由编译和审查保证，P1-24 的真机清单里有一项看 `logs/zutalk.jsonl` 的第一行。
+- 在本机起一次服务器的可执行文件到「听上端口」为止再停掉（`cargo run -p zutalk-server`，数据目录用临时的），贴出它写的 `server.start` 那一行。**外壳不要启动**（会弹权限框，没人点）：它的接线由编译和审查保证，P1-26 的真机清单里有一项看 `logs/zutalk.jsonl` 的第一行。
 
 ## 不做
 
@@ -120,4 +120,4 @@
 - 不加 `tracing-subscriber`、`tracing-appender`、`tracing-test`。
 - 不用 span、`#[instrument]`。
 - 不动服务器的任务和队列；不给服务器加请求以外的事件。
-- 不做自检包（P1-20）、心跳和帧间隔（P1-22）。
+- 不做自检包（P1-22）、心跳和帧间隔（P1-24）。

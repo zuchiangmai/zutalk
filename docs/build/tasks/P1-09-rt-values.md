@@ -1,4 +1,4 @@
-# P1-07 `rt/`：寄存器、水位线与判断、监督的状态机和重启上限
+# P1-09 `rt/`：寄存器、水位线与判断、监督的状态机和重启上限
 
 ## 目标
 
@@ -8,7 +8,7 @@
 2. `rt/water.rs`：`Gauge`、`Stage`、`Water`、预算表、`sample`、`judge`、`due`。
 3. `rt/supervise.rs`：监督写成一个状态机；重启上限 `Restarts`；`supervise` 把 panic 当作一次中断；每次转换是一条事件；`Tree::keep` 起一个被守着的部件。
 
-这一件只写值和它们的测试，**不接线**：没有任何现有的模块开始用它们（`lane` 用的 `supervise` 除外）。接线是 P1-09（寄存器）、P1-14（水位表）、P1-15（看守）。
+这一件只写值和它们的测试，**不接线**：没有任何现有的模块开始用它们（`lane` 用的 `supervise` 除外）。接线是 P1-11（寄存器）、P1-16（水位表）、P1-17（看守）。
 
 ## 背景
 
@@ -34,13 +34,13 @@
 照 `P1.md` §3.5。
 
 - `Gauge`：一个部件报告进展用的东西。三样：位置（`AtomicU64`，`set(at)` 只做一次原子写）；现在为什么不动（`because(why)`，一个 `&'static str`，可以是空的，比如 lane 正在重连的原因）；是不是已经结束了、为什么（`ended(code)`）。后两样很少变，但同样不许加锁、不许分配。`read()` 给出 `(at, why, ended)`，正好是 `sample` 要的一行。
-- `Stage`、`Health`、`Mark`、`Water` 要能 `Serialize` 并由 ts-rs 导出（`Water` 是一种信号，P1-14 起发布）；`Action`、`Verdict`、`Budget` 不上线。
+- `Stage`、`Health`、`Mark`、`Water` 要能 `Serialize` 并由 ts-rs 导出（`Water` 是一种信号，P1-16 起发布）；`Action`、`Verdict`、`Budget` 不上线。
 - `Stage`、`Health`、`Action` 各有 `code() -> &'static str`（`Stage::Heard(2)` 的代码是 `Heard`，序号由 `Stage::lane() -> Option<u8>` 给）：事件的字段要用。
 - `BUDGETS`：一张 `const` 表，一格一行，数字照 `P1.md` §3.5 的表。`Budget` 的字段名带单位（`slow_lag_ms`、`slow_idle_ms`、`stalled_ms`）；表的上面一段注释说每个数的来历（`LESSONS.md` 的哪一条，或者「临时，`P1.md` §4 第 3 条」）。`Sent`、`Heard`、`Final` 的那一行对每条 lane 都适用。
 - `sample(before, positions, now_ms, clock_ms, paused) -> Water`：纯函数。位置没变的格保留 `moved_ms`，变了的记成 `now_ms`；第一次见到的格记成 `now_ms`。
-- `judge(water, budgets) -> Vec<Verdict>`：纯函数，规则在 `P1.md` §3.5「规则」一段。`Capture` 的上游是 `water.clock_ms`。
+- `judge(water, budgets) -> Vec<Verdict>`：纯函数，规则在 `P1.md` §3.5「规则」一段。`Capture` 的上游是 `water.clock_ms`。上游那一格不在表里时这一格不落后：没有字幕的一场（`P1.md` §3.14.5）没有 lane，`Draft` 没有上游。
 - `due(before, after, verdicts) -> Vec<Due>`：纯函数，说这一秒看守该做什么。「只在刚变成停滞或停了时行动一次；同一格同一个代码的 `Tell` 不说第二遍；`Reopen` 每隔一个停滞预算再来一次」都在这里；把「上次对这一格行动是什么时候」记在 `Water` 里。`Due` 除了动作，还有两样给日志的：`Changed { stage, from, to }`（这一格的健康变了：看守要发一条 `judge.verdict`）和 `Snapshot { stage }`（这一格因为这个原因第一次变成停滞或停了：看守要留一组 `stall.snapshot`；同一格同一个原因只有一次）。形状可以调整，但必须是值进值出、能用表格测。
-- **规则不发事件**：`water.rs` 里没有 `zutalk_log`。发事件的是 P1-15 的看守。
+- **规则不发事件**：`water.rs` 里没有 `zutalk_log`。发事件的是 P1-17 的看守。
 - 代码字面量如果写在 `BUDGETS` 里，`ui/tests/words.test.ts` 的 `coreCodes` 现在认不出这张表：把它的正则里 `CODES|REFUSED` 扩成也认 `BUDGETS`，并在 `ui/lang/*.json` 八个文件里给 `tape.slow`、`draft.behind`、`silent`、`shell` 加词（`audio.stalled` 已有）。
 
 ### `rt/supervise.rs`
@@ -62,9 +62,9 @@
 - `supervise` 把 `open()` 和 `part.run()` 里的 panic 接住（`futures_util` 的 `catch_unwind` 加 `AssertUnwindSafe`），当作 `End::Retry("panic")`：告诉 `broke("panic")`，照 `Backoff` 重开。`ui/lang` 加 `code.panic` 的词。
 - **事件**（`P1.md` §3.13.3）：每次转换一条 `part.state`（`part`、`from`、`to`、`why`、`wait_ms`、`n`）；到 `Waiting` 的那一条用 `warn!`，其余 `info!`。到了上限另有一条 `error!("part.gave_up", part, why, n)`。被要求停下（`End::Done`）是到 `Ended` 的一条普通转换，`why = "done"`。
 - **统计**：`supervise` 没有 `Stats` 可用（它是一个自由函数）；计数由 `Tree::keep` 来数：每次重开 `part.restarts` 加一，放弃时 `part.gave_up` 加一（`keep` 把自己的 `broke` 包在调用者的外面）。
-- **`Tree::keep(part, open, broke, restarts)`**：在树上起一个由 `supervise` 守着的部件。它是一个任务（表里一行，种类是「被守着的」，`task.start`、`task.end` 照发）；部件结束的方式（`End`）可以被等到（返回一个能 `await` 的把手，或者收一个回调：选一种，P1-13、P1-14 都要用）。树取消时，正在跑的部件被丢掉，等待中的重开不再发生。
-- `lane::run` 调 `supervise` 的地方传名字和 `Restarts::default()`。名字来自一张表 `LANE_NAMES: [&str; 3] = ["lane.0", "lane.1", "lane.2"]`（放在 `live/lane.rs`）。lane 在 `broke` 里收到 `panic` 时把断句器换成空的（崩在半路的状态不可信）；`Lane` 本身在锁里，不随连接走，所以空缺照常从 `edge` 算。lane 这时还是从裸的 `tokio::spawn` 起的（欠账，P1-14 还）：它直接调 `supervise`，不经 `Tree::keep`，所以这一件之后 `part.restarts` 对 lane 还不计数；台架那条测试的计数断言等 P1-14。
-- `again`（会过去的失败越等越久地再试）这一件不动；它的事件 `job.again` 是 P1-19 的。
+- **`Tree::keep(part, open, broke, restarts)`**：在树上起一个由 `supervise` 守着的部件。它是一个任务（表里一行，种类是「被守着的」，`task.start`、`task.end` 照发）；部件结束的方式（`End`）可以被等到（返回一个能 `await` 的把手，或者收一个回调：选一种，P1-15、P1-16 都要用）。树取消时，正在跑的部件被丢掉，等待中的重开不再发生。
+- `lane::run` 调 `supervise` 的地方传名字和 `Restarts::default()`。名字来自一张表 `LANE_NAMES: [&str; 3] = ["lane.0", "lane.1", "lane.2"]`（放在 `live/lane.rs`）。lane 在 `broke` 里收到 `panic` 时把断句器换成空的（崩在半路的状态不可信）；`Lane` 本身在锁里，不随连接走，所以空缺照常从 `edge` 算。lane 这时还是从裸的 `tokio::spawn` 起的（欠账，P1-16 还）：它直接调 `supervise`，不经 `Tree::keep`，所以这一件之后 `part.restarts` 对 lane 还不计数；台架那条测试的计数断言等 P1-16。
+- `again`（会过去的失败越等越久地再试）这一件不动；它的事件 `job.again` 是 P1-21 的。
 
 ## 显式与可观测
 
@@ -87,7 +87,7 @@
 
 `core/tests/water.rs`（都是表格）：
 
-6. `paused_nothing_is_behind`；`before_the_first_block_the_capture_is_not_late`：`clock_ms` 是 0、`Capture` 在 0，过了 60 秒仍是 `Live`。
+6. `paused_nothing_is_behind`；`before_the_first_block_the_capture_is_not_late`：`clock_ms` 是 0、`Capture` 在 0，过了 60 秒仍是 `Live`。`a_mark_whose_upstream_is_not_there_is_not_behind`：表里只有 `Capture`、`Tape`、`Draft`、`Frame` 四格（一场只录音的），`Capture` 一直走：过了 10 分钟，`Draft`、`Frame` 仍是 `Live`，`due` 什么也不给。
 7. `each_budget_at_its_edges`：对 `BUDGETS` 的每一行，在「慢」和「停滞」的界限两侧各取一点，断言健康和动作。
 8. `a_lane_that_cannot_connect_for_fourteen_minutes_is_seen_within_its_budget`：`Sent(0)` 从第 0 秒起不动、`Capture` 一直走。第 19 秒是 `Slow`；第 20 秒是 `Stalled{why: "keys"}`，动作 `Tell("keys")`；之后每一秒都还是停滞，但 `due` 只在第 20 秒给出一次 `Tell`、一次 `Snapshot`。到第 840 秒，这一格的 `ended` 是 `Some("keys")`：`Dead{why: "keys"}`，`due` 给一次 `Changed`（到 `Dead`），不再给 `Tell`，**也不再给 `Snapshot`**：同一格、同一个原因只有一次。
 9. `a_service_that_takes_audio_and_says_nothing_is_reopened`：`Sent(0)` 走、`Heard(0)` 不动。第 10 秒 `Stalled{why: "silent"}`、`Reopen(Heard(0))`；`due` 在第 10、20 秒各给一次 `Reopen`，`Snapshot` 只在第 10 秒。`Sent` 也不走（没有声音要送）时是 `Live`。
@@ -109,14 +109,14 @@
 ## 验收
 
 - `scripts/build/check.sh` 全绿。
-- `core/tests/liveness.rs` 的 `i6_a_lane_that_dies_comes_back_and_marks_what_it_missed` 如果被 P1-06 挂起了，现在拿掉 `ignore`，它通过（空缺的原因是 `panic`），并且「看得见」里这一件管的部分通过：`part.state`（`part = "lane.0"`、`to = "Waiting"`、`why = "panic"`）一条。`lane.link`、`lane.gap` 两项和计数的断言留一行注释指给 P1-08、P1-14（照 `P1.md` §2 第二张表）。
-- 隐私测试里被 P1-06 留了注释的「lane 崩一次」，现在加回去。
+- `core/tests/liveness.rs` 的 `i6_a_lane_that_dies_comes_back_and_marks_what_it_missed` 如果被 P1-08 挂起了，现在拿掉 `ignore`，它通过（空缺的原因是 `panic`），并且「看得见」里这一件管的部分通过：`part.state`（`part = "lane.0"`、`to = "Waiting"`、`why = "panic"`）一条。`lane.link`、`lane.gap` 两项和计数的断言留一行注释指给 P1-10、P1-16（照 `P1.md` §2 第二张表）。
+- 隐私测试里被 P1-08 留了注释的「lane 崩一次」，现在加回去。
 - `core/src/rt/` 下没有 `use crate::`（`layers.sh` 守着）。
 - `rt/water.rs`、`rt/signal.rs` 里没有读时钟的地方（`Instant::now`、`SystemTime`、`wall_ms`），也没有 `zutalk_log`：时间都是参数，事件由调用的人发。
 
 ## 不做
 
 - 不把寄存器、水位表接到 hub、lane、采集上（`lane` 传名字、`Restarts::default()` 和收 `panic` 除外）。
-- 不写看守，不发 `judge.verdict`、`stall.snapshot`（P1-15），不加 `Command::Reconnect`，不改取钥匙的时限（P1-16）。
-- 不把 lane 搬到树上（P1-14）。
+- 不写看守，不发 `judge.verdict`、`stall.snapshot`（P1-17），不加 `Command::Reconnect`，不改取钥匙的时限（P1-18）。
+- 不把 lane 搬到树上（P1-16）。
 - 不加 `hdrhistogram`、`arc-swap`、`loom`、`statig`。

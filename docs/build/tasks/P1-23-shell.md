@@ -1,4 +1,4 @@
-# P1-21 外壳：一个任务独占推送，命令全部 async，没有锁
+# P1-23 外壳：一个任务独占推送，命令全部 async，没有锁
 
 ## 目标
 
@@ -11,13 +11,13 @@
 5. 外壳的任务都从它自己的树上起，各有名字；订阅、换通道、通道没了、字幕窗显隐、看新版本，都在日志里。
 6. `scripts/build/rules/shell.sh` 守着第 1 条；`spawn.sh` 在 `app/src` 的欠账清零。
 
-这是 `PLAN.md` §7 的 I5，和 I4 的后一半。主线程心跳、界面回报画到第几帧和帧间隔，是 P1-22。
+这是 `PLAN.md` §7 的 I5，和 I4 的后一半。主线程心跳、界面回报画到第几帧和帧间隔，是 P1-24。
 
 ## 背景
 
-- 设计：`docs/build/phases/P1.md` §3.9；为什么不用 `arc-swap` 和 `loom`：§2 末尾；外壳的树：§3.6；事件：§3.13.3（标着 P1-21 的四行）。`PLAN.md` §4.2「外壳 `fan` 拿着锁调用 `is_visible()`」一行、§4.4「页面重新加载零成本」、§4.5.2「外壳的订阅、换通道、窗口显隐」。
-- `app/src/main.rs`（P1-03、P1-09 至 P1-11 之后）：
-  - 启动时装日志、发 `app.start`（P1-03）；外壳的根树 `Tree::root("shell", core.stats())` 和上面的 `shell.forward` 任务（P1-09）；
+- 设计：`docs/build/phases/P1.md` §3.9；为什么不用 `arc-swap` 和 `loom`：§2 末尾；外壳的树：§3.6；事件：§3.13.3（标着 P1-23 的四行）。`PLAN.md` §4.2「外壳 `fan` 拿着锁调用 `is_visible()`」一行、§4.4「页面重新加载零成本」、§4.5.2「外壳的订阅、换通道、窗口显隐」。
+- `app/src/main.rs`（P1-03、P1-11 至 P1-13 之后）：
+  - 启动时装日志、发 `app.start`（P1-03）；外壳的根树 `Tree::root("shell", core.stats())` 和上面的 `shell.forward` 任务（P1-11）；
   - `Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>`；`subscribe` 是同步命令，在主线程上拿这把锁；`fan` 拿着同一把锁调 `window.is_visible()`，而这个查询要主线程回话。两边一碰就是死锁：0.8「录音中主线程卡死被强制退出」的同一类毛病；
   - `dispatch` 是同步命令；
   - `Ready = Arc<Mutex<Option<(Update, Vec<u8>)>>>`，`installer` 拿着锁装更新；
@@ -47,12 +47,12 @@
    - 每推一帧，计数 `shell.pushed` 加一，调一次「推到第几帧」（传进来的函数；`main.rs` 给的是 `core.pushed`）；
    - `said`：自己记着发到第几条，新的每条发一个 `Event::Notice`；落后太多（超过 `Notices::KEEP_CODES`）就从还留着的最旧一条接着发；
    - 字幕窗：记着自己上次要它显示还是隐藏；`State.captions` 和记着的不一样时，调一次「显示/隐藏」（传进来的函数），再记下，发一条 `info!("shell.captions", shown)`。从不问窗口现在什么样；
-   - 原计划这里的 `ZUTALK_WATER_LOG` **取消**：每秒的水位已经是日志里 `debug` 级的 `water.mark`（P1-14），外壳不另写文件。
-4. 推送任务崩了要重起，窗口不用重新订阅：订阅的口和 `Fan` 由外面一层拿着，里面一层崩了再进。它是外壳的树上一个被守着的部件：`shell.keep("shell.pump", …)`；重起有 `part.state`，不设重启上限以外的特殊规矩（到了上限 `part.gave_up`：那时外壳已经没法往窗口说话，日志是唯一的出口）。P1-09 的 `shell.forward` 任务删掉，`pump` 取代它。
+   - 原计划这里的 `ZUTALK_WATER_LOG` **取消**：每秒的水位已经是日志里 `debug` 级的 `water.mark`（P1-16），外壳不另写文件。
+4. 推送任务崩了要重起，窗口不用重新订阅：订阅的口和 `Fan` 由外面一层拿着，里面一层崩了再进。它是外壳的树上一个被守着的部件：`shell.keep("shell.pump", …)`；重起有 `part.state`，不设重启上限以外的特殊规矩（到了上限 `part.gave_up`：那时外壳已经没法往窗口说话，日志是唯一的出口）。P1-11 的 `shell.forward` 任务删掉，`pump` 取代它。
 
 ### 命令
 
-5. 两个命令，全是 `async fn`（第三个 `drawn` 是 P1-22 的）：
+5. 两个命令，全是 `async fn`（第三个 `drawn` 是 P1-24 的）：
 
    ```rust
    #[tauri::command]
@@ -62,12 +62,12 @@
    ```
 
    `subscribe` 只是把 `(窗口的标签, 通道)` 发给推送任务：`queue::bounded(&stats, "shell.joins", SHELL_JOINS_MSGS, Full::Wait)`（8：窗口只有两三个；命令是 async 的，等得起）。`impl Sink for Channel<Event>`。
-   `dispatch` 不用自己发事件：收下的有 `command.done`，没进邮箱的有 `command.refused`（P1-11）。
+   `dispatch` 不用自己发事件：收下的有 `command.done`，没进邮箱的有 `command.refused`（P1-13）。
 
 ### 窗口与更新
 
 6. `windows.rs`：现在只有「让字幕窗显示/隐藏」一个函数（`show()`、`hide()` 是往主线程投递，不等回话）。它们返回的错误不是丢弃：没成就发一条事件（用 `shell.captions` 加一个 `code` 字段，或者单列一条；选一种写进 `docs/EVENTS.md`）。P3、P5 在这里加大小、位置、穿透点击。
-7. `updates.rs`：外壳的树上一个任务（`updates`）拿着下好的更新。它照旧启动时和每 `LOOK_MS`（6 小时）看一次，每看一次发一条 `update.look`（`code` 是 `none`、`ready`，或者出错的代码，出错用 `warn!`）；找到了 `core.looked(..).await`。给核心的 `Install` 端口是一个闭包：把「装吧」和一个回话的口发给这个任务，然后等回话；任务装上了就重启应用（闭包永远等不到回话），装不上就回话，闭包返回。没有锁。（核心从 P1-18 起是在阻塞线程上调这个端口的，等得起。）「装吧」的口是一条 `queue::threads` 或一个 `oneshot`（一次一个，不是队列）：选简单的那个，写明。
+7. `updates.rs`：外壳的树上一个任务（`updates`）拿着下好的更新。它照旧启动时和每 `LOOK_MS`（6 小时）看一次，每看一次发一条 `update.look`（`code` 是 `none`、`ready`，或者出错的代码，出错用 `warn!`）；找到了 `core.looked(..).await`。给核心的 `Install` 端口是一个闭包：把「装吧」和一个回话的口发给这个任务，然后等回话；任务装上了就重启应用（闭包永远等不到回话），装不上就回话，闭包返回。没有锁。（核心从 P1-20 起是在阻塞线程上调这个端口的，等得起。）「装吧」的口是一条 `queue::threads` 或一个 `oneshot`（一次一个，不是队列）：选简单的那个，写明。
 8. `setup` 里不 `block_on`：`Core::start` 只起任务，进入运行时的上下文就够了。
 
 ### 界面（最小）
@@ -81,7 +81,7 @@
     - 没有 `Mutex`、`RwLock`、`.lock()`、`block_on`；
     - 没有要主线程回话的窗口查询：`is_visible`、`is_focused`、`is_minimized`、`is_maximized`、`inner_size`、`outer_size`、`inner_position`、`outer_position`、`scale_factor`、`current_monitor`、`primary_monitor`、`available_monitors`；
     - 违反就打印「文件:行」并以非零退出。
-    `run_on_main_thread`（只投不等）不在禁单里：P1-22 的心跳用它。
+    `run_on_main_thread`（只投不等）不在禁单里：P1-24 的心跳用它。
 11. `spawn.sh` 的欠账表里 `app/src/main.rs` 那一行删掉：`core/src`、`app/src` 的欠账表从此是空的。
 
 ## 显式与可观测
@@ -123,11 +123,11 @@
 
 - `scripts/build/check.sh` 全绿（`shell.sh` 在其中）；`spawn.sh`、`bounded.sh` 的欠账表里没有 `core/src`、`app/src` 的行。
 - `grep -rn "Mutex\|is_visible\|block_on\|WATER_LOG\|async_runtime::spawn" app/src` 没有结果。
-- 报告里写明：门禁里跑不了真的窗口；真机上要看的两件事（开发模式下连按十次重新加载，字幕和状态都接得上，`logs/zutalk.jsonl` 里有十条 `replaced` 为真的 `shell.join`；录音中开关字幕窗二十次不卡，日志里有二十条 `shell.captions`）交给负责人，并已记进给 P1-24 的清单。
+- 报告里写明：门禁里跑不了真的窗口；真机上要看的两件事（开发模式下连按十次重新加载，字幕和状态都接得上，`logs/zutalk.jsonl` 里有十条 `replaced` 为真的 `shell.join`；录音中开关字幕窗二十次不卡，日志里有二十条 `shell.captions`）交给负责人，并已记进给 P1-26 的清单。
 
 ## 不做
 
-- 主线程心跳、`drawn` 命令、界面的帧间隔（P1-22）。
+- 主线程心跳、`drawn` 命令、界面的帧间隔（P1-24）。
 - 字幕窗的大小、位置、穿透点击、舞台全屏（P3、P5）。
 - 界面「信号先存下来，每帧只处理最新的」（P3）；不换框架。
 - 观看页、房间。

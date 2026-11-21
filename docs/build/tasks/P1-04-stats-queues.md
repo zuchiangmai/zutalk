@@ -9,7 +9,7 @@
 3. 规则脚本 `numbers.sh`：时间只有毫秒一个单位，时限和上限都是带单位的常量，旁边有理由。**现有的代码当场改到通过。**
 4. 规则脚本 `bounded.sh`：通道只许在 `rt/queue.rs` 里造。现有的几处记成欠账，由后面改它们的任务还。
 
-这一件只建东西和守规矩，**不把现有的通道换成新的队列**：那是 P1-11 至 P1-19 各自的事。
+这一件只建东西和守规矩，**不把现有的通道换成新的队列**：那是 P1-13 至 P1-21 各自的事。
 
 ## 背景
 
@@ -29,13 +29,13 @@
 - `Counter::add(n)`；`Peak::set(now)`（记现在的值，并留下最大的）；`Spread::note(value)`（落进 `SPREAD_EDGES` 的哪个桶，那个桶加一；另记个数和最大值）。都不分配、不加锁。
 - 队列的那一行（上限、现在多深、最深、放进去多少、遇到满多少次、丢了多少）由 `rt/queue.rs` 写，`Stats` 只管存和读。
 - **上限**：计数 `STATS_MOST_COUNTS`（40）、高水位 `STATS_MOST_PEAKS`（4）、分布 `STATS_MOST_SPREADS`（12）、队列 `STATS_MOST_QUEUES`（16）；名字不超过 `STATS_NAME_MOST_BYTES`（32）。超过了：这一种发一次 `warn!("stats.full", kind = …)`，给回一个不进表的把手（照样能加，只是读不到）。名字太长同样处理。
-- `tally() -> Tally`：一份拷贝，按名字排序（次序确定）。`Tally` 和它的行带 `Serialize`、`TS`、`PartialEq`、`Clone`、`Default`：它是一种信号（P1-09 起发布）。分布的行给 `n`、`p50`、`p99`、`most`；分位数取所在桶的上沿，是一个公开的纯函数。
+- `tally() -> Tally`：一份拷贝，按名字排序（次序确定）。`Tally` 和它的行带 `Serialize`、`TS`、`PartialEq`、`Clone`、`Default`：它是一种信号（P1-11 起发布）。分布的行给 `n`、`p50`、`p99`、`most`；分位数取所在桶的上沿，是一个公开的纯函数。
 - `moved(before, after) -> Tally`：纯函数，只留变了的行。P1-05 的每分钟汇总用它。
 - 这一件里，这个文件没有时钟，也不起任务（每分钟的汇总是 P1-05 加的那个 `publish`）。
 
 ### `rt/queue.rs`
 
-照 `P1.md` §3.13.9 的接口。三个构造函数是对 `tokio::sync::mpsc`、`std::sync::mpsc::sync_channel`、`tokio::sync::broadcast` 的薄包装；这个文件是全仓库唯一造通道的地方，开头用 `#![expect(clippy::disallowed_methods, reason = …)]` 之类的办法为 P1-12 的 lint 留好位置（现在 lint 还没开，先不加也行，但别让 P1-12 再回来改结构）。
+照 `P1.md` §3.13.9 的接口。三个构造函数是对 `tokio::sync::mpsc`、`std::sync::mpsc::sync_channel`、`tokio::sync::broadcast` 的薄包装；这个文件是全仓库唯一造通道的地方，开头用 `#![expect(clippy::disallowed_methods, reason = …)]` 之类的办法为 P1-14 的 lint 留好位置（现在 lint 还没开，先不加也行，但别让 P1-14 再回来改结构）。
 
 - 每条队列造的时候在 `Stats` 里拿一行（按名字；同名的第二条队列用同一行：一场场录音的 `tape` 队列是同一行）。
 - 发的一头：
@@ -62,10 +62,10 @@
 ### `bounded.sh`
 
 - 管 `core/src`、`app/src`。在 `core/src/rt/queue.rs` 以外找：`mpsc::channel(`、`sync_channel(`、`broadcast::channel(`、`unbounded_channel`、`UnboundedSender`、`UnboundedReceiver`；在 `core/src/capture/audio.rs` 以外找 `RingBuffer::new`。
-- **欠账表**在脚本里，一行「文件、几处、谁还」。照 `P1.md` §3.13.12 的表填，处数以脚本此刻数出来的为准：`core/src/app/hub.rs`（P1-11 还邮箱，P1-14 还其余）、`core/src/capture/audio.rs`（P1-12）、`core/src/ai/write.rs`、`core/src/out/city.rs`（P1-19）。
+- **欠账表**在脚本里，一行「文件、几处、谁还」。照 `P1.md` §3.13.12 的表填，处数以脚本此刻数出来的为准：`core/src/app/hub.rs`（P1-13 还邮箱，P1-16 还其余）、`core/src/capture/audio.rs`（P1-14）、`core/src/ai/write.rs`、`core/src/out/city.rs`（P1-21）。
 - **「以后」表**：`server/src/room.rs` 一处（P5）。同样要数出来正好相等。
 - 每个文件数出来的处数必须**正好等于**表里的数。多了：打印新犯的「文件:行」。少了：打印「把这一行改成 N」或「删掉这一行」。两种都以非零退出。
-- `tests/` 不归它管：测试里的通道由 P1-12 的 clippy 规则守（只禁无上限的）。
+- `tests/` 不归它管：测试里的通道由 P1-14 的 clippy 规则守（只禁无上限的）。
 
 ## 显式与可观测
 
@@ -81,7 +81,7 @@
 
 1. `a_name_is_one_row_however_often_it_is_asked_for`：同一个名字拿两次计数的把手，各加几次：`tally()` 里是一行，数是和。
 2. `a_peak_keeps_the_most_it_has_been`；`a_spread_puts_each_value_in_its_bucket`（界限两侧：0、1、2、3、5000、5001）；`the_quantile_is_the_upper_edge_of_its_bucket`（表格）。
-3. `counting_takes_no_lock_and_no_memory`：八个线程各对同一个计数加一万次：最后是八万。（「不分配」由 P1-12 的回调测试守。）
+3. `counting_takes_no_lock_and_no_memory`：八个线程各对同一个计数加一万次：最后是八万。（「不分配」由 P1-14 的回调测试守。）
 4. `more_rows_than_there_is_room_for_are_said_once_and_left_out`：装捕获；要第 41 个、第 42 个计数：`stats.full`（`kind = "counts"`）正好一条；`tally()` 里是 40 行；多出来的把手照样能 `add`。
 5. `the_fullest_tally_fits_one_channel_message`：四种行都到上限，名字 32 字节，每个数 `1 << 40`：`serde_json::to_vec(&tally).len() <= 8192`。
 6. `only_what_moved_is_in_the_difference`：`moved` 的表格测试（加了一行、一行的数变了、什么都没变）。
@@ -111,8 +111,8 @@
 
 ## 不做
 
-- 不把任何现有的通道换成 `rt::queue`（P1-11 至 P1-19）；不开 clippy 的 `disallowed-methods`（P1-12）。
-- 不写树、每分钟的汇总、`Stats` 信号（P1-05、P1-09）。
+- 不把任何现有的通道换成 `rt::queue`（P1-13 至 P1-21）；不开 clippy 的 `disallowed-methods`（P1-14）。
+- 不写树、每分钟的汇总、`Stats` 信号（P1-05、P1-11）。
 - 不改任何时限的数值，不改行为。
 - 不动服务器的通道和任务。
 - 不加 `hdrhistogram`、`tokio-metrics`。

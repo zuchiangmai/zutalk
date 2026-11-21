@@ -1,4 +1,4 @@
-# P1-18 hub 只算不做（二）：启动、身份、钥匙、设置、更新；规则脚本
+# P1-20 hub 只算不做（二）：启动、身份、钥匙、设置、更新；规则脚本
 
 ## 目标
 
@@ -9,38 +9,39 @@
 3. hub 是哪一种样子（还在起、可以用、正在装更新）是一个枚举；启动的每一步都在日志里，带用时。
 4. `core/src/app/hub.rs` 在 `spawn.sh` 里的欠账清零。
 
-后台一次一件、`ai/write.rs` 和 `out/city.rs` 的欠账，是 P1-19。
+后台一次一件、`ai/write.rs` 和 `out/city.rs` 的欠账，是 P1-21。
 
 ## 背景
 
-- 设计：`docs/build/phases/P1.md` §3.8；§3.13.11（`Boot`）、§3.13.3（标着 P1-18 的两行）、§3.13.12（欠账表）。`PLAN.md` §4.1 的 hub、L4 两行；`CLAUDE.md`：「The hub and the live path do no IO」「The shell never blocks」。
-- P1-17 之后 `hub.rs` 里还剩的 IO（按名字找）：
+- 设计：`docs/build/phases/P1.md` §3.8；§3.13.11（`Boot`）、§3.13.3（标着 P1-20 的两行）、§3.13.12（欠账表）。`PLAN.md` §4.1 的 hub、L4 两行；`CLAUDE.md`：「The hub and the live path do no IO」「The shell never blocks」。
+- P1-19 之后 `hub.rs` 里还剩的 IO（按名字找）：
   - `Hub::run` 的开头：读 `settings.json`、`audio::devices()`（系统调用，可能很慢）、`keys::kept()`、`carry()`（读旧版留下的邀请文件）；
   - `sign()`：`keys::unsaved()`；起认领邀请的任务（`chain.claim`、`keys::carried`）；
   - 命令：`Setup`（写 `settings.json`）、`SignIn`（`SignIn::begin`，再起任务等结果）、`SignOut`（`keys::set`）、`CopyRotation`（`keys::rotation()`，再调外壳给的剪贴板）、`RotationSaved`（`keys::saved()`）、`OwnKey`（`keys.own`，写钥匙库）、`Update`（同步调 `config.install`，它会装更新并重启应用）；
   - `carry()` 里起造身份的任务（`keys::create`）。
-- `core/src/app/work.rs`（P1-17）：`Work`、desk、后台的任务都在这里，都从 `work` 子树上起，每件活有 `job.start`、`job.done`。
-- 还欠着的：`core/src/app/hub.rs` 里登录、认领、造身份、日历几处裸的 `tokio::spawn`（这一件还）；`core/src/ai/write.rs`、`core/src/out/city.rs` 里的（P1-19 还）。
+- `core/src/app/work.rs`（P1-19）：`Work`、desk、后台的任务都在这里，都从 `work` 子树上起，每件活有 `job.start`、`job.done`。
+- 还欠着的：`core/src/app/hub.rs` 里登录、认领、造身份、日历几处裸的 `tokio::spawn`（这一件还）；`core/src/ai/write.rs`、`core/src/out/city.rs` 里的（P1-21 还）。
 - `docs/DESIGN.md` §5.10：现在「装和重启都在枢纽处理这条命令时同步完成，中间不会开始新的录音」。这一句要换一种办法保住。
 
 ## 做法
 
 ### 启动
 
-1. `Core::start` 起 hub 以后，让 `Work` 做「启动」这件活（desk 上）：读设置、读身份、读旧邀请。结果一条消息回来（设置、登录的是谁的 DID、恢复密钥存没存、途中要说的代码）。`Work` 自己留下身份的钥匙，hub 只知道 DID。启动的每一步各发一条 `boot.step`（`step` 是 `settings`、`identity`、`invites`、`devices`；`code`；`ms`），没成的用 `warn!`：`PLAN.md` §4.5.2「启动的每一步（用时）」。
+1. `Core::start` 起 hub 以后，让 `Work` 做「启动」这件活（desk 上）：读设置、读身份、读旧邀请。读身份就是 P1-06 的那几步：登录的人（`keys::kept`）、本机身份（`keys::local`，没有就造）、`Who::of`；`identity.who`（`why = "boot"`）在这一步发。结果一条消息回来（设置、登录的是谁的 DID（没有人登录就是空的）、恢复密钥存没存、各服务钥匙的来源、途中要说的代码）。`Work` 自己留下 `Who`，hub 只知道登录的那个人的 DID；本机身份的 `did:key` 不出 `Work`。启动的每一步各发一条 `boot.step`（`step` 是 `settings`、`identity`、`invites`、`devices`；`code`；`ms`），没成的用 `warn!`：`PLAN.md` §4.5.2「启动的每一步（用时）」。
 2. 设备列表另起一个任务（`work` 子树上的 `devices`，里面 `tree.blocking("devices", …)`）去问，什么时候回来什么时候放进 `state.devices`：它卡住不许拖住启动。卡住的时候，`boot.step`（`step = "devices"`）一直不出现，`Tree::running()` 里有它。日志里只有个数和用时，**没有设备的名字**。
 3. 启动的结果到达之前来的命令：`starting`，拒绝。启动之后第一次发布 `State`（和现在一样：界面拿到第一份状态之前没有东西可点）。
    - hub 的这几种样子是一个枚举（`P1.md` §3.13.11）：`Boot { Starting, Ready, Installing }`，有 `code()`；转换是一个纯函数（`Starting` 遇「启动好了」→ `Ready`；`Ready` 遇「装吧」→ `Installing`；`Installing` 遇「没装上」→ `Ready`；别的不变），「这条命令现在收不收」也是它的一个纯函数（`Starting` 时全拒，`starting`；`Installing` 时拒 `Start`、`Import`，`update.installing`）。不许用几个 `bool` 拼。每次转换发一条 `info!("hub.boot", from, to, why)`。
 
 ### 身份与钥匙
 
-4. 登录、登出、造身份、认领邀请、存恢复密钥、复制恢复密钥、设自己的钥匙：都是 `Work` 的方法。碰钥匙库和本机文件的部分在 desk 上，等中继、等目录、等服务器的部分在各自的任务里（`work` 子树上，名字 `net.signin`、`net.claim`、`net.create`、`net.calendar`）。结果回来的消息只带 hub 需要的东西（DID、登录要显示的码、存没存、成功或代码），**钥匙不经过 hub 的邮箱**。每件照 P1-17 的办法有 `job.start`、`job.done`；事件里只有种类和结果的代码，**没有 DID、句柄、登录的码、钥匙**。
-5. 换了人：`Work` 先在 desk 上把自己的 `Shelf` 等换掉，再告诉 hub；hub 收到后照旧清点、刷新（P1-17 的那几件活）。
+4. 登录、登出、造身份、认领邀请、存恢复密钥、复制恢复密钥、设自己的钥匙：都是 `Work` 的方法。碰钥匙库和本机文件的部分在 desk 上，等中继、等目录、等服务器的部分在各自的任务里（`work` 子树上，名字 `net.signin`、`net.claim`、`net.create`、`net.calendar`）。登出以后 `Work` 回到本机身份（`Who::of(None, …)`，P1-06）。结果回来的消息只带 hub 需要的东西（登录的那个人的 DID 或者空、登录要显示的码、存没存、成功或代码），**钥匙不经过 hub 的邮箱**。每件照 P1-19 的办法有 `job.start`、`job.done`；事件里只有种类和结果的代码，**没有 DID、句柄、登录的码、钥匙**。
+5. 换了人：`Work` 先在 desk 上把自己的 `Shelf` 等换掉，再告诉 hub；hub 收到后照旧清点、刷新（P1-19 的那几件活）。
 6. 复制恢复密钥：desk 上读出来，直接交给外壳给的 `clip`，回来的只是 `copied`、`clip` 或 `rotation.none`。
 
 ### 设置
 
 7. `Setup`：hub 上先做不需要 IO 的检查（栏数），然后**立刻**把 `state.setup` 换成新的（这是本人此刻的选择，下一条 `Start` 就要用它），再让 desk 把它存下。存不下：说 `settings`，内存里的选择不退回。
+7a. `OwnKey` 同理：hub **立刻**把 `state.keys` 里这种服务的来源改成新的（用 `From::of(填了没有, state.me 有没有)` 这个纯函数，P1-07；不碰钥匙库），再让 desk 存下。紧接着的 `Start` 因此照新的来源决定有没有字幕（`lane::captions`）。存好以后 `Work` 再清点一次等着的草稿（P1-07）。存不下：说那个代码，下一次刷新把 `state.keys` 改回真的。
 
 ### 更新
 
@@ -50,7 +51,7 @@
 ### 还清 hub 的欠账
 
 10. `core/src/app/hub.rs` 里剩下的裸 `tokio::spawn`（登录、认领、造身份、日历）随着上面第 4 条搬进 `Work` 的子树。做完以后 `hub.rs` 里没有任何起任务的地方；`spawn.sh` 的欠账表里 `core/src/app/hub.rs` 那一行删掉。
-11. 停止以后封 tape、写长度不是 hub 的事（P1-14 已经把它放在录音任务里）。
+11. 停止以后封 tape、写长度不是 hub 的事（P1-16 已经把它放在录音任务里）。
 
 ### 规则脚本
 
@@ -59,7 +60,7 @@
     - 发事件（`zutalk_log` 的宏）、数数（`Counter::add`）、读 `std::time::Instant` 量一圈用了多久，不在禁单里：它们不等任何东西；
     - `.await` 只许出现一次；
     - 违反就打印「文件:行」并以非零退出。
-    名单可以按实际的写法调整，但要在报告里证明它抓得住：把 P1-17 之前的 `hub.rs`（`git show`）喂给它，它要报出一长串。
+    名单可以按实际的写法调整，但要在报告里证明它抓得住：把 P1-19 之前的 `hub.rs`（`git show`）喂给它，它要报出一长串。
 
 ### 文档
 
@@ -75,6 +76,8 @@
 2. `a_setting_takes_effect_at_once_and_is_kept`：`Setup`（字幕语言改成两种）紧接着 `Start`，中间不等：这一场的 `Frame` 有两栏。重新起一个核心：设置还在。
 3. `settings_that_cannot_be_saved_say_so_and_still_hold`：把 `settings.json` 的位置占成一个文件夹：说 `settings`；`state.setup` 是刚选的。**看得见**：`job.done`（`kind = "settings"`、`code = "settings"`），级别 `warn`；`notice.said`（`code = "settings"`）。
 4. `nothing_is_recorded_while_an_update_is_being_put_in_place`（真实时钟）：`install` 的替身卡在一道闸上。`Update` 之后 `Start` → `update.installing`；这期间 `Pause` 这类命令照样有回答（hub 没被占住）；放开闸（替身返回，等于没装上）→ `update.install`，之后 `Start` 正常。现有的 `an_update_is_installed_only_while_nothing_is_recording` 并进来或保留，断言不放松。**看得见**：`hub.boot` 依次 `Ready → Installing → Ready`；堵着的时候有 `job.start`（`kind = "install"`）没有 `job.done`；`command.done`（`kind = "Start"`、`code = "update.installing"`）。
+4a. `a_key_just_set_counts_for_the_next_recording`：没登录、没有钥匙。`OwnKey` 之后不等刷新，读 `outlet.state`：出字服务的来源已经是 `Own`。等 `job.done`（`kind = "own_key"`、`code = "ok"`）以后 `Start`：`recording.start` 的 `captions` 是 `live`。清掉钥匙（`key: None`）：来源立刻是 `Nowhere`；再录一场是 `captions.no_key`。
+4b. `signing_out_goes_back_to_the_device_off_the_hub`：登录着起核心，`SignOut`：`state.me` 空了，资料库换成本机身份的；`identity.who`（`from = "person"`、`to = "local"`、`why = "sign_out"`）；`job.done`（`kind = "signout"`、`code = "ok"`）；整个捕获里没有任何 DID（那个人的、本机身份的）。
 5. `the_recovery_key_goes_to_the_clipboard_and_through_nothing_else`（已有）继续通过，并加两条断言：途中 `outlet.state`、`outlet.said` 的任何一份序列化结果里都没有那把钥匙；整个捕获里（每条事件的每个字段）也没有它，没有登录的那个人的 DID 和句柄。
 
 ## 显式与可观测
@@ -101,5 +104,5 @@
 
 - 不改登录的流程本身、不加新建身份和恢复密钥的命令（P4）。
 - 不改额度、钥匙链的规则（P4）。
-- 不做「后台一次一件」，不动 `ai/write.rs`、`out/city.rs`（P1-19）。
-- 外壳那一头的 `installer`、`Ready` 的锁不动（P1-21）。
+- 不做「后台一次一件」，不动 `ai/write.rs`、`out/city.rs`（P1-21）。
+- 外壳那一头的 `installer`、`Ready` 的锁不动（P1-23）。

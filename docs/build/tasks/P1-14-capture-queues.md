@@ -1,4 +1,4 @@
-# P1-12 采集：通道有上限，线程有名字，故障有事件
+# P1-14 采集：通道有上限，线程有名字，故障有事件
 
 ## 目标
 
@@ -14,7 +14,7 @@
 
 ## 背景
 
-- 每条队列的名字、上限和满了怎么办，在 `docs/build/phases/P1.md` §3.7（这一件管「设备的环」「泵的控制消息」「设备的『我坏了』」「读文件线程的邮箱」四行）；队列怎么造在 §3.13.9；线程怎么起在 §3.13.10；事件在 §3.13.3（标着 P1-12 的六行）；「看得见」在 §2 第二张表里采集那一行。
+- 每条队列的名字、上限和满了怎么办，在 `docs/build/phases/P1.md` §3.7（这一件管「设备的环」「泵的控制消息」「设备的『我坏了』」「读文件线程的邮箱」四行）；队列怎么造在 §3.13.9；线程怎么起在 §3.13.10；事件在 §3.13.3（标着 P1-14 的六行）；「看得见」在 §2 第二张表里采集那一行。
 - `core/src/capture/audio.rs`（P1-01 之后）：
   - `Turner`（泵的一圈 `turn(wait)`）、`Capture::by_hand`、`Capture::with`（起泵线程）、`Capture::start`（`Source::File` 分支起读文件的线程）；
   - `hold`（一个声源自己的线程：开设备、守着、坏了照 `Backoff` 重开）、`held`；
@@ -23,7 +23,7 @@
   - `offer(&mut ring, samples)`：设备回调做的全部的事。
 - `core/src/capture/audio/file.rs` 的 `run` 收读文件线程的邮箱。
 - `core/src/capture/clock.rs`：`Gap`（`Keep`、`Pad(ms)`、`End`）、`wall_clock_policy`。
-- `Hear` 这个端口（P1-06）的签名里没有 `Stats`。采集要数数，所以真的那个 `Hear`（`Config::new` 给的闭包）多带一份：`Config::new` 之后由 `Core::start` 把 `Stats` 交进去，或者把 `Hear` 的签名加一个 `&Stats` 参数；选改动小的那种，台架的替身跟着改。
+- `Hear` 这个端口（P1-08）的签名里没有 `Stats`。采集要数数，所以真的那个 `Hear`（`Config::new` 给的闭包）多带一份：`Config::new` 之后由 `Core::start` 把 `Stats` 交进去，或者把 `Hear` 的签名加一个 `&Stats` 参数；选改动小的那种，台架的替身跟着改。
 - 测试里的：`core/tests/live.rs` 末尾 `relay` 用了 `unbounded_channel`；`core/tests/audio.rs` 的 `import` 和 `manual` 还用 `mpsc::channel()`（P1-01 的报告里记着）；其余的用 `grep` 找。
 - `core/tests/audio.rs` 采集那一组（P1-01 改成了测试自己转泵）：`a_source_that_dies_…`、`a_stall_the_pump_hears_…`、`a_source_that_cannot_be_opened_…`、`a_device_that_is_no_longer_the_right_one_…`、`paused_the_clock_stands_still_…`、`a_closed_lid_ends_…`、`a_device_that_hangs_in_the_system_…`。
 
@@ -113,5 +113,5 @@
 - 不改 `Pump::step`、`wall_clock_policy`、cpal 那一层、`hold` 和 `held` 什么时候重开、退避多久。
 - 不把 `hold` 的循环改写成状态机（`P1.md` §3.13.11 末尾：P1 不重写设备那一层）。
 - 不给设备的重开设上限（声音要一直录）。
-- 不加 tape 和草稿的队列（P1-13）。
-- 不动 `broadcast(64)`（P1-14 换成 `queue::fanout`）、`ai/write.rs` 和 `out/city.rs` 里的通道（P1-19）、服务器。
+- 不加 tape 和草稿的队列（P1-15）。
+- 不动 `broadcast(64)`（P1-16 换成 `queue::fanout`）、`ai/write.rs` 和 `out/city.rs` 里的通道（P1-21）、服务器。
