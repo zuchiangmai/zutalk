@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
+use zutalk_log::Level;
 
 const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
@@ -38,17 +39,31 @@ const SLOT: Duration = Duration::from_millis(250); // a live room is written at 
 pub type Hear =
     fn(Source, Box<dyn FnMut(Block) + Send>, Box<dyn FnMut(Notice) + Send>) -> Result<Capture, End>;
 
+/// What the core is started with: where things are, the ports the shell and the tests give,
+/// and how much it says.
 pub struct Config {
+    /// The app's own folder: settings, records, tapes, secrets, logs.
     pub data: PathBuf,
-    pub server: String, // ours: relays the sign-in, issues keys
+    /// Ours: relays the sign-in, issues keys, keeps rooms.
+    pub server: String,
+    /// Soniox's real-time endpoint, a WebSocket.
     pub realtime: String,
+    /// Soniox's API: whole-recording transcripts.
     pub soniox: String,
+    /// OpenRouter's API: whole-recording translation and checks.
     pub openrouter: String,
-    pub directory: String,    // where a `did:zu` made here is registered
-    pub old: Option<PathBuf>, // where the 0.8 app kept its data, if it ran here
+    /// Where a `did:zu` made here is registered.
+    pub directory: String,
+    /// Where the 0.8 app kept its data, if it ran here.
+    pub old: Option<PathBuf>,
+    /// How sound is heard.
     pub hear: Hear,
+    /// Puts text on the clipboard.
     pub clip: Clip,
+    /// Installs a newer version.
     pub install: Install,
+    /// How much the log says: `ZUTALK_LOG` through `from_env`, else `info`.
+    pub log: Level,
 }
 
 /// Puts text on the system clipboard: the shell's to give. `false`: it could not.
@@ -68,7 +83,32 @@ impl Config {
         let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
         // Without a shell to give them, nothing can be put on the clipboard, nor installed.
         let (clip, install): (Clip, Install) = (Arc::new(|_| false), Arc::new(|| {}));
-        Self { data, server, realtime, soniox, openrouter, directory, old, hear, clip, install }
+        let log = Level::Info;
+        Self {
+            data,
+            server,
+            realtime,
+            soniox,
+            openrouter,
+            directory,
+            old,
+            hear,
+            clip,
+            install,
+            log,
+        }
+    }
+
+    /// What the environment says: `ZUTALK_LOG` (`debug`, else `info`). The one place the core
+    /// reads the environment; the shell calls it once, before the log is installed.
+    pub fn from_env(self) -> Self {
+        let log = Level::from_setting(std::env::var("ZUTALK_LOG").ok().as_deref());
+        Self { log, ..self }
+    }
+
+    /// Where the log's files are.
+    pub fn logs(&self) -> PathBuf {
+        self.data.join("logs")
     }
 
     /// Where each recording's audio is, in a folder of its own.

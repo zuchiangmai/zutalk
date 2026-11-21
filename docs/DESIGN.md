@@ -41,10 +41,11 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
 | 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
 | 状态 | 界面画的唯一一个值，变了就整份发过去 | `app`、`proto` |
+| 事件 | 发生了什么：一个稳定的代码，后面跟着平铺的字段，只能是数、布尔、源码里写死的代码和明写的 id，一句话放不进去（编不过）。一行一个 JSON，写在 `<数据目录>/logs/zutalk.jsonl`，按大小轮换；发事件的人从不等磁盘。词典是 `docs/EVENTS.md` | `log/`（`zutalk-log`） |
 
 ## 4. 模块
 
-文件的路径相对于 `core/src`（`shell`、`ui`、`server` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`live`、`record`、`knowledge`、`ai`、`out`、`id`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
+文件的路径相对于 `core/src`（`shell`、`ui`、`server`、`log` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`live`、`record`、`knowledge`、`ai`、`out`、`id`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
 
 | 模块 | 文件 | 做什么 |
 |---|---|---|
@@ -65,6 +66,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `shell` | `app/src` | Tauri 外壳：两个窗口、对话框插件；应用自己的更新：看、下、装、重启 |
 | `ui` | `ui/src` | 主窗口、字幕窗、观看页（同一个入口，按 `body` 上的标记分） |
 | `server` | `server/src` | 授予、取钥与认领的账本、登录中继、房间 |
+| `log` | `log/src`（单独的 crate `zutalk-log`） | 事件的四个宏和字段的类型；写文件的口（有上限的队列、写线程 `log.writer`、轮换）；panic 钩子；测试用的捕获和「带着走」。核心、外壳、服务器都用它；只有它依赖 `tracing` |
 
 ## 5. 补回的功能，各落在哪里
 

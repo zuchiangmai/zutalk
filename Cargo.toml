@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["zu", "core", "server", "app"]
+members = ["zu", "log", "core", "server", "app"]
 
 [workspace.package]
 version = "0.9.0"

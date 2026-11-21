@@ -10,15 +10,18 @@ mod relay;
 mod room;
 
 pub use crate::ledger::{Invites, Minted, OpenRouter, Service, Soniox, Upstream};
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::{Next, from_fn, map_response};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
-use axum::{Json, Router, middleware::map_response};
+use axum::routing::{MethodRouter, any, get, post};
+use axum::{Json, Router};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::{collections::HashMap, path::PathBuf, time::SystemTime};
+use std::time::{Instant, SystemTime};
+use std::{collections::HashMap, path::PathBuf};
 use zu::{Cid, Codec, Doc, Record, Value, auth::WINDOW};
+use zutalk_log::{debug, info, warn};
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -152,22 +155,53 @@ fn field<'a>(body: Option<&'a Value>, name: &str) -> Option<&'a String> {
     if let Some(Value::Str(text)) = map.get(name) { Some(text) } else { None }
 }
 
+type Route = fn() -> MethodRouter<Arc<Server>>;
+
+/// Every route: its path, the code the log says for it (a path has `{id}` in it, which is no
+/// plain text, and a request's own path may hold a room's id), and what answers it.
+const ROUTES: [(&str, &str, Route); 7] = [
+    ("/healthz", "healthz", || get(|| async { "ok" })),
+    ("/grants", "grants", || post(ledger::grant)),
+    ("/lease", "lease", || post(ledger::lease)),
+    ("/claim", "claim", || post(ledger::claim)),
+    ("/rooms", "rooms", || post(room::write)),
+    ("/rooms/{id}/events", "rooms.events", || get(room::events)),
+    ("/.well-known/zu-relay/{room}", "relay", || any(relay::relay)),
+];
+
+/// What a request matched, as the log says it: no route at all is `none`.
+fn route_code(matched: Option<&MatchedPath>) -> &'static str {
+    let path = matched.map(MatchedPath::as_str);
+    ROUTES.iter().find(|(at, _, _)| Some(*at) == path).map_or("none", |(_, code, _)| code)
+}
+
+/// One line per request answered: its route, its status, how long it took. Never its body, its
+/// signer, a room's id or its query.
+async fn noted(request: Request, next: Next) -> Response {
+    let route = route_code(request.extensions().get::<MatchedPath>());
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let (status, ms) = (response.status().as_u16(), started.elapsed().as_millis() as u64);
+    if response.status().is_server_error() {
+        warn!("server.request", route = route, status = status, ms = ms);
+    } else {
+        info!("server.request", route = route, status = status, ms = ms);
+    }
+    response
+}
+
 pub fn app(server: Arc<Server>) -> Router {
     // An answer may hold a key: nothing on the way keeps it.
     let no_store = |mut response: Response| async {
         response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         response
     };
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/grants", post(ledger::grant))
-        .route("/lease", post(ledger::lease))
-        .route("/claim", post(ledger::claim))
-        .route("/rooms", post(room::write))
-        .route("/rooms/{id}/events", get(room::events))
-        .route("/.well-known/zu-relay/{room}", any(relay::relay))
+    ROUTES
+        .iter()
+        .fold(Router::new(), |router, (path, _, answer)| router.route(path, answer()))
         .layer(DefaultBodyLimit::max(relay::MESSAGE))
         .layer(map_response(no_store))
+        .layer(from_fn(noted))
         .with_state(server)
 }
 
@@ -177,7 +211,9 @@ pub async fn serve(listener: tokio::net::TcpListener, server: Arc<Server>) -> st
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let started = Instant::now();
             sweeper.sweep(now());
+            debug!("server.sweep", ms = started.elapsed().as_millis() as u64);
         }
     });
     axum::serve(listener, app(server)).await

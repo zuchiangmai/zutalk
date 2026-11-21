@@ -7199,6 +7199,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "zutalk-core",
+ "zutalk-log",
 ]
 
 [[package]]
@@ -7231,7 +7232,18 @@ dependencies = [
  "wiremock",
  "zeroize",
  "zu",
+ "zutalk-log",
  "zutalk-server",
+]
+
+[[package]]
+name = "zutalk-log"
+version = "0.9.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7253,4 +7265,5 @@ dependencies = [
  "tokio-stream",
  "tower",
  "zu",
+ "zutalk-log",
 ]

@@ -6,12 +6,13 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State, ipc::Channel};
+use tauri::{AppHandle, Manager, RunEvent, State, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use zutalk_core::app::hub::{Clip, Config, Core, Install};
 use zutalk_core::app::proto::{Command, Event};
 use zutalk_core::id::keys;
+use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
 
 /// The windows listening, and the last state: a window that opens late is sent it first.
 type Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>;
@@ -90,7 +91,7 @@ fn installer(app: AppHandle, ready: Ready) -> Install {
 }
 
 fn main() {
-    let ran = tauri::Builder::default()
+    let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init()) // the paths of an import and an export
         // For the core alone: the page has no permission to the clipboard through it.
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -98,16 +99,31 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
-            keys::open_store(&data).map_err(|end| format!("{end:?}"))?;
             // Our server, which relays sign-ins, issues keys and keeps rooms. Set when building.
             let server = option_env!("ZUTALK_SERVER").unwrap_or("https://localhost:8443");
+            let base = Config::new(data.clone(), server).from_env();
+            // The log first, so that all after it is said; without one the app still starts.
+            match zutalk_log::install(&base.logs(), "zutalk", base.log, cfg!(debug_assertions)) {
+                Ok(guard) => {
+                    let _ = app.manage(guard); // dropped: `false` only if one was managed already
+                }
+                Err(error) => eprintln!("ZuTalk has no log: {error}"), // before the log: none
+            }
+            info!(
+                "app.start",
+                version = env!("CARGO_PKG_VERSION"),
+                os = std::env::consts::OS,
+                arch = std::env::consts::ARCH,
+                level = base.log.code()
+            );
+            keys::open_store(&data).map_err(|end| format!("{end:?}"))?;
             // Where the 0.8 app, which ran on macOS alone, kept its data.
             let old = cfg!(target_os = "macos").then_some(app.path().data_dir()?.join("ZuTalk"));
             let clipboard = app.handle().clone();
             let clip: Clip = Arc::new(move |text| clipboard.clipboard().write_text(text).is_ok());
             let ready = Ready::default();
             let install = installer(app.handle().clone(), ready.clone());
-            let config = Config { old, clip, install, ..Config::new(data, server) };
+            let config = Config { old, clip, install, ..base };
             let (handle, windows) = (app.handle().clone(), Windows::default());
             let theirs = windows.clone();
             let out = move |event| fan(&handle, &theirs, event);
@@ -122,9 +138,17 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![dispatch, subscribe])
-        .run(tauri::generate_context!());
-    if let Err(error) = ran {
-        eprintln!("ZuTalk could not start: {error}");
-        std::process::exit(1);
+        .build(tauri::generate_context!());
+    match built {
+        // What the log has not written yet is written before the process ends.
+        Ok(app) => app.run(|_, event| {
+            if let RunEvent::Exit = event {
+                let _ = zutalk_log::flush(LOG_FLUSH_WAIT_MS); // dropped: quitting goes on anyway
+            }
+        }),
+        Err(error) => {
+            eprintln!("ZuTalk could not start: {error}"); // before the log: it may not be there
+            std::process::exit(1);
+        }
     }
 }

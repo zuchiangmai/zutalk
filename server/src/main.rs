@@ -31,10 +31,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One TLS provider in the whole workspace, as in the core: ring.
     _ = rustls::crypto::ring::default_provider().install_default();
     let env = |name: &str, or: &str| std::env::var(name).unwrap_or_else(|_| or.to_owned());
+    // The log first, beside the ledger and the rooms, and on standard error for whoever deploys.
+    let (data, level) = (env("ZUTALK_DATA", "data"), std::env::var("ZUTALK_LOG").ok());
+    let level = zutalk_log::Level::from_setting(level.as_deref());
+    let logs = std::path::Path::new(&data).join("logs");
+    let _log = match zutalk_log::install(&logs, "zutalk-server", level, true) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            eprintln!("zutalk-server has no log: {error}"); // before the log: none
+            None
+        }
+    };
+    zutalk_log::info!("server.start", version = env!("CARGO_PKG_VERSION"));
     let coordinators = env("ZUTALK_COORDINATORS", "");
     let coordinators = coordinators.split(',').filter(|did| !did.is_empty()).map(str::to_owned);
     let origin = env("ZUTALK_ORIGIN", "http://127.0.0.1:8000");
-    let mut config = Config::new(&origin, env("ZUTALK_DATA", "data"), coordinators.collect());
+    let mut config = Config::new(&origin, data, coordinators.collect());
     let http = reqwest::Client::new();
     // The 0.8 line's invite service: its `ZULANGUE_ADMIN_TOKEN`, so that claims retire invites.
     let (url, key) =
