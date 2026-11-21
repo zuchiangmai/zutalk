@@ -1,6 +1,9 @@
 # Working in this repository
 
-`docs/DESIGN.md` is the contract: what the app is and its modules.
+`docs/DESIGN.md` is the contract: what the app is and its modules. `docs/PLAN.md` is the
+architecture and roadmap adopted on 2026-11-21; where the two differ, `PLAN.md` wins until it is
+folded into `DESIGN.md`. `docs/build/` is how the build runs, and `docs/build/DECISIONS.md` holds
+the provisional answers to the owner's open questions.
 `docs/LESSONS.md` lists what the previous version learned from real recordings; each item needs a
 test here, or a written reason why it no longer applies.
 
@@ -12,15 +15,21 @@ wrong change; stop and ask the owner.
 1. **Records belong to the person; the app is a view.** What lasts is the person's signed Zu
    records and their encrypted audio. ZuTalk has no file format of its own and no state worth
    keeping that is not a record.
-2. **Two speeds.** Live text is for the eyes: shown, kept as a draft, never the record. The
-   record is written once, after the session, from the whole audio and the whole context.
-   Nothing on the live path exists to make live text durable or exact (no replay, no
-   de-duplication, no cross-stream alignment, no per-line LLM).
+2. **Every path has its own time budget.** Live text is for the eyes: shown, kept as a draft,
+   never the record. The record is written once, after the session, from the whole audio and
+   the whole context. Nothing on the live path exists to make live text durable or exact (no
+   replay, no de-duplication, no cross-stream alignment, no per-line LLM). Capture, live,
+   record, query, background and interface each have a budget, and a faster path never waits
+   on a slower one.
 3. **One of each.** One fact (a Zu record; a change is one more record at the same path), one
    clock (the capture clock), one container for everything that leaves a device (a room: an
    append-only ciphertext log plus a slot), one recovery (open it again from scratch; the lost
-   time is silence or a gap), one state sent whole to the interface. A second mechanism for
-   something one of these already does is drift.
+   time is silence or a gap). Toward the interface there are three kinds of data, each with one
+   way across: a **bounded** state sent whole; **signals** (live captions, progress), of which
+   only the latest is kept; and **views** (library, transcript, search), computed from the
+   records, fetched by range and invalidated by version. Whatever grows with recordings is a
+   view, never part of the state. A second mechanism for something one of these already does
+   is drift.
 4. **Rules are values.** Decisions are pure functions of values with time as a parameter; IO
    lives in thin ports. Differences are data: a language, a model, a guard, an exporter, an
    error class is a row in a table, never a branch in a pipeline.
@@ -32,6 +41,10 @@ wrong change; stop and ask the owner.
    releases are ad-hoc signed, one secrets file only the person's account can read.
 7. **Small because the structure is right.** Few concepts, each with one home; layers depend one
    way. When a module grows, first ask which principle it is working around.
+8. **Liveness is a fact.** Every path has a budget, every queue a bound, every part reports how
+   far it has got. A stall is seen and acted on, never waited out.
+9. **Cost does not grow with history.** What any one update costs depends on what changed and
+   on the size of the screen, never on how long the recording runs or how much is kept.
 
 ## Rules
 
@@ -50,7 +63,17 @@ wrong change; stop and ask the owner.
   Secrets never appear in `Debug`, logs or any file but the one secrets file.
 - Comments in English, short, about why. Docs under `docs/` in Simplified Chinese.
 - Format with the repository's `rustfmt.toml`; `cargo clippy --all-targets -- -D warnings` is clean.
-- Commit only when the owner asks.
+- **No unbounded queue.** Every channel has a capacity and says what happens when it is full
+  (drop, coalesce, or end with a code). `unbounded_channel` is not used.
+- **The shell never blocks.** No synchronous Tauri command; no lock held across an `await` or a
+  window call; the main thread is never waited on.
+- **The hub and the live path do no IO.** Disk and network belong to `capture`, `record`, `view`,
+  `out` and `id` ports, run off the hub.
+- **Lists are virtualized.** Nothing in the interface does work in proportion to a recording's
+  length or the library's size.
+- **Every long-running task is supervised and reports a watermark.**
+- Commit only when the owner asks. The owner asked on 2026-11-21 for the whole build: during it,
+  each finished task is committed locally on `main`; nothing is pushed, tagged or released.
 
 ## The old repository
 
