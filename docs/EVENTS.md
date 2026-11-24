@@ -75,3 +75,6 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `server.start` | info | 服务器装好日志以后的第一行 | `version` |
 | `server.request` | info；状态 ≥ 500 时 warn | 服务器答完一个请求 | `route`（路由表 `ROUTES` 里的代码，不是路径；没有对上任何路由是 `none`） `status` `ms` |
 | `server.sweep` | debug | 服务器每分钟清扫一次房间以后 | `ms` |
+| `queue.full` | warn | 一条队列从「有位置」变成「满了」的那一次 | `queue` `policy` `capacity` |
+| `queue.clear` | info | 满过的队列又放进去了 | `queue` `lost`（这一段里被退回、丢掉的个数） |
+| `stats.full` | warn | 统计的行数到了上限，或名字超长（一种一次） | `kind`（`counts` / `peaks` / `spreads` / `queues` / `tasks`） |
