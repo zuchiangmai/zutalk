@@ -1267,6 +1267,162 @@ async fn a_kick_ends_the_connection_and_the_lane_opens_another() {
     assert_eq!(seen.refused(), 0);
 }
 
+struct NeverKeys {
+    leased: AtomicUsize,
+}
+
+impl Keys for NeverKeys {
+    async fn lease(&self, _: Service) -> Result<Lease, End> {
+        self.leased.fetch_add(1, SeqCst);
+        std::future::pending().await
+    }
+
+    fn refused(&self, _: Service) {}
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lease_that_never_comes_is_given_up_on() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let stats = Stats::new();
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dials_cb = dials.clone();
+    let counting_dial: Dial = Arc::new(move |_| {
+        dials_cb.fetch_add(1, SeqCst);
+        Box::pin(async { Err(End::Fatal("unexpected.dial")) })
+    });
+
+    let audio = queue::fanout(&stats, "audio", 64);
+    let heard = audio.subscribe();
+    let (_mode, mode_rx) = watch::channel(Mode::Recording);
+    let (_kick, kick_rx) = watch::channel(0u64);
+    let (out, mut events) = queue::bounded(&stats, "lane.events", 1024, Full::Wait);
+    let gauges = Gauges::default();
+    let lane_gauges = gauges.clone();
+    let keys = Arc::new(NeverKeys { leased: AtomicUsize::new(0) });
+    let lane_keys = keys.clone();
+    let cfg = setup("ws://never.local");
+    let lane_stats = stats.clone();
+
+    let task = tokio::spawn(zutalk_log::carry(async move {
+        run(
+            0,
+            Stream::Transcribe,
+            &cfg,
+            lane_keys,
+            counting_dial,
+            lane_stats,
+            lane_gauges,
+            heard,
+            mode_rx,
+            kick_rx,
+            out,
+        )
+        .await
+    }));
+
+    // At 10 s the first lease attempt times out and marks Sent.because = "keys".
+    tokio::time::sleep(Duration::from_millis(10_050)).await;
+    assert_eq!(gauges.sent.read().1, "keys", "expected because=keys after 10 s timeout");
+    assert_eq!(gauges.sent.read().2, None, "must not have given up at 10 s");
+
+    // Advance past 120 s without a healthy run so Restarts gives up with End::Fatal("keys").
+    let end = timeout(Duration::from_secs(150), task)
+        .await
+        .expect("lane must give up on hanging lease")
+        .expect("lane task join");
+    assert_eq!(end, End::Fatal("keys"));
+
+    let mut emitted = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        emitted.push(ev);
+    }
+    assert_eq!(emitted.last(), Some(&link_event(Link::Stopped("keys"))));
+
+    let leased = keys.leased.load(SeqCst);
+    assert!((1..=12).contains(&leased), "expected 1..=12 lease attempts, got {leased}");
+    assert_eq!(dials.load(SeqCst), 0, "must never dial when lease never returns");
+
+    // Observability (`P1-18-reconnect.md` #2).
+    let opens = seen.of("lane.open");
+    assert_eq!(opens.len(), leased, "expected {leased} lane.open events, got {}", opens.len());
+    for line in &opens {
+        assert_eq!(line.level, zutalk_log::Level::Warn);
+        assert_eq!(line.u64("lane"), Some(0));
+        assert_eq!(line.text("code"), Some("keys"));
+        assert_eq!(line.u64("keys_ms"), Some(10_000));
+        assert_eq!(line.u64("dial_ms"), Some(0));
+    }
+
+    let gave_up = seen.of("part.gave_up");
+    assert_eq!(gave_up.len(), 1, "{gave_up:?}");
+    assert_eq!(gave_up[0].text("why"), Some("keys"));
+    assert_eq!(gave_up[0].level, zutalk_log::Level::Error);
+
+    let links = seen.of("lane.link");
+    let last_link = links.last().expect("lane.link emitted");
+    assert_eq!(last_link.text("to"), Some("Stopped"));
+    assert_eq!(last_link.text("why"), Some("keys"));
+
+    assert_eq!(gauges.sent.read().2, Some("keys"));
+
+    let keys_spread = stats
+        .tally()
+        .spreads
+        .into_iter()
+        .find(|s| s.name == "lane.keys_ms")
+        .expect("lane.keys_ms spread recorded");
+    assert_eq!(keys_spread.n, leased as u64);
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_open_says_how_it_went() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+
+    // 1. Normal open against a duplex scripted service: `lane.open` with `code = "ok"` at `info`.
+    let stats_ok = Stats::new();
+    let (dial_ok, mut conns) = duplex_dial();
+    let mut lane =
+        start_with("ws://duplex.local", Stream::Transcribe, TestKeys::default(), dial_ok, stats_ok);
+    let (mut ws, _) = duplex_accept(&mut conns).await;
+    lane.record(loud());
+    assert_eq!(duplex_sent(&mut ws).await, Sent::Audio(BLOCK * 2));
+    lane.until(is_live).await;
+    lane.mode.send(Mode::Stopped).unwrap();
+    assert_eq!(duplex_sent(&mut ws).await, Sent::Finish);
+    duplex_say(&mut ws, json!({"tokens": [], "finished": true, "total_audio_proc_ms": 100})).await;
+    let (end, _) = lane.ended().await;
+    assert_eq!(end, End::Done);
+
+    // 2. Refused key: `lane.open` with `code = "key"` and `dial_ms = 0` at `warn`.
+    let stats_refused = Stats::new();
+    let (dial_refused, _conns2) = duplex_dial();
+    let refused_keys = TestKeys { fail: Some(End::Fatal("key")), ..TestKeys::default() };
+    let lane_refused = start_with(
+        "ws://duplex.local",
+        Stream::Transcribe,
+        refused_keys,
+        dial_refused,
+        stats_refused,
+    );
+    let (end_refused, _) = lane_refused.ended().await;
+    assert_eq!(end_refused, End::Fatal("key"));
+
+    let opens = seen.of("lane.open");
+    assert_eq!(opens.len(), 2, "{opens:?}");
+    assert_eq!(opens[0].level, zutalk_log::Level::Info);
+    assert_eq!(opens[0].u64("lane"), Some(0));
+    assert_eq!(opens[0].text("code"), Some("ok"));
+    assert!(opens[0].u64("keys_ms").is_some());
+    assert!(opens[0].u64("dial_ms").is_some());
+
+    assert_eq!(opens[1].level, zutalk_log::Level::Warn);
+    assert_eq!(opens[1].u64("lane"), Some(0));
+    assert_eq!(opens[1].text("code"), Some("key"));
+    assert_eq!(opens[1].u64("dial_ms"), Some(0));
+    assert_eq!(seen.refused(), 0);
+}
+
 // ---- the real service ----
 
 /// The person's own key, every time.

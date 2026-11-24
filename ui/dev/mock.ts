@@ -91,6 +91,7 @@ export function mockBus(recording = false): Bus {
       emitFrame([]);
       write(id);
     },
+    Reconnect: () => session && ((session.status = { is: 'Connecting' }), emitSession()),
     Setup: (c) => (s.setup = c.setup),
     Open: (c) => {
       const r = s.library.find((x) => x.id === c.id);

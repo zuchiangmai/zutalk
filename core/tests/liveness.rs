@@ -351,6 +351,12 @@ struct I1Run {
     fit_events: usize,
     frame_cut: u64,
     frame_bound_most: u64,
+    caption_lag_n: u64,
+    caption_lag_p50: u64,
+    caption_lag_p99: u64,
+    caption_lag_most: u64,
+    judge_verdicts: usize,
+    stall_snapshots: usize,
     wall: Duration,
 }
 
@@ -383,6 +389,13 @@ async fn run_i1(spec: SpeechSpec, shown: &[&str], hours: usize) -> I1Run {
     let fit_events = bench.seen().count("frame.fit");
     let frame_cut = bench.count("frame.cut");
     let frame_bound_most = bench.peak("frame.bound_bytes").map_or(0, |p| p.most);
+    let lag = bench.spread("caption.lag_ms");
+    let caption_lag_n = lag.as_ref().map_or(0, |s| s.n);
+    let caption_lag_p50 = lag.as_ref().map_or(0, |s| s.p50);
+    let caption_lag_p99 = lag.as_ref().map_or(0, |s| s.p99);
+    let caption_lag_most = lag.as_ref().map_or(0, |s| s.most);
+    let judge_verdicts = bench.seen().count("judge.verdict");
+    let stall_snapshots = bench.seen().count("stall.snapshot");
 
     let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); hours.max(1)];
     let mut missing = 0usize;
@@ -412,6 +425,12 @@ async fn run_i1(spec: SpeechSpec, shown: &[&str], hours: usize) -> I1Run {
         fit_events,
         frame_cut,
         frame_bound_most,
+        caption_lag_n,
+        caption_lag_p50,
+        caption_lag_p99,
+        caption_lag_most,
+        judge_verdicts,
+        stall_snapshots,
         wall: wall_start.elapsed(),
     }
 }
@@ -462,10 +481,16 @@ async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
         );
     }
     eprintln!(
-        "i1_eight_hours total: missing={} max_frame={}B bound_most={}B events={} wall={:.2}s",
+        "i1_eight_hours total: missing={} max_frame={}B bound_most={}B caption.lag_ms=(n={} p50={}ms p99={}ms most={}ms) judge.verdict={} stall.snapshot={} events={} wall={:.2}s",
         run.missing,
         run.max_frame_bytes,
         run.frame_bound_most,
+        run.caption_lag_n,
+        run.caption_lag_p50,
+        run.caption_lag_p99,
+        run.caption_lag_most,
+        run.judge_verdicts,
+        run.stall_snapshots,
         run.captured_events,
         run.wall.as_secs_f64()
     );
@@ -2391,6 +2416,180 @@ async fn a_recording_without_a_key_is_quiet_from_start_to_stop() {
     assert_eq!(bench.seen().count("stall.snapshot"), 0, "no snapshots without key");
     assert_eq!(bench.seen().count("lane.kick"), 0, "no kicks without key");
     assert_eq!(bench.seen().count("notice.said"), 0, "no notices without key");
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn i7_offline_is_said_and_captions_stop_trying_until_asked() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(6 * 60 * 1_000 + 30_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::Offline;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+    let started_at = Instant::now();
+
+    // Before 21 s: `connect` is said once, column is Stalled{why: "connect"}, status is
+    // AudioOnly{why: "connect"}, and audio capture + tape are advancing.
+    let deadline_stalled = started_at + Duration::from_secs(21);
+    loop {
+        if bench.notices().iter().any(|c| c == "connect")
+            && bench.outlet().frame.now().1.columns.first().map(|c| &c.health)
+                == Some(&Health::Stalled { why: "connect".into() })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline_stalled,
+            "expected Stalled(connect) + notice before 21 s; elapsed={:?}, notices={:?}, frame={:?}",
+            started_at.elapsed(),
+            bench.notices(),
+            bench.outlet().frame.now().1.columns.first().map(|c| &c.health)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(bench.notices().iter().filter(|c| *c == "connect").count(), 1);
+    assert_eq!(bench.status(), Some(Status::AudioOnly { why: "connect".into() }));
+    let (_, water_stalled) = bench.outlet().water.now();
+    let cap_at =
+        water_stalled.marks.iter().find(|m| m.stage == Stage::Capture).expect("Capture mark").at;
+    let tape_at =
+        water_stalled.marks.iter().find(|m| m.stage == Stage::Tape).expect("Tape mark").at;
+    assert!(
+        cap_at >= 15_000 && tape_at >= 15_000,
+        "audio must keep recording: cap={cap_at} tape={tape_at}"
+    );
+
+    // Before 30 s (8th dial fails at ~23.75 s): column becomes Dead{why: "connect"}, `connect` is
+    // not repeated.
+    let deadline_dead = started_at + Duration::from_secs(30);
+    loop {
+        if bench.outlet().frame.now().1.columns.first().map(|c| &c.health)
+            == Some(&Health::Dead { why: "connect".into() })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline_dead,
+            "expected Dead(connect) before 30 s; elapsed={:?}, frame={:?}",
+            started_at.elapsed(),
+            bench.outlet().frame.now().1.columns.first().map(|c| &c.health)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(bench.service.dials(), 8, "expected 8 dials before giving up");
+    assert_eq!(bench.notices().iter().filter(|c| *c == "connect").count(), 1);
+
+    let opens_before_idle = bench.seen().count("lane.open");
+    let states_before_idle = bench.seen().count("part.state");
+    assert_eq!(opens_before_idle, 8);
+
+    // Next 5 virtual minutes: no further dials, notices, `lane.open`, or `part.state`.
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(60_000)).await;
+    }
+    assert_eq!(bench.service.dials(), 8, "lane must not dial again once Dead");
+    assert_eq!(bench.notices().iter().filter(|c| *c == "connect").count(), 1);
+    assert_eq!(bench.seen().count("lane.open"), opens_before_idle);
+    assert_eq!(bench.seen().count("part.state"), states_before_idle);
+
+    // Network comes back and the user asks to Reconnect: words appear on screen within 5 s.
+    bench.service.set_fault(Fault::None);
+    let reconnect_at = Instant::now();
+    bench.send(Command::Reconnect);
+    let deadline_live = reconnect_at + Duration::from_secs(5);
+    loop {
+        let words_seen = bench.word_seen().iter().filter(|w| w.is_some()).count();
+        let col_live =
+            bench.outlet().frame.now().1.columns.first().map(|c| &c.health) == Some(&Health::Live);
+        if words_seen > 0 && col_live {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline_live,
+            "captions did not resume within 5 s of Reconnect: words={words_seen}, health={:?}",
+            bench.outlet().frame.now().1.columns.first().map(|c| &c.health)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Let a couple of seconds settle into the draft, then stop cleanly.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Draft contains a gap line covering the offline stretch.
+    let recorded = bench.shelf().read(&rec_id).expect("read shelf").expect("recording on shelf");
+    let gap_line = recorded
+        .lines
+        .iter()
+        .map(|(_, s)| &s.line)
+        .find(|l| l.text == "…" && l.incomplete)
+        .expect("draft must contain an incomplete gap line covering the offline stretch");
+    assert_eq!(gap_line.t0, 0, "offline gap starts at recording start: {gap_line:?}");
+    assert!(gap_line.t1 >= 300_000, "offline gap must span the 5+ min outage: {gap_line:?}");
+
+    // Observability (`P1.md` §2 table 2, `P1-18-reconnect.md` #1).
+    let opens = bench.seen().of("lane.open");
+    let connect_opens: Vec<_> =
+        opens.iter().filter(|l| l.text("code") == Some("connect")).collect();
+    let ok_opens: Vec<_> = opens.iter().filter(|l| l.text("code") == Some("ok")).collect();
+    assert_eq!(connect_opens.len(), 8, "expected 8 connect lane.open events: {opens:?}");
+    assert_eq!(ok_opens.len(), 1, "expected 1 ok lane.open after reconnect: {opens:?}");
+    assert_eq!(ok_opens[0].level, Level::Info);
+
+    let gave_up = bench.seen().of("part.gave_up");
+    assert_eq!(gave_up.len(), 1, "{gave_up:?}");
+    assert_eq!(gave_up[0].text("part"), Some("lane.0"));
+    assert_eq!(gave_up[0].text("why"), Some("connect"));
+    assert_eq!(gave_up[0].u64("n"), Some(8));
+    assert_eq!(gave_up[0].level, Level::Error);
+
+    let sent_verdicts: Vec<String> = bench
+        .seen()
+        .of("judge.verdict")
+        .into_iter()
+        .filter(|l| l.text("stage") == Some("Sent") && l.u64("lane") == Some(0))
+        .filter_map(|l| l.text("to").map(str::to_owned))
+        .collect();
+    assert_eq!(sent_verdicts, ["Slow", "Stalled", "Dead", "Live"], "{sent_verdicts:?}");
+
+    assert_eq!(bench.seen().count("stall.snapshot"), 1, "only one snapshot for the outage");
+    let connect_notices: Vec<_> = bench
+        .seen()
+        .of("notice.said")
+        .into_iter()
+        .filter(|l| l.text("code") == Some("connect"))
+        .collect();
+    assert_eq!(connect_notices.len(), 1, "{connect_notices:?}");
+
+    let reconnect_cmd: Vec<_> = bench
+        .seen()
+        .of("command.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("Reconnect"))
+        .collect();
+    assert_eq!(reconnect_cmd.len(), 1, "{reconnect_cmd:?}");
+    assert_eq!(reconnect_cmd[0].text("code"), Some("ok"));
+
+    let reconnects = bench.seen().of("lane.reconnect");
+    assert_eq!(reconnects.len(), 1, "{reconnects:?}");
+    assert_eq!(reconnects[0].u64("lane"), Some(0));
+
+    let links = bench.seen().of("lane.link");
+    assert!(
+        links.iter().any(|l| l.text("to") == Some("Live")),
+        "expected lane.link to Live after reconnect: {links:?}"
+    );
+    let gaps = bench.seen().of("lane.gap");
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].text("why"), Some("connect"));
+
+    assert_eq!(bench.count("judge.dead"), 1);
 
     bench.finish();
 }

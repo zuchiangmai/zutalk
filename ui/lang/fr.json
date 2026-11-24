@@ -215,5 +215,7 @@
  "code.draft.behind": "L’enregistrement du texte en direct a pris du retard",
  "code.silent": "Le service ne répond plus",
  "code.shell": "La fenêtre a pris du retard",
- "code.panic": "Arrêt inattendu, relancé"
+ "code.panic": "Arrêt inattendu, relancé",
+ "code.keys": "Clé non obtenue à temps",
+ "reconnect": "Reconnecter"
 }

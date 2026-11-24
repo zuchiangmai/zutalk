@@ -47,6 +47,11 @@ const SLOT_MS: u64 = 250;
 pub const HUB_MAIL_MSGS: usize = 256;
 /// One turn of the hub (PLAN.md §4.1): a command should take under a millisecond.
 pub const HUB_TURN_BUDGET_US: u64 = 1_000;
+/// Connection timeout for outbound HTTP requests: matches lane `PATIENCE_MS` (`P1-18`).
+const CONNECT_TIMEOUT_MS: u64 = 10_000;
+/// Idle read timeout for outbound HTTP requests: 30 s without a byte means a dead connection,
+/// while long whole-recording uploads keep streaming without a whole-request timeout (`P1-18`).
+const READ_TIMEOUT_MS: u64 = 30_000;
 
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
@@ -230,7 +235,11 @@ impl Core {
     /// Starts on the current runtime. The key store must be open (`keys::open_store`).
     pub fn start(config: Config) -> Result<(Core, Outlet), End> {
         let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
-        let http = reqwest::Client::builder().build().map_err(|_| End::Fatal("tls"))?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
+            .read_timeout(Duration::from_millis(READ_TIMEOUT_MS))
+            .build()
+            .map_err(|_| End::Fatal("tls"))?;
         let stats = Stats::new();
         let (commands, mail) = queue::bounded(&stats, "hub.mail", HUB_MAIL_MSGS, Full::Reject); // the interface: never waits, is told `busy`
         let results = commands.with(Full::Wait); // work that is done: must arrive; whoever did it can wait
@@ -383,7 +392,7 @@ struct Hub {
     state: State,
     sent: Option<State>,
     shelf: Option<Arc<Shelf>>,
-    recording: Option<(String, watch::Sender<Mode>)>,
+    recording: Option<(String, watch::Sender<Mode>, watch::Sender<u64>)>,
     opened: Option<String>,
     signing: Option<AbortHandle>, // a sign-in, an identity being made, or an invite carried
     invite: Option<Secret>,       // a 0.8 community invite not carried over yet
@@ -521,6 +530,7 @@ impl Hub {
             Command::Pause => self.mode(Mode::Paused)?,
             Command::Resume => self.mode(Mode::Recording)?,
             Command::Stop => self.stop(),
+            Command::Reconnect => self.reconnect()?,
             Command::Setup { setup } => {
                 if setup.shown.len() > MAX_COLUMNS {
                     return Err("captions.columns");
@@ -606,7 +616,7 @@ impl Hub {
             }
             Command::Captions { show } => self.state.captions = show,
             Command::DestroyAudio { id } => {
-                let under_way = self.recording.as_ref().map(|(rec, _)| rec.as_str());
+                let under_way = self.recording.as_ref().map(|(rec, _, _)| rec.as_str());
                 retain::destroy(&self.config.tapes(), &self.state.library, under_way, &id)?
             }
             Command::Term { said, written } => {
@@ -656,7 +666,7 @@ impl Hub {
     }
 
     fn under_way(&self, id: &str) -> bool {
-        self.recording.as_ref().is_some_and(|(under_way, _)| under_way == id)
+        self.recording.as_ref().is_some_and(|(under_way, _, _)| under_way == id)
     }
 
     fn busy(&self, id: &str) -> bool {
@@ -712,12 +722,14 @@ impl Hub {
         shelf.put(&id, RECORDING, &[(id.clone(), Some(about.clone()))], started).map_err(fail)?;
         self.session_reg.set(Some(Session { id: id.clone(), started, status: initial }));
         let (mode, watching) = watch::channel(Mode::Recording);
+        let (reconnect, reconnect_rx) = watch::channel(0u64);
         let rec_start = recording::Start {
             id: id.clone(),
             about,
             source,
             captions,
             mode: watching,
+            reconnect: reconnect_rx,
             shelf: shelf.clone(),
             keys: self.keys.clone(),
             config: self.config.clone(),
@@ -738,7 +750,7 @@ impl Hub {
             let done = recording::run(rec_start).await;
             post.after_seal(done.sealed).await;
         });
-        self.recording = Some((id, mode));
+        self.recording = Some((id, mode, reconnect));
         Ok(())
     }
 
@@ -747,8 +759,13 @@ impl Hub {
         Ok(())
     }
 
+    fn reconnect(&self) -> Result<(), &'static str> {
+        self.recording.as_ref().ok_or("recording.none")?.2.send_modify(|n| *n += 1);
+        Ok(())
+    }
+
     fn stop(&mut self) {
-        if let Some((id, mode)) = self.recording.take() {
+        if let Some((id, mode, _)) = self.recording.take() {
             mode.send_replace(Mode::Stopped);
             self.session_reg.set(None);
             self.frame_reg.set(Frame::default());

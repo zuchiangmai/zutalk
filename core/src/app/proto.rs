@@ -224,6 +224,7 @@ pub enum Command {
     Pause,
     Resume,
     Stop,
+    Reconnect,
     Setup { setup: Setup },
     Open { id: String },
     Close,
@@ -257,6 +258,7 @@ impl Command {
             Command::Pause => "Pause",
             Command::Resume => "Resume",
             Command::Stop => "Stop",
+            Command::Reconnect => "Reconnect",
             Command::Setup { .. } => "Setup",
             Command::Open { .. } => "Open",
             Command::Close => "Close",
@@ -291,6 +293,7 @@ impl Command {
             | Command::Pause
             | Command::Resume
             | Command::Stop
+            | Command::Reconnect
             | Command::Setup { .. }
             | Command::Open { .. }
             | Command::Close

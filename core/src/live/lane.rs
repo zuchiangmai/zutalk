@@ -9,7 +9,7 @@ use crate::live::frame::MAX_COLUMNS;
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::live::wire::{Dial, Wire};
 use crate::rt::queue::{FanoutRx, RecvError, Tx};
-use crate::rt::stats::{Counter, Stats};
+use crate::rt::stats::{Counter, Spread, Stats};
 use crate::rt::supervise::{End, Part, Restarts, supervise_counted};
 use crate::rt::water::Gauge;
 use futures_util::{SinkExt, StreamExt};
@@ -26,7 +26,7 @@ use zutalk_log::{info, warn};
 pub const LANE_NAMES: [&str; 3] = ["lane.0", "lane.1", "lane.2"];
 
 const BLOCK_MS: u32 = (BLOCK as u64 * 1000 / RATE) as u32; // a block's length, worked out
-/// A dial or a write that takes longer than this is a dead connection. 0.8's, for both.
+/// Taking a key lease, dialing, or writing a frame longer than this is a dead attempt. 0.8's.
 const PATIENCE_MS: u64 = 10_000;
 /// While paused the service is sent no audio, and closes a connection that says nothing: a
 /// keepalive this often. 0.8's.
@@ -275,6 +275,20 @@ impl Feed {
     }
 }
 
+/// Where a lane begins on the capture clock (`edge = 0, why = "start"` at recording start, or
+/// the previous `Sent` position and break code when restarted by `Command::Reconnect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    pub edge: u32,
+    pub why: &'static str,
+}
+
+impl Default for Origin {
+    fn default() -> Self {
+        Self { edge: 0, why: "start" }
+    }
+}
+
 /// Watermark gauges reported by one caption lane (`P1.md` §3.5).
 #[derive(Clone, Default)]
 pub struct Gauges {
@@ -291,6 +305,8 @@ struct Lane<K> {
     keys: Arc<K>,
     dial: Dial,
     gaps: Counter,
+    keys_ms: Spread,
+    dial_ms: Spread,
     gauges: Gauges,
     out: Tx<Event>,
     audio: FanoutRx<Arc<Block>>,
@@ -304,8 +320,7 @@ struct Lane<K> {
     paused: bool,
 }
 
-/// Runs one stream until the recording stops or nothing can keep it going. Audio capture
-/// never waits on it: a lane that cannot keep up skips, and one that ends says so.
+/// Runs one stream from the start of a recording (`Origin::default()`).
 #[allow(clippy::too_many_arguments)]
 pub async fn run<K: Keys>(
     stream: usize,
@@ -320,11 +335,48 @@ pub async fn run<K: Keys>(
     kick: watch::Receiver<u64>,
     out: Tx<Event>,
 ) -> End {
+    run_from(
+        stream,
+        kind,
+        setup,
+        keys,
+        dial,
+        stats,
+        gauges,
+        Origin::default(),
+        audio,
+        mode,
+        kick,
+        out,
+    )
+    .await
+}
+
+/// Runs one stream from `origin` until the recording stops or nothing can keep it going. Audio
+/// capture never waits on it: a lane that cannot keep up skips, and one that ends says so.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_from<K: Keys>(
+    stream: usize,
+    kind: Stream,
+    setup: &Setup,
+    keys: Arc<K>,
+    dial: Dial,
+    stats: Stats,
+    gauges: Gauges,
+    origin: Origin,
+    audio: FanoutRx<Arc<Block>>,
+    mode: watch::Receiver<Mode>,
+    kick: watch::Receiver<u64>,
+    out: Tx<Event>,
+) -> End {
     let spoken: Vec<&str> = setup.spoken.iter().map(String::as_str).collect();
     let (lines, tail, mut stop) = (Assembler::new(&spoken), Vec::new(), mode.clone());
-    let (setup, edge, why, paused) = (setup.clone(), 0, "start", *mode.borrow() == Mode::Paused);
+    let (setup, edge, why, paused) =
+        (setup.clone(), origin.edge, origin.why, *mode.borrow() == Mode::Paused);
     gauges.sent.because(why);
     let gaps = stats.counter("lane.gaps");
+    let keys_ms = stats.spread("lane.keys_ms");
+    let dial_ms = stats.spread("lane.dial_ms");
     let broke_sent = gauges.sent.clone();
     let lane = Lane {
         stream,
@@ -333,6 +385,8 @@ pub async fn run<K: Keys>(
         keys,
         dial,
         gaps,
+        keys_ms,
+        dial_ms,
         gauges,
         out,
         audio,
@@ -386,6 +440,10 @@ pub async fn run<K: Keys>(
     end
 }
 
+fn end_code(end: End) -> &'static str {
+    if let End::Retry(code) | End::Fatal(code) = end { code } else { "done" }
+}
+
 async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
     if lane.why == "panic" {
         lane.tell(Event::Tail { stream: lane.stream, tail: Vec::new() }).await;
@@ -394,21 +452,52 @@ async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, En
     if lane.why != "cap" {
         lane.say(Link::Connecting).await;
     }
-    let lease = lane.keys.lease(Service::Soniox).await?;
-    let dialed = Instant::now(); // before the socket opens: the service's count starts later
-    let dial =
-        timeout(Duration::from_millis(PATIENCE_MS), (lane.dial)(lane.setup.endpoint.as_str()))
-            .await;
-    let ws = match dial {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(end)) => return Err(end),
-        Err(_) => return Err(End::Retry("connect")),
-    };
-    let hello = config(lease.key.expose(), &lane.kind, &lane.setup).to_string();
-    let (cap, feed) = (lease.session_cap, Feed::default());
-    let mut conn = Conn { lane, ws, feed, dialed, cap, ending: None, wake: dialed };
-    conn.send(Message::text(hello)).await?;
-    Ok(conn)
+    let stream = lane.stream;
+    let t_keys = Instant::now();
+    let leased =
+        timeout(Duration::from_millis(PATIENCE_MS), lane.keys.lease(Service::Soniox)).await;
+    let keys_ms = t_keys.elapsed().as_millis() as u64;
+    lane.keys_ms.note(keys_ms);
+    let mut dial_ms = 0u64;
+
+    let result: Result<Conn<K>, End> = async {
+        let lease = match leased {
+            Ok(Ok(lease)) => lease,
+            Ok(Err(end)) => return Err(end),
+            Err(_) => return Err(End::Retry("keys")),
+        };
+        let dialed = Instant::now(); // before the socket opens: the service's count starts later
+        let dial =
+            timeout(Duration::from_millis(PATIENCE_MS), (lane.dial)(lane.setup.endpoint.as_str()))
+                .await;
+        dial_ms = dialed.elapsed().as_millis() as u64;
+        lane.dial_ms.note(dial_ms);
+        let ws = match dial {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(end)) => return Err(end),
+            Err(_) => return Err(End::Retry("connect")),
+        };
+        let hello = config(lease.key.expose(), &lane.kind, &lane.setup).to_string();
+        let (cap, feed) = (lease.session_cap, Feed::default());
+        let mut conn = Conn { lane, ws, feed, dialed, cap, ending: None, wake: dialed };
+        conn.send(Message::text(hello)).await?;
+        Ok(conn)
+    }
+    .await;
+
+    match &result {
+        Ok(_) => {
+            info!("lane.open", lane = stream, code = "ok", keys_ms = keys_ms, dial_ms = dial_ms,)
+        }
+        Err(end) => warn!(
+            "lane.open",
+            lane = stream,
+            code = end_code(*end),
+            keys_ms = keys_ms,
+            dial_ms = dial_ms,
+        ),
+    }
+    result
 }
 
 impl<K: Keys> Lane<K> {

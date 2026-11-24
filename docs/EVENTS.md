@@ -119,6 +119,8 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `stall.snapshot.end` | `Stalled` warn；`Dead` error | 一组停滞快照的结尾 | `snap` `lines`（这一组一共几行，含头尾） |
 | `task.running` | warn | 快照里：整棵根树上此刻跑着的每个任务一行 | `snap` `tree` `task` `kind`（`task` / `kept` / `blocking`） `for_ms` |
 | `lane.kick` | warn | 看守因服务不回话踢了一条 lane | `lane` `why`（`silent`） |
+| `lane.open` | info；没成时 warn | lane 每开一次连接（成和不成都发） | `lane` `code`（`ok` 或没成的原因代码） `keys_ms` `dial_ms`（未到拨号步为 0） |
+| `lane.reconnect` | info | 停了的 lane 因 `Command::Reconnect` 被重新起起来 | `lane` |
 
 ## 怎么读一组快照
 

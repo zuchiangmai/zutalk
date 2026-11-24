@@ -215,5 +215,7 @@
  "code.draft.behind": "실시간 텍스트 저장이 늦어졌어요",
  "code.silent": "서비스 응답이 멈췄어요",
  "code.shell": "창 업데이트가 늦어졌어요",
- "code.panic": "예기치 않게 멈춰 다시 시작했어요"
+ "code.panic": "예기치 않게 멈춰 다시 시작했어요",
+ "code.keys": "키를 제때 가져오지 못했습니다",
+ "reconnect": "다시 연결"
 }

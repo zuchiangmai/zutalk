@@ -32,6 +32,7 @@ fn a_recording_steps_as_its_table_says() {
         Happened::Mode(Mode::Recording),
         Happened::Mode(Mode::Paused),
         Happened::Mode(Mode::Stopped),
+        Happened::Reconnect,
         Happened::Failed("audio.closed"),
         Happened::Failed("done"),
         Happened::StepDone,
@@ -60,6 +61,9 @@ fn a_recording_steps_as_its_table_says() {
                 (Phase::Recording, Happened::Mode(Mode::Stopped)) => {
                     (Phase::Closing(Step::Capture), "done", vec![Effect::Close(Step::Capture)])
                 }
+                (Phase::Recording, Happened::Reconnect) => {
+                    (Phase::Recording, "done", vec![Effect::Reconnect])
+                }
                 (Phase::Recording, Happened::Failed("audio.closed")) => (
                     Phase::Closing(Step::Capture),
                     "audio.closed",
@@ -73,6 +77,9 @@ fn a_recording_steps_as_its_table_says() {
                 }
                 (Phase::Paused, Happened::Mode(Mode::Stopped)) => {
                     (Phase::Closing(Step::Capture), "done", vec![Effect::Close(Step::Capture)])
+                }
+                (Phase::Paused, Happened::Reconnect) => {
+                    (Phase::Paused, "done", vec![Effect::Reconnect])
                 }
                 (Phase::Paused, Happened::Failed("audio.closed")) => (
                     Phase::Closing(Step::Capture),

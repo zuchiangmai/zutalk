@@ -118,6 +118,7 @@ impl Phase {
 pub enum Happened {
     Opened,
     Mode(Mode),
+    Reconnect,
     Failed(&'static str),
     StepDone,
 }
@@ -127,6 +128,7 @@ pub enum Happened {
 pub enum Effect {
     Pause,
     Resume,
+    Reconnect,
     Say(&'static str),
     Close(Step),
     Seal,
@@ -156,6 +158,9 @@ pub fn step(
         (Phase::Recording, Happened::Mode(Mode::Paused)) => {
             (Phase::Paused, ending, vec![Effect::Pause])
         }
+        (Phase::Recording, Happened::Reconnect) => {
+            (Phase::Recording, ending, vec![Effect::Reconnect])
+        }
         (Phase::Recording, Happened::Mode(Mode::Stopped)) => {
             (Phase::Closing(Step::Capture), ending, vec![Effect::Close(Step::Capture)])
         }
@@ -170,6 +175,7 @@ pub fn step(
         (Phase::Paused, Happened::Mode(Mode::Recording)) => {
             (Phase::Recording, ending, vec![Effect::Resume])
         }
+        (Phase::Paused, Happened::Reconnect) => (Phase::Paused, ending, vec![Effect::Reconnect]),
         (Phase::Paused, Happened::Mode(Mode::Stopped)) => {
             (Phase::Closing(Step::Capture), ending, vec![Effect::Close(Step::Capture)])
         }
@@ -201,14 +207,21 @@ pub fn step(
             }
         }
         (Phase::Ended(c), _) => (Phase::Ended(c), c, Vec::new()),
-        (Phase::Opening, Happened::Mode(Mode::Recording | Mode::Paused) | Happened::StepDone)
+        (
+            Phase::Opening,
+            Happened::Mode(Mode::Recording | Mode::Paused)
+            | Happened::Reconnect
+            | Happened::StepDone,
+        )
         | (
             Phase::Recording,
             Happened::Opened | Happened::Mode(Mode::Recording) | Happened::StepDone,
         )
         | (Phase::Paused, Happened::Opened | Happened::Mode(Mode::Paused) | Happened::StepDone)
-        | (Phase::Closing(_), Happened::Opened | Happened::Mode(_))
-        | (Phase::Sealing, Happened::Opened | Happened::Mode(_)) => (phase, ending, Vec::new()),
+        | (Phase::Closing(_), Happened::Opened | Happened::Mode(_) | Happened::Reconnect)
+        | (Phase::Sealing, Happened::Opened | Happened::Mode(_) | Happened::Reconnect) => {
+            (phase, ending, Vec::new())
+        }
     }
 }
 
@@ -303,6 +316,7 @@ pub(crate) struct Start {
     pub source: Source,
     pub captions: Result<Vec<Stream>, &'static str>,
     pub mode: watch::Receiver<Mode>,
+    pub reconnect: watch::Receiver<u64>,
     pub shelf: Arc<Shelf>,
     pub keys: Arc<Chain>,
     pub config: Arc<Config>,
@@ -983,6 +997,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
     let mut capture = None;
     let mut audio_fanout = None;
     let mut lane_tx_hold: Option<Tx<lane::Event>> = None;
+    let mut lane_specs: Vec<(Stream, lane::Setup, watch::Receiver<u64>)> = Vec::new();
     let mut lane_dones: Vec<oneshot::Receiver<()>> = Vec::new();
     let mut tape_done: Option<Kept> = None;
     let mut frame_done: Option<Kept> = None;
@@ -1121,6 +1136,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
             let setup = glossary::live(&start.terms, &stream, base_setup.clone());
             let (kick_tx, kick_rx) = watch::channel(0u64);
             kicks.push(kick_tx);
+            lane_specs.push((stream.clone(), setup.clone(), kick_rx.clone()));
             let (keys, dial, lane_stats, lane_gauges, lane_audio, lane_mode, lane_out) = (
                 start.keys.clone(),
                 start.config.dial.clone(),
@@ -1214,6 +1230,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
     };
 
     // Main recording state-machine loop.
+    let mut reconnect_open = true;
     loop {
         // Carry out any effects produced by the latest transition.
         let mut step_done = false;
@@ -1234,6 +1251,68 @@ pub(crate) async fn run(mut start: Start) -> Done {
                         c.resume();
                     }
                     internal_mode_tx.send_replace(Mode::Recording);
+                }
+                Effect::Reconnect => {
+                    if let (Some(audio), Some(lane_tx)) = (&audio_fanout, &lane_tx_hold) {
+                        for (n, (stream, setup, kick_rx)) in lane_specs.iter().enumerate() {
+                            let (sent_at, _, ended) = gauges.lanes[n].sent.read();
+                            let Some(ended_why) = ended else {
+                                continue;
+                            };
+                            let why = if ended_why.is_empty() || ended_why == "done" {
+                                "reconnect"
+                            } else {
+                                ended_why
+                            };
+                            gauges.lanes[n].sent.clear_ended();
+                            gauges.lanes[n].sent.because(why);
+                            info!("lane.reconnect", lane = n);
+                            let (
+                                stream,
+                                setup,
+                                keys,
+                                dial,
+                                lane_stats,
+                                lane_gauges,
+                                lane_audio,
+                                lane_mode,
+                                lane_kick,
+                                lane_out,
+                            ) = (
+                                stream.clone(),
+                                setup.clone(),
+                                start.keys.clone(),
+                                start.config.dial.clone(),
+                                stats.clone(),
+                                gauges.lanes[n].clone(),
+                                audio.subscribe(),
+                                internal_mode_rx.clone(),
+                                kick_rx.clone(),
+                                lane_tx.clone(),
+                            );
+                            let origin = lane::Origin { edge: sent_at as u32, why };
+                            let (done_tx, done_rx) = oneshot::channel();
+                            lane_dones[n] = done_rx;
+                            recording.spawn(LANE_NAMES[n], async move {
+                                let running = lane::run_from(
+                                    n,
+                                    stream,
+                                    &setup,
+                                    keys,
+                                    dial,
+                                    lane_stats,
+                                    lane_gauges,
+                                    origin,
+                                    lane_audio,
+                                    lane_mode,
+                                    lane_kick,
+                                    lane_out,
+                                );
+                                let _ = running.await; // dropped: lane records its own end code in Link and Gauge
+                                let _ = done_tx.send(()); // dropped: recording task already ended or cancelled
+                            });
+                        }
+                    }
                 }
                 Effect::Say(code) => {
                     start.said.say(code);
@@ -1338,7 +1417,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
             return Done { sealed };
         }
 
-        // Active recording/paused wait: mode changes, capture end, or fatal tape writer.
+        // Active recording/paused wait: mode changes, reconnects, capture end, or fatal tape writer.
         tokio::select! {
             changed = start.mode.changed() => {
                 let next_mode = changed.map_or(Mode::Stopped, |()| *start.mode.borrow_and_update());
@@ -1349,6 +1428,21 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     Happened::Mode(next_mode),
                     "",
                 );
+            }
+            changed = start.reconnect.changed(), if reconnect_open => {
+                match changed {
+                    Ok(()) => {
+                        start.reconnect.mark_unchanged();
+                        pending_effects = transition(
+                            &mut phase,
+                            &mut phase_at,
+                            &mut ending,
+                            Happened::Reconnect,
+                            "",
+                        );
+                    }
+                    Err(_) => reconnect_open = false,
+                }
             }
             changed = ended_rx.changed() => {
                 if changed.is_ok()

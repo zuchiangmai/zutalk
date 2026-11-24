@@ -76,6 +76,8 @@ pub enum Fault {
     Slow { extra_ms: u64 },
     /// Ignores the empty end-of-stream frame so `lane::seam` freezes unsettled guesses as incomplete.
     SilentOnFinish,
+    /// Refuses every dial attempt with `End::Retry("connect")` to simulate being offline (`P1-18`).
+    Offline,
 }
 
 impl Fault {
@@ -127,6 +129,9 @@ impl Service {
             let inner = inner.clone();
             Box::pin(async move {
                 let conn_num = inner.dials.fetch_add(1, Ordering::AcqRel) + 1;
+                if matches!(*inner.fault.lock().expect("service fault lock"), Fault::Offline) {
+                    return Err(End::Retry("connect"));
+                }
                 let (client_io, server_io) = tokio::io::duplex(DUPLEX_BUF_BYTES);
                 let panic_next = Arc::new(AtomicBool::new(false));
                 let server_panic = panic_next.clone();

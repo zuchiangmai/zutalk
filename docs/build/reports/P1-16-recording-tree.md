@@ -70,7 +70,7 @@ info recording.phase rec="1a20ed562251a71cebc" from="Sealing" to="Ended" why="do
 - `git grep -n "tokio::spawn\|spawn_blocking\|mpsc::channel\|broadcast::channel" core/src/app/recording.rs core/src/live core/src/rt/keep.rs`：无结果。
 - `grep -n 'fn listen\|Composer\|broadcast' core/src/app/hub.rs`：无结果。
 - `ui`：`svelte-check` 0 errors 0 warnings；`vitest` 5 files / 29 tests passed。
-- 注：耗时 ~2 分钟的 `i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first`（含 `caption.lag_ms` p50/p99）按本批执行策略在 P1-18 收尾统一运行一次，实测数据见 `P1-18-reconnect.md`（并同步补充）。
+- 8 小时 I1 实测（Batch 1 收尾统一运行）：57,487 词 0 丢失，h1–h8 p50/p99/max 均 `321 ms`，`caption.lag_ms` `n=57487 p50=500ms p99=500ms most=320ms`，`wall=93.93s`（详见 `P1-18-reconnect.md`）。
 
 ## 留下的，要负责人的
 

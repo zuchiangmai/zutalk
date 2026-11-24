@@ -215,5 +215,7 @@
  "code.draft.behind": "保存现场稿慢了",
  "code.silent": "服务不再回应",
  "code.shell": "窗口刷新慢了",
- "code.panic": "意外中断，已重开"
+ "code.panic": "意外中断，已重开",
+ "code.keys": "取钥匙超时",
+ "reconnect": "重连"
 }

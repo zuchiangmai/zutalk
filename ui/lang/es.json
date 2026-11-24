@@ -215,5 +215,7 @@
  "code.draft.behind": "El guardado del texto en vivo se retrasó",
  "code.silent": "El servicio dejó de responder",
  "code.shell": "La ventana se retrasó",
- "code.panic": "Se detuvo inesperadamente y se reinició"
+ "code.panic": "Se detuvo inesperadamente y se reinició",
+ "code.keys": "No se obtuvo la clave a tiempo",
+ "reconnect": "Reconectar"
 }

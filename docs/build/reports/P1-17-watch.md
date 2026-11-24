@@ -110,7 +110,7 @@ warn  zutalk_core::app::recording  stall.snapshot.end   snap=1 lines=51
 - 全部 6 个规则脚本：通过。
 - `git grep -n 'ignore = "P1-17' core/`：无结果。
 - `ui`：`svelte-check` 0 errors 0 warnings；`vitest` 5 files / 29 tests passed。
-- 注：耗时 ~2 分钟的 `i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first`（含 `judge.verdict` 条数与快照组数）按本批执行策略在 P1-18 收尾统一运行一次，实测数据见 `P1-18-reconnect.md`。
+- 8 小时 I1 实测（Batch 1 收尾统一运行）：57,487 词 0 丢失，h1–h8 p50/p99/max 均 `321 ms`，`judge.verdict = 0`、`stall.snapshot = 0`，`wall = 93.93s`（详见 `P1-18-reconnect.md`）。
 
 ## 留下的，要负责人的
 

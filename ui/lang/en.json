@@ -215,5 +215,7 @@
  "code.draft.behind": "Saving live text fell behind",
  "code.silent": "The service stopped answering",
  "code.shell": "The window fell behind",
- "code.panic": "Stopped unexpectedly and restarted"
+ "code.panic": "Stopped unexpectedly and restarted",
+ "code.keys": "Could not get a key in time",
+ "reconnect": "Reconnect"
 }

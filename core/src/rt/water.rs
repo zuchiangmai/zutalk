@@ -400,9 +400,23 @@ pub fn sample(
     let marks = at
         .iter()
         .map(|&(stage, pos, why, ended)| {
+            // A lane restarted via `Reconnect` clears `ended` on `Sent(n)`: reset `moved_ms` for
+            // every stage of that lane so offline duration is not counted as post-reconnect idle.
+            let reopened_lane = stage.lane().is_some_and(|n| {
+                let was_ended = before
+                    .marks
+                    .iter()
+                    .find(|m| m.stage == Stage::Sent(n))
+                    .is_some_and(|m| m.ended.is_some());
+                let now_live = at
+                    .iter()
+                    .find(|(s, ..)| *s == Stage::Sent(n))
+                    .is_some_and(|(_, _, _, e)| e.is_none());
+                was_ended && now_live
+            });
             // Resuming from a pause gives each stage a fresh clock so paused duration is never
             // counted as idle time.
-            let moved_ms = if before.paused && !paused {
+            let moved_ms = if (before.paused && !paused) || reopened_lane {
                 now_ms
             } else {
                 match before.marks.iter().find(|m| m.stage == stage) {

@@ -215,5 +215,7 @@
  "code.draft.behind": "Speichern des Live-Texts hängt nach",
  "code.silent": "Der Dienst antwortet nicht mehr",
  "code.shell": "Das Fenster hängt nach",
- "code.panic": "Unerwartet beendet und neu gestartet"
+ "code.panic": "Unerwartet beendet und neu gestartet",
+ "code.keys": "Schlüssel nicht rechtzeitig erhalten",
+ "reconnect": "Neu verbinden"
 }

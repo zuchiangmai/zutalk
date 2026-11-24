@@ -83,6 +83,7 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Pause, false),
         (Command::Resume, false),
         (Command::Stop, false),
+        (Command::Reconnect, false),
         (Command::Setup { setup: Setup::default() }, false),
         (Command::Open { id: "id".into() }, false),
         (Command::Close, false),
@@ -1623,5 +1624,94 @@ async fn a_long_file_waits_for_its_tape() {
         "{:?}",
         app.seen.of("recording.end")
     );
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_with_nothing_recording_says_so() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    app.send(Command::Reconnect);
+    app.notice("recording.none").await;
+
+    let done: Vec<_> = app
+        .seen
+        .of("command.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("Reconnect"))
+        .collect();
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert_eq!(done[0].text("code"), Some("recording.none"));
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_starts_nothing_for_a_recording_that_never_had_captions() {
+    use zutalk_core::live::wire::Dial;
+    use zutalk_core::rt::supervise::End;
+
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let offline_dial: Dial = Arc::new(|_| Box::pin(async { Err(End::Fatal("connect")) }));
+    let mut app = App::with(Config { dial: offline_dial, ..config(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
+
+    let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+    app.send(Command::Setup { setup: setup.clone() });
+    app.until(|s| s.setup == setup).await;
+
+    // Start without a key: recording is audio-only with `captions.no_key`.
+    app.send(Command::Start);
+    let no_key = |s: Option<&Session>| {
+        s.map(|s| &s.status) == Some(&Status::AudioOnly { why: "captions.no_key".into() })
+    };
+    app.session(no_key).await;
+
+    // Adding an own key mid-recording and asking to Reconnect starts no lane.
+    app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-own-test-key".into()) });
+    app.until(|s| s.keys.iter().any(|(svc, from)| svc == "soniox" && *from == keys::From::Own))
+        .await;
+    app.send(Command::Reconnect);
+    // Fence via the same mailbox so Reconnect has been handled before asserting.
+    app.send(Command::Captions { show: true });
+    app.until(|s| s.captions).await;
+
+    let reconnect_done: Vec<_> = app
+        .seen
+        .of("command.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("Reconnect"))
+        .collect();
+    assert_eq!(reconnect_done.len(), 1, "{reconnect_done:?}");
+    assert_eq!(reconnect_done[0].text("code"), Some("ok"));
+    assert_eq!(app.seen.count("lane.reconnect"), 0);
+    assert_eq!(app.seen.count("lane.open"), 0);
+    assert_eq!(
+        (*app.outlet.session.now().1).as_ref().map(|s| &s.status),
+        Some(&Status::AudioOnly { why: "captions.no_key".into() })
+    );
+
+    // Stop and start a fresh recording: now it starts with live captions.
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.seen.of("recording.start").len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "second recording.start did not arrive");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let starts = app.seen.of("recording.start");
+    assert_eq!(starts[0].text("captions"), Some("captions.no_key"));
+    assert_eq!(starts[1].text("captions"), Some("live"));
+
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
     assert_eq!(app.seen.refused(), 0);
 }
