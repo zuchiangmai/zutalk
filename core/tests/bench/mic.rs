@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 use zutalk_core::capture::audio::{Capture, Hear, Hearing, Notice, Sink, Source, Tell};
 use zutalk_core::capture::clock::{BLOCK, Block, Gap};
+use zutalk_core::rt::stats::Stats;
 
 /// Interval between consecutive 100 ms audio blocks delivered by the fake microphone.
 pub const MIC_TICK_MS: u64 = BLOCK_MS as u64;
@@ -121,9 +122,9 @@ impl Mic {
     /// Builds the `Hear` port closure to install in `Config.hear`.
     pub fn hear(&self) -> Hear {
         let state = self.state.clone();
-        Arc::new(move |source: Source, sink: Sink, tell: Tell| {
+        Arc::new(move |source: Source, sink: Sink, tell: Tell, stats: &Stats| {
             if let Source::File(_) = source {
-                let capture = Capture::start(source, |_| Gap::Keep, sink, tell)?;
+                let capture = Capture::start(source, |_| Gap::Keep, stats, sink, tell)?;
                 return Ok(Box::new(capture));
             }
             state.paused.store(false, Ordering::Release);

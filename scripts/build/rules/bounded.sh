@@ -2,16 +2,27 @@
 # Channels are built only in core/src/rt/queue.rs (docs/build/phases/P1.md §3.13.12, CLAUDE.md
 # "No unbounded queue"): outside it, core/src and app/src may not name mpsc::channel(,
 # sync_channel(, broadcast::channel(, unbounded_channel, UnboundedSender or UnboundedReceiver;
-# RingBuffer::new may appear only in core/src/capture/audio.rs.
+# RingBuffer::new may appear only in core/src/capture/audio.rs; clippy.toml bans both unbounded
+# channel constructors workspace-wide.
 # Existing uses not yet rewritten are listed in `debt` (and server/src in `later`); every row's
 # count must match exactly so debt can only shrink and new code cannot slip in.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
+if [ ! -f clippy.toml ]; then
+  echo "clippy.toml is missing: unbounded channels must stay banned"
+  exit 1
+fi
+for banned in "tokio::sync::mpsc::unbounded_channel" "std::sync::mpsc::channel"; do
+  if ! grep -vE '^[[:space:]]*#' clippy.toml | grep -Fq "\"$banned\""; then
+    echo "clippy.toml must ban $banned in disallowed-methods"
+    exit 1
+  fi
+done
+
 # Debt: file, count, who pays it.
 debt='
 core/src/app/hub.rs 2 P1-16
-core/src/capture/audio.rs 3 P1-14
 core/src/ai/write.rs 1 P1-21
 core/src/out/city.rs 1 P1-21
 '

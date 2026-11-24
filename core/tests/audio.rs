@@ -41,11 +41,14 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use zutalk_core::capture::audio::{
-    Capture, Feed, Keep, Notice, Open, Pump, Resampler, STALL_MS, Source, Turner, ZERO_RUN_MS,
-    devices, mix, offer, zero_run,
+    Capture, Feed, Keep, Notice, Open, PUMP_MAIL_MSGS, Pump, Resampler, Ring, STALL_MS, Source,
+    Turner, ZERO_RUN_MS, devices, mix, offer, zero_run,
 };
 use zutalk_core::capture::clock::{BLOCK, Block, Gap, GapPolicy, wall_clock_policy};
+use zutalk_core::rt::queue::ThreadTx;
+use zutalk_core::rt::stats::{Counter, Stats};
 use zutalk_core::rt::supervise::End;
+use zutalk_log::{Level, Seen};
 
 /// Round numbers: a tenth of a second of lag is jitter, more is a hole to fill, and a
 /// minute means the computer was asleep.
@@ -59,16 +62,20 @@ fn policy(behind_ms: u64) -> Gap {
 
 /// A source the test plays by hand: a 1 kHz tone (or a constant) at any format.
 struct Tone {
-    ring: rtrb::Producer<f32>,
+    ring: Ring,
     rate: u32,
     channels: u16,
     played: u64,
     constant: Option<f32>,
 }
 
+fn detached_lost() -> Counter {
+    Stats::new().counter("capture.ring.lost_samples")
+}
+
 impl Tone {
     fn open(rate: u32, channels: u16) -> (Tone, Feed) {
-        let (ring, feed) = Feed::new(rate, channels).unwrap();
+        let (ring, feed) = Feed::new(rate, channels, detached_lost()).unwrap();
         (Tone { ring, rate, channels, played: 0, constant: None }, feed)
     }
 
@@ -326,7 +333,7 @@ fn nothing_is_timed_before_the_first_sound() {
 #[test]
 fn a_callback_that_does_not_fit_is_dropped_whole() {
     let mut script = Script::new(1);
-    let (mut ring, feed) = Feed::new(16_000, 2).unwrap();
+    let (mut ring, feed) = Feed::new(16_000, 2, detached_lost()).unwrap();
     script.pump.attach(0, feed, script.now);
     // The pump was held up for two seconds: the ring is full but for one frame.
     offer(&mut ring, vec![0.25f32; 63_998].into_iter());
@@ -428,8 +435,8 @@ fn sixteen_kilohertz_passes_untouched_and_absurd_rates_are_refused() {
     assert_eq!(out, [0, 16_384, -16_384, 32_767, -32_768, 32_767]);
     assert!(Resampler::new(0).is_none());
     assert!(Resampler::new(1_000_000).is_none());
-    assert_eq!(Feed::new(0, 2).err(), Some(End::Retry("audio.format")));
-    assert_eq!(Feed::new(48_000, 0).err(), Some(End::Retry("audio.format")));
+    assert_eq!(Feed::new(0, 2, detached_lost()).err(), Some(End::Retry("audio.format")));
+    assert_eq!(Feed::new(48_000, 0, detached_lost()).err(), Some(End::Retry("audio.format")));
 }
 
 #[test]
@@ -484,12 +491,13 @@ fn fixture(name: &str) -> PathBuf {
 
 /// Imports a file to its end. Returns the blocks and how it ended.
 fn import(path: PathBuf) -> Result<(Vec<Block>, Notice), End> {
-    let ((blocks, heard), (notices, told)) = (mpsc::channel(), mpsc::channel());
+    let ((blocks, heard), (notices, told)) = (mpsc::sync_channel(ROOM), mpsc::sync_channel(ROOM));
     let capture = Capture::start(
         Source::File(path),
         policy,
-        move |block| _ = blocks.send(block),
-        move |notice| _ = notices.send(notice),
+        &Stats::new(),
+        move |block| blocks.try_send(block).expect("no room for an imported block"),
+        move |notice| notices.try_send(notice).expect("no room for an import notice"),
     )?;
     let last = told.recv_timeout(Duration::from_secs(20)).expect("the import never ended");
     capture.stop();
@@ -573,18 +581,30 @@ const ROOM: usize = 4_096;
 
 /// A device as the test holds it: the ring it fills, and how it says it broke.
 struct Played {
-    ring: rtrb::Producer<f32>,
-    ender: mpsc::Sender<End>,
+    ring: Ring,
+    ender: ThreadTx<End>,
 }
 
 /// A microphone at 16 kHz the test plays: each time it is opened, it is handed over.
 fn device(opened: &mpsc::SyncSender<Played>) -> Open {
     let opened = opened.clone();
-    Box::new(move |ender| {
-        let (ring, feed) = Feed::new(16_000, 1)?;
-        _ = opened.send(Played { ring, ender: ender.clone() });
+    Box::new(move |ender, lost| {
+        let (ring, feed) = Feed::new(16_000, 1, lost.clone())?;
+        opened.try_send(Played { ring, ender: ender.clone() }).expect("no room for a device");
         Ok((feed, Box::new(|| None) as Keep))
     })
+}
+
+/// Everything a stopped test run leaves to check: blocks, notices, stats and events.
+struct Stopped {
+    heard: Vec<(Block, u64)>,
+    notices: Vec<Notice>,
+    stats: Stats,
+    seen: Seen,
+}
+
+fn stat_count(stats: &Stats, name: &str) -> u64 {
+    stats.tally().counts.into_iter().find(|r| r.name == name).map_or(0, |r| r.n)
 }
 
 /// A capture under test with its pump in the test's hand, and what it delivered: each block
@@ -596,11 +616,15 @@ struct Run {
     blocks: mpsc::Receiver<(Block, u64)>,
     heard: Vec<(Block, u64)>,
     notices: mpsc::Receiver<Notice>,
+    stats: Stats,
+    seen: Seen,
     devices: usize, // handed over to the test so far
 }
 
 impl Run {
     fn start(opens: Vec<Open>) -> Run {
+        let seen = zutalk_log::capture(Level::Info);
+        let stats = Stats::new();
         let ((blocks, heard), (notices, told)) =
             (mpsc::sync_channel(ROOM), mpsc::sync_channel(ROOM));
         let clock = Arc::new(AtomicU64::new(START));
@@ -608,11 +632,22 @@ impl Run {
         let (capture, turner) = Capture::by_hand(
             opens,
             policy,
+            &stats,
             move || theirs.load(SeqCst),
             move |block| blocks.try_send((block, stamp.load(SeqCst))).expect("no room for a block"),
             move |notice| notices.try_send(notice).expect("no room for a notice"),
         );
-        Run { capture, turner, clock, blocks: heard, heard: Vec::new(), notices: told, devices: 0 }
+        Run {
+            capture,
+            turner,
+            clock,
+            blocks: heard,
+            heard: Vec::new(),
+            notices: told,
+            stats,
+            seen,
+            devices: 0,
+        }
     }
 
     /// One turn of the pump, waiting up to `wait` for news; what it delivered is kept.
@@ -666,16 +701,16 @@ impl Run {
     }
 
     /// Stops it: the capture goes, and the next turn is the last. Returns every block it
-    /// delivered, and the notices not waited for.
-    fn stop(self) -> (Vec<(Block, u64)>, Vec<Notice>) {
-        let Run { capture, mut turner, blocks, mut heard, notices, .. } = self;
+    /// delivered, the notices not waited for, and its stats and captured log events.
+    fn stop(self) -> Stopped {
+        let Run { capture, mut turner, blocks, mut heard, notices, stats, seen, .. } = self;
         drop(capture);
         assert!(!turner.turn(Duration::ZERO), "the stop was not taken");
         heard.extend(blocks.try_iter());
         // Stopped means stopped: nothing comes afterwards.
         assert!(!turner.turn(Duration::ZERO));
         assert!(blocks.try_recv().is_err(), "a block came after the stop");
-        (heard, notices.try_iter().collect())
+        Stopped { heard, notices: notices.try_iter().collect(), stats, seen }
     }
 }
 
@@ -696,7 +731,7 @@ fn a_source_that_dies_is_reported_padded_and_opened_again() {
     run.play(Some(&mut mic), 400, 0.5);
     assert_eq!(run.heard.len(), 4);
     // Unplugged: it says so, and its ring goes with it.
-    _ = mic.ender.send(End::Retry("test.unplugged"));
+    mic.ender.offer(End::Retry("test.unplugged")).expect("ender has room");
     drop(mic);
     assert_eq!(run.notice(), Notice::Restarted("test.unplugged"));
     // It is opened again a quarter of a second later, by the capture's clock.
@@ -705,9 +740,9 @@ fn a_source_that_dies_is_reported_padded_and_opened_again() {
     run.play(None, 20, 0.0);
     let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 1_140, 0.5);
-    let (heard, notices) = run.stop();
-    assert!(notices.is_empty(), "{notices:?}");
-    let blocks = blocks(heard);
+    let done = run.stop();
+    assert!(done.notices.is_empty(), "{:?}", done.notices);
+    let blocks = blocks(done.heard);
     unbroken(&blocks);
     // 1.8 s, less the 60 ms the clock had not padded yet when the sound came back: under
     // 100 ms, the policy here keeps that as jitter.
@@ -715,6 +750,29 @@ fn a_source_that_dies_is_reported_padded_and_opened_again() {
     assert!(!blocks[..4].iter().any(silent), "no sound before it died");
     assert!(blocks[4..6].iter().all(silent), "the hole was not padded");
     assert!(!blocks[6..].iter().any(silent), "the sound never came back");
+
+    // Observability: opened twice, broke once with the injected code, padded silence, exact counts.
+    let opens = done.seen.of("capture.source.open");
+    assert_eq!(opens.len(), 2, "{opens:?}");
+    assert!(opens.iter().all(|e| e.level == Level::Info && e.u64("source") == Some(0)));
+    assert!(opens.iter().all(|e| e.u64("ms").is_some()));
+
+    let broke = done.seen.of("capture.source.broke");
+    assert_eq!(broke.len(), 1, "{broke:?}");
+    assert_eq!(broke[0].level, Level::Warn);
+    assert_eq!(broke[0].u64("source"), Some(0));
+    assert_eq!(broke[0].text("why"), Some("test.unplugged"));
+    assert_eq!(broke[0].u64("wait_ms"), Some(250));
+
+    let pads = done.seen.of("capture.pad");
+    assert!(!pads.is_empty(), "expected at least one capture.pad event");
+    assert!(pads.iter().all(|e| e.level == Level::Warn && e.u64("ms").is_some_and(|ms| ms > 0)));
+    let padded_sum: u64 = pads.iter().filter_map(|e| e.u64("ms")).sum();
+
+    assert_eq!(stat_count(&done.stats, "capture.reopens"), 1);
+    assert_eq!(stat_count(&done.stats, "capture.blocks"), 17);
+    assert_eq!(stat_count(&done.stats, "capture.padded_ms"), padded_sum);
+    assert_eq!(done.seen.refused(), 0);
 }
 
 #[test]
@@ -734,32 +792,63 @@ fn a_stall_the_pump_hears_ends_the_device_on_its_own_thread() {
     run.play(None, 20, 0.0);
     let mut mic = run.opened(&rx);
     run.play(Some(&mut mic), 1_000, 0.5);
-    let (heard, notices) = run.stop();
-    assert!(notices.is_empty(), "{notices:?}");
-    let blocks = blocks(heard);
+    let done = run.stop();
+    assert!(done.notices.is_empty(), "{:?}", done.notices);
+    let blocks = blocks(done.heard);
     unbroken(&blocks);
     // 7.26 s, less the 60 ms of jitter, as above.
     assert_eq!(blocks.len(), 72);
     assert!(!blocks[..10].iter().any(silent), "no sound before it stalled");
     assert!(blocks[10..62].iter().all(silent), "the stall was not padded");
     assert!(!blocks[62..].iter().any(silent), "the sound never came back");
+
+    // Observability: open -> broke("audio.stalled") -> open in order.
+    let lifecycle: Vec<_> = done
+        .seen
+        .all()
+        .into_iter()
+        .filter(|e| matches!(e.code, "capture.source.open" | "capture.source.broke"))
+        .collect();
+    assert_eq!(lifecycle.len(), 3, "{lifecycle:?}");
+    assert_eq!(lifecycle[0].code, "capture.source.open");
+    assert_eq!(lifecycle[1].code, "capture.source.broke");
+    assert_eq!(lifecycle[1].level, Level::Warn);
+    assert_eq!(lifecycle[1].u64("source"), Some(0));
+    assert_eq!(lifecycle[1].text("why"), Some("audio.stalled"));
+    assert_eq!(lifecycle[2].code, "capture.source.open");
+    assert_eq!(lifecycle[2].u64("source"), Some(0));
+    assert_eq!(stat_count(&done.stats, "capture.reopens"), 1);
+    assert_eq!(stat_count(&done.stats, "capture.blocks"), 72);
+    assert_eq!(done.seen.refused(), 0);
 }
 
 #[test]
 fn a_source_that_cannot_be_opened_is_fatal_and_the_other_one_carries_on() {
     let (tx, rx) = mpsc::sync_channel(ROOM);
-    let denied: Open = Box::new(|_| Err(End::Fatal("test.denied")));
+    let denied: Open = Box::new(|_, _| Err(End::Fatal("test.denied")));
     let mut run = Run::start(vec![device(&tx), denied]);
     let mut mic = run.opened(&rx);
     assert_eq!(run.notice(), Notice::Fatal("test.denied"));
     // Both: the microphone is recorded, mixed with the silence of the source that is not there.
     run.play(Some(&mut mic), 700, 0.5);
-    let (heard, notices) = run.stop();
-    assert!(notices.is_empty(), "{notices:?}");
-    let blocks = blocks(heard);
+    let done = run.stop();
+    assert!(done.notices.is_empty(), "{:?}", done.notices);
+    let blocks = blocks(done.heard);
     unbroken(&blocks);
     assert_eq!(blocks.len(), 7);
     assert!(!blocks.iter().any(silent));
+
+    // Observability: source 1 ended fatally at error level; source 0 opened normally.
+    let ended = done.seen.of("capture.source.ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0].level, Level::Error);
+    assert_eq!(ended[0].u64("source"), Some(1));
+    assert_eq!(ended[0].text("why"), Some("test.denied"));
+
+    let opens = done.seen.of("capture.source.open");
+    assert_eq!(opens.len(), 1, "{opens:?}");
+    assert_eq!(opens[0].u64("source"), Some(0));
+    assert_eq!(done.seen.refused(), 0);
 }
 
 #[test]
@@ -768,9 +857,9 @@ fn a_device_that_is_no_longer_the_right_one_is_opened_again() {
     // "would you still pick this one?" changes. It is asked once a second of the clock.
     let (looks, opens) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let (theirs, counted) = (looks.clone(), opens.clone());
-    let open: Open = Box::new(move |_| {
+    let open: Open = Box::new(move |_, lost| {
         counted.fetch_add(1, SeqCst);
-        let (_, feed) = Feed::new(16_000, 1)?;
+        let (_, feed) = Feed::new(16_000, 1, lost.clone())?;
         let looks = theirs.clone();
         Ok((feed, Box::new(move || (looks.fetch_add(1, SeqCst) == 1).then_some("test.moved"))))
     });
@@ -789,7 +878,7 @@ fn a_device_that_is_no_longer_the_right_one_is_opened_again() {
     run.play(None, 20, 0.0);
     run.attached(2);
     assert_eq!((opens.load(SeqCst), looks.load(SeqCst)), (2, 2));
-    assert!(run.stop().1.is_empty());
+    assert!(run.stop().notices.is_empty());
 }
 
 #[test]
@@ -804,13 +893,22 @@ fn paused_the_clock_stands_still_and_resumed_it_goes_on() {
     assert_eq!(run.heard.len(), 3, "blocks were delivered while paused");
     run.capture.resume();
     run.play(Some(&mut mic), 400, 0.5);
-    let heard = run.stop().0;
+    let done = run.stop();
     // Had the clock run on, the pause would be six blocks of silence in the middle.
-    assert!(heard.iter().all(|(_, at)| !(START + 301..START + 900).contains(at)));
-    let blocks = blocks(heard);
+    assert!(done.heard.iter().all(|(_, at)| !(START + 301..START + 900).contains(at)));
+    let blocks = blocks(done.heard);
     unbroken(&blocks);
     assert_eq!(blocks.len(), 7);
     assert!(!blocks.iter().any(silent));
+
+    // Observability: pause then resume recorded on the pump.
+    let pauses = done.seen.of("capture.pause");
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
+    assert_eq!(pauses[0].level, Level::Info);
+    assert_eq!(pauses[0].bool("paused"), Some(true));
+    assert_eq!(pauses[1].level, Level::Info);
+    assert_eq!(pauses[1].bool("paused"), Some(false));
+    assert_eq!(done.seen.refused(), 0);
 }
 
 #[test]
@@ -825,9 +923,16 @@ fn a_closed_lid_ends_the_capture_out_loud() {
     run.clock.fetch_add(120_000, SeqCst);
     assert!(!run.turn(Duration::ZERO), "it slept through");
     assert_eq!(run.notice(), Notice::Ended);
-    let (heard, notices) = run.stop();
-    assert!(notices.is_empty(), "{notices:?}");
-    assert_eq!(heard.len(), 3, "the time asleep was delivered");
+    let done = run.stop();
+    assert!(done.notices.is_empty(), "{:?}", done.notices);
+    assert_eq!(done.heard.len(), 3, "the time asleep was delivered");
+
+    // Observability: capture.end emitted at error level.
+    let ended = done.seen.of("capture.end");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0].level, Level::Error);
+    assert_eq!(ended[0].text("why"), Some("asleep"));
+    assert_eq!(done.seen.refused(), 0);
 }
 
 #[test]
@@ -841,14 +946,16 @@ fn a_device_that_hangs_in_the_system_holds_up_nothing() {
             thread::sleep(Duration::from_secs(3_600));
         }
     }
+    let seen = zutalk_log::capture(Level::Info);
+    let stats = Stats::new();
     let (tx, rx) = mpsc::sync_channel(ROOM);
-    let closing: Open = Box::new(|ender| {
-        let (_, feed) = Feed::new(16_000, 1)?;
-        _ = ender.send(End::Retry("test.unplugged"));
+    let closing: Open = Box::new(|ender, lost| {
+        let (_, feed) = Feed::new(16_000, 1, lost.clone())?;
+        ender.offer(End::Retry("test.unplugged")).expect("ender has room");
         let stuck = Stuck;
         Ok((feed, Box::new(move || [None, Some("test.never")][usize::from(drop_never(&stuck))])))
     });
-    let opening: Open = Box::new(|_| {
+    let opening: Open = Box::new(|_, _| {
         thread::sleep(Duration::from_secs(3_600));
         Err(End::Done)
     });
@@ -858,6 +965,7 @@ fn a_device_that_hangs_in_the_system_holds_up_nothing() {
     let capture = Capture::with(
         vec![device(&tx), closing, opening],
         policy,
+        &stats,
         move || theirs.load(SeqCst),
         move |block| blocks.try_send(block).expect("no room for a block"),
         move |notice| notices.try_send(notice).expect("no room for a notice"),
@@ -877,6 +985,86 @@ fn a_device_that_hangs_in_the_system_holds_up_nothing() {
     assert!(started.elapsed() < WAIT, "the stop was held up");
     let notices: Vec<Notice> = told.try_iter().collect();
     assert!(notices.is_empty(), "{notices:?}");
+    // After stop joins the pump thread, draining leaves the channel closed: no further blocks.
+    heard.try_iter().for_each(drop);
+    assert!(matches!(
+        heard.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+
+    // Observability: named pump thread started and ended cleanly.
+    let pump_starts: Vec<_> = seen
+        .of("thread.start")
+        .into_iter()
+        .filter(|e| e.text("thread") == Some("capture.pump"))
+        .collect();
+    let pump_ends: Vec<_> = seen
+        .of("thread.end")
+        .into_iter()
+        .filter(|e| e.text("thread") == Some("capture.pump"))
+        .collect();
+    assert_eq!(pump_starts.len(), 1, "{pump_starts:?}");
+    assert_eq!(pump_ends.len(), 1, "{pump_ends:?}");
+    assert_eq!(pump_ends[0].text("code"), Some("done"));
+    assert_eq!(seen.refused(), 0);
+}
+
+#[test]
+fn a_stop_reaches_a_pump_that_takes_no_messages() {
+    let seen = zutalk_log::capture(Level::Info);
+    let stats = Stats::new();
+    let (capture, mut turner) = Capture::by_hand(vec![], policy, &stats, || START, |_| {}, |_| {});
+    for n in 0..200 {
+        if n % 2 == 0 {
+            capture.pause();
+        } else {
+            capture.resume();
+        }
+    }
+    drop(capture);
+    assert!(!turner.turn(Duration::ZERO), "stop did not reach the full pump");
+    assert!(!turner.turn(Duration::ZERO), "pump kept turning after stop");
+
+    let full_events: Vec<_> = seen
+        .of("queue.full")
+        .into_iter()
+        .filter(|e| e.text("queue") == Some("capture.pump"))
+        .collect();
+    assert_eq!(full_events.len(), 1, "{full_events:?}");
+    assert_eq!(full_events[0].text("policy"), Some("drop"));
+    assert_eq!(full_events[0].u64("capacity"), Some(PUMP_MAIL_MSGS as u64));
+
+    let row = stats
+        .tally()
+        .queues
+        .into_iter()
+        .find(|r| r.name == "capture.pump")
+        .expect("capture.pump queue row");
+    // 200 pause/resume calls + 1 wake-up Stop offer in Drop = 201 offers; 64 fit, 137 rejected.
+    assert_eq!(row.full, (200 - PUMP_MAIL_MSGS + 1) as u64);
+    assert_eq!(row.lost, (200 - PUMP_MAIL_MSGS + 1) as u64);
+    assert_eq!(row.deepest, PUMP_MAIL_MSGS as u64);
+    assert_eq!(seen.refused(), 0);
+}
+
+#[test]
+fn samples_the_ring_could_not_take_are_counted_and_said() {
+    let (tx, rx) = mpsc::sync_channel(ROOM);
+    let mut run = Run::start(vec![device(&tx)]);
+    let mut mic = run.opened(&rx);
+    // 16 kHz mono ring holds 32,000 samples (2 s); fill it, then offer 400 more that cannot fit.
+    offer(&mut mic.ring, std::iter::repeat_n(0.25f32, 32_000));
+    offer(&mut mic.ring, std::iter::repeat_n(0.5f32, 400));
+    assert!(run.turn(Duration::ZERO), "capture should keep running after ring overflow");
+    let done = run.stop();
+
+    assert_eq!(stat_count(&done.stats, "capture.ring.lost_samples"), 400);
+    let lost = done.seen.of("capture.ring.lost");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].level, Level::Warn);
+    assert_eq!(lost[0].u64("source"), Some(0));
+    assert_eq!(lost[0].u64("samples"), Some(400));
+    assert_eq!(done.seen.refused(), 0);
 }
 
 /// Keeps `_stuck` in the closure that owns it.
@@ -890,9 +1078,16 @@ fn drop_never<T>(_stuck: &T) -> bool {
 /// tone, and what was reported. The sound itself goes nowhere.
 fn manual(source: Source) {
     let seconds: u64 = std::env::var("ZUTALK_AUDIO_SECONDS").map_or(10, |s| s.parse().unwrap());
-    let ((blocks, heard), started) = (mpsc::channel(), Instant::now());
+    let ((blocks, heard), started) = (mpsc::sync_channel(ROOM), Instant::now());
     let notice = move |notice| println!("{:>8.1} s  {notice:?}", started.elapsed().as_secs_f32());
-    let capture = Capture::start(source, policy, move |b| _ = blocks.send(b), notice).unwrap();
+    let capture = Capture::start(
+        source,
+        policy,
+        &Stats::new(),
+        move |b| blocks.try_send(b).expect("no room for a manual block"),
+        notice,
+    )
+    .unwrap();
     let (mut count, mut second) = (0usize, Vec::new());
     while started.elapsed() < Duration::from_secs(seconds) {
         let Ok(block) = heard.recv_timeout(Duration::from_millis(500)) else { continue };

@@ -11,13 +11,15 @@
 mod file;
 
 use crate::capture::clock::{Block, Clock, GapPolicy, RATE, wall_ms};
-use crate::rt::supervise::{Backoff, End};
+use crate::rt::queue::{self, Back, Full, RecvTimeoutError, ThreadRx, ThreadTx};
+use crate::rt::stats::{Counter, Stats};
+use crate::rt::supervise::{self, Backoff, End};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Fft, FixedSync, Resampler as _, audioadapter_buffers::direct::InterleavedSlice};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::{path::PathBuf, sync::Arc, thread, time::Duration};
+use zutalk_log::{error, info, warn};
 
 /// How often the pump drains the rings, and so the most a block waits for it: a fifth of a
 /// 100 ms block.
@@ -29,6 +31,20 @@ const LOOK_MS: u64 = 1_000;
 pub const STALL_MS: u64 = 5_000;
 /// Exact zeros this long make a source deaf (see above). Origin to be traced.
 pub const ZERO_RUN_MS: u64 = 10_000;
+/// How much audio a device ring holds before dropping callbacks: two seconds absorbs short pump
+/// stalls (`P1.md` §3.7).
+pub const RING_MS: u64 = 2_000;
+/// Capacity of the pump's control mailbox: the pump drains every 20 ms and two sources send at
+/// most a couple of messages each (`P1.md` §3.7).
+pub const PUMP_MAIL_MSGS: usize = 64;
+/// Capacity of each source's "I broke" channel: if full, a failure notice is already on its way
+/// (`P1.md` §3.7).
+const ENDED_MSGS: usize = 2;
+/// Capacity of the file reader thread's mailbox: only pause, resume and stop travel here
+/// (`P1.md` §3.7).
+const FILE_MAIL_MSGS: usize = 8;
+/// Names of the source threads, indexed by source slot (microphone, computer sound).
+const SOURCE_THREADS: [&str; 2] = ["capture.source.0", "capture.source.1"];
 /// What a source's trouble is called (none, denied, gone, changed): microphone, computer.
 /// What the system does with a source it refuses is not always an error: macOS opens a
 /// microphone or a tap all the same and delivers exact zeros. That is never `denied` here; the
@@ -87,32 +103,59 @@ pub enum Notice {
 /// An open device, asked once a second why it must be opened again; dropped, it closes. It
 /// lives and dies on its source's thread.
 pub type Keep = Box<dyn FnMut() -> Option<&'static str>>;
-/// Opens a source from scratch. Its callbacks say through the sender when it broke.
-pub type Open = Box<dyn FnMut(&mpsc::Sender<End>) -> Result<(Feed, Keep), End> + Send>;
+/// Opens a source from scratch. Its callbacks say through the sender when it broke, and count
+/// dropped samples on the given counter.
+pub type Open = Box<dyn FnMut(&ThreadTx<End>, &Counter) -> Result<(Feed, Keep), End> + Send>;
 
-/// An opened device as the pump sees it: interleaved samples in a ring of two seconds. A
+/// Producer side of one source's audio ring, paired with its lost-sample counters.
+/// Every operation here is lock-free and allocation-free so it is safe in an audio callback.
+pub struct Ring {
+    producer: Producer<f32>,
+    source_lost: Arc<AtomicU64>,
+    total_lost: Counter,
+}
+
+impl Ring {
+    /// `true` once the pump has dropped the consumer side of this ring.
+    pub fn is_abandoned(&self) -> bool {
+        self.producer.is_abandoned()
+    }
+}
+
+/// An opened device as the pump sees it: interleaved samples in a ring of `RING_MS`. A
 /// loopback sends nothing while nothing plays: it is not `steady`.
 pub struct Feed {
     ring: Consumer<f32>,
+    lost: Arc<AtomicU64>,
     channels: usize,
     resampler: Resampler,
     pub steady: bool,
 }
 
 impl Feed {
-    pub fn new(rate: u32, channels: u16) -> Result<(Producer<f32>, Feed), End> {
+    pub fn new(rate: u32, channels: u16, lost: Counter) -> Result<(Ring, Feed), End> {
         let resampler = Resampler::new(rate).filter(|_| channels > 0);
         let resampler = resampler.ok_or(End::Retry("audio.format"))?;
-        let (tx, ring) = RingBuffer::new(rate as usize * channels as usize * 2);
-        Ok((tx, Feed { ring, channels: channels as usize, resampler, steady: true }))
+        let capacity = (rate as u64 * channels as u64 * RING_MS / 1_000) as usize;
+        let (producer, ring) = RingBuffer::new(capacity);
+        let source_lost = Arc::new(AtomicU64::new(0));
+        let tx = Ring { producer, source_lost: source_lost.clone(), total_lost: lost };
+        Ok((
+            tx,
+            Feed { ring, lost: source_lost, channels: channels as usize, resampler, steady: true },
+        ))
     }
 }
 
 /// All of a callback's samples or none, so that a frame is never split. When the ring is
-/// full they are lost, and the clock pads the hole.
-pub fn offer(ring: &mut Producer<f32>, samples: impl ExactSizeIterator<Item = f32>) {
-    if let Ok(chunk) = ring.write_chunk_uninit(samples.len()) {
+/// full they are lost, counted atomically, and the clock pads the hole.
+pub fn offer(ring: &mut Ring, samples: impl ExactSizeIterator<Item = f32>) {
+    let n = samples.len();
+    if let Ok(chunk) = ring.producer.write_chunk_uninit(n) {
         chunk.fill_from_iter(samples);
+    } else if n > 0 {
+        ring.source_lost.fetch_add(n as u64, Relaxed);
+        ring.total_lost.add(n as u64);
     }
 }
 
@@ -293,6 +336,11 @@ impl Pump {
         self.inputs.iter_mut().for_each(|input| drop(input.blocks.drain(..whole)));
         true
     }
+
+    /// Total silence milliseconds padded across all sources so far.
+    pub fn padded_ms(&self) -> u64 {
+        self.inputs.iter().map(|i| i.clock.padded_ms()).sum()
+    }
 }
 
 /// A microphone by id, or the default one; with `output`, what the default output plays. In
@@ -300,7 +348,7 @@ impl Pump {
 /// no longer be the one picked (plugged in, unplugged, default changed) is opened again.
 fn cpal_source(output: bool, wanted: Option<String>) -> Open {
     let code = move |n: usize| CODES[output as usize][n];
-    Box::new(move |ender| {
+    Box::new(move |ender, lost| {
         let wanted = wanted.clone();
         let pick = move |host: &cpal::Host| match output {
             true => host.default_output_device(),
@@ -319,13 +367,15 @@ fn cpal_source(output: bool, wanted: Option<String>) -> Open {
         let config =
             if output { device.default_output_config() } else { device.default_input_config() };
         let config = config.map_err(broke)?;
-        let (mut ring, feed) = Feed::new(config.sample_rate(), config.channels())?;
+        let (mut ring, feed) = Feed::new(config.sample_rate(), config.channels(), lost.clone())?;
         let heard = move |data: &[f32], _: &_| offer(&mut ring, data.iter().copied());
         // A glitch is not a break: the samples lost are padded by the clock.
         let (ender, id) = (ender.clone(), device.id().ok());
         let lost = move |error: cpal::Error| match error.kind() {
             cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => {}
-            _ => drop(ender.send(broke(error))), // dropped: source already ended when the receiver is gone
+            _ => {
+                let _ = ender.offer(broke(error)); // dropped: full means a break is already queued; closed means source ended
+            }
         };
         let stream = device.build_input_stream::<f32, _, _>(config.config(), heard, lost, None);
         let stream = stream.map_err(broke)?;
@@ -341,10 +391,28 @@ fn cpal_source(output: bool, wanted: Option<String>) -> Open {
 /// What the pump hears, in the order it happened: a source's device was opened, and how to
 /// end it; a source's news; the person paused or resumed, at this time on the clock; stop.
 enum Msg {
-    Feed(usize, Box<Feed>, mpsc::Sender<End>),
+    Feed(usize, Box<Feed>, ThreadTx<End>),
     Notice(Notice),
     Pause(bool, u64),
     Stop,
+}
+
+/// Offers `msg` to the pump's mailbox, retrying every `TICK_MS` while the capture is still
+/// running so a source thread never blocks indefinitely on a full mailbox.
+fn deliver(tx: &ThreadTx<Msg>, mut msg: Msg, over: &AtomicBool) -> bool {
+    loop {
+        if over.load(Relaxed) {
+            return false;
+        }
+        match tx.offer(msg) {
+            Ok(()) => return true,
+            Err(Back::Full(back)) => {
+                msg = back;
+                thread::sleep(Duration::from_millis(TICK_MS));
+            }
+            Err(Back::Closed(_)) => return false,
+        }
+    }
 }
 
 /// One source's own thread: its device is opened, held and closed here and nowhere else. It
@@ -353,31 +421,51 @@ fn hold(
     i: usize,
     mut open: Open,
     now_ms: &dyn Fn() -> u64,
-    tx: &mpsc::Sender<Msg>,
+    tx: &ThreadTx<Msg>,
+    stats: &Stats,
     over: &AtomicBool,
 ) {
+    let reopens = stats.counter("capture.reopens");
+    let lost = stats.counter("capture.ring.lost_samples");
     let (mut backoff, mut due) = (Backoff::default(), 0);
     while !over.load(Relaxed) {
         if now_ms() < due {
             thread::sleep(Duration::from_millis(TICK_MS));
             continue;
         }
-        let (opened, (ender, ended)) = (now_ms(), mpsc::channel());
-        let (end, device) = match open(&ender) {
+        let started = std::time::Instant::now();
+        let (opened, (ender, ended)) =
+            (now_ms(), queue::threads(stats, "capture.ended", ENDED_MSGS, Full::Drop));
+        let (end, device) = match open(&ender, &lost) {
             Err(end) => (Some(end), None),
-            Ok((feed, mut keep)) => match tx.send(Msg::Feed(i, Box::new(feed), ender)) {
-                Ok(()) => (held(&ended, &mut keep, opened, now_ms, over), Some(keep)),
-                Err(_) => (None, Some(keep)),
-            },
+            Ok((feed, mut keep)) => {
+                let open_ms = started.elapsed().as_millis() as u64;
+                if !over.load(Relaxed) {
+                    info!("capture.source.open", source = i, ms = open_ms);
+                }
+                if deliver(tx, Msg::Feed(i, Box::new(feed), ender), over) {
+                    (held(&ended, &mut keep, opened, now_ms, over), Some(keep))
+                } else {
+                    (None, Some(keep))
+                }
+            }
         };
         let notice = match end {
-            Some(End::Retry(why)) => Notice::Restarted(why),
-            Some(End::Fatal(why)) => Notice::Fatal(why),
+            Some(End::Retry(why)) => {
+                let wait_ms = backoff.next(now_ms().saturating_sub(opened));
+                due = now_ms() + wait_ms;
+                reopens.add(1);
+                warn!("capture.source.broke", source = i, why = why, wait_ms = wait_ms);
+                Notice::Restarted(why)
+            }
+            Some(End::Fatal(why)) => {
+                error!("capture.source.ended", source = i, why = why);
+                Notice::Fatal(why)
+            }
             _ => return,
         };
-        due = now_ms() + backoff.next(now_ms().saturating_sub(opened));
         // Said before the device is let go: closing one can hang, and then only this waits.
-        if tx.send(Msg::Notice(notice)).is_err() || matches!(notice, Notice::Fatal(_)) {
+        if !deliver(tx, Msg::Notice(notice), over) || matches!(notice, Notice::Fatal(_)) {
             return;
         }
         drop(device);
@@ -387,7 +475,7 @@ fn hold(
 /// Holds a device opened at `looked` until it must be opened again; `None` once the pump is
 /// over.
 fn held(
-    ended: &mpsc::Receiver<End>,
+    ended: &ThreadRx<End>,
     keep: &mut Keep,
     mut looked: u64,
     now_ms: &dyn Fn() -> u64,
@@ -412,11 +500,16 @@ fn held(
 /// `TICK_MS`; a test turns it by hand, so the clock it moves and the pump that reads it never race.
 pub struct Turner {
     pump: Pump,
-    rx: mpsc::Receiver<Msg>,
-    enders: Vec<Option<mpsc::Sender<End>>>,
+    rx: ThreadRx<Msg>,
+    enders: Vec<Option<ThreadTx<End>>>,
+    ring_lost: Vec<(Option<Arc<AtomicU64>>, u64)>,
+    padded_ms: u64,
+    blocks_stat: Counter,
+    padded_ms_stat: Counter,
     sink: Box<dyn FnMut(Block) + Send>,
     notice: Box<dyn FnMut(Notice) + Send>,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    stop: Arc<AtomicBool>,
     over: Arc<AtomicBool>,
     attached: usize,
     blocks: Vec<Block>,
@@ -424,40 +517,78 @@ pub struct Turner {
 }
 
 impl Turner {
+    fn check_ring_lost(&mut self, i: usize) {
+        if let Some((Some(counter), seen)) = self.ring_lost.get_mut(i) {
+            let now = counter.load(Relaxed);
+            let delta = now.saturating_sub(*seen);
+            if delta > 0 {
+                *seen = now;
+                warn!("capture.ring.lost", source = i, samples = delta);
+            }
+        }
+    }
+
     /// Takes the news that has come (waiting up to `wait` for the first), steps the pump at
     /// the clock's time, and delivers what is whole. `false`: it has stopped.
     pub fn turn(&mut self, wait: Duration) -> bool {
         if self.over.load(Relaxed) {
             return false;
         }
-        let mut stop = false;
+        let mut stop = self.stop.load(Relaxed);
+        let wait = if stop { Duration::ZERO } else { wait };
         // All news first, in order: what was whole at a stop is still delivered.
-        let first = match self.rx.recv_timeout(wait) {
+        let mut first = match self.rx.recv_timeout(wait) {
             Ok(msg) => Some(msg),
             Err(RecvTimeoutError::Timeout) => None,
             // Only after a `Stop`, which the `Capture` sends before it lets go of its sender.
             Err(RecvTimeoutError::Disconnected) => Some(Msg::Stop),
         };
-        for msg in first.into_iter().chain(self.rx.try_iter()) {
+        while let Some(msg) = first.take().or_else(|| self.rx.try_recv().ok()) {
             match msg {
                 Msg::Feed(i, feed, ender) => {
+                    self.check_ring_lost(i);
+                    let lost = feed.lost.clone();
                     self.pump.attach(i, *feed, (self.now_ms)());
                     self.enders[i] = Some(ender);
+                    if let Some(slot) = self.ring_lost.get_mut(i) {
+                        *slot = (Some(lost), 0);
+                    }
                     self.attached += 1;
                 }
                 Msg::Notice(heard) => (self.notice)(heard),
-                Msg::Pause(paused, at) => self.pump.pause(paused, at),
+                Msg::Pause(paused, at) => {
+                    self.pump.pause(paused, at);
+                    info!("capture.pause", paused = paused);
+                }
                 Msg::Stop => stop = true,
             }
         }
+        if self.stop.load(Relaxed) {
+            stop = true;
+        }
         let alive = self.pump.step((self.now_ms)(), &mut self.blocks, &mut self.rebuild);
+        let padded_now = self.pump.padded_ms();
+        let padded_delta = padded_now.saturating_sub(self.padded_ms);
+        if padded_delta > 0 {
+            self.padded_ms = padded_now;
+            self.padded_ms_stat.add(padded_delta);
+            warn!("capture.pad", ms = padded_delta);
+        }
+        for i in 0..self.ring_lost.len() {
+            self.check_ring_lost(i);
+        }
+        let delivered = self.blocks.len() as u64;
+        if delivered > 0 {
+            self.blocks_stat.add(delivered);
+        }
         self.blocks.drain(..).for_each(&mut self.sink);
         for (i, why) in self.rebuild.drain(..) {
             if let Some(ender) = self.enders[i].take() {
-                let _ = ender.send(End::Retry(why)); // dropped: source already ended when the receiver is gone
+                let _ = ender.offer(End::Retry(why)); // dropped: full means a break is already queued; closed means source ended
             }
         }
         if !alive {
+            error!("capture.end", why = "asleep");
             (self.notice)(Notice::Ended);
             stop = true;
         }
@@ -494,12 +625,14 @@ pub type Tell = Box<dyn FnMut(Notice) + Send>;
 
 /// How sound is heard: opens a capture for `Source`, delivering blocks to `Sink` and notices to
 /// `Tell`. Replaced by a fake microphone in tests.
-pub type Hear = Arc<dyn Fn(Source, Sink, Tell) -> Result<Box<dyn Hearing>, End> + Send + Sync>;
+pub type Hear =
+    Arc<dyn Fn(Source, Sink, Tell, &Stats) -> Result<Box<dyn Hearing>, End> + Send + Sync>;
 
 /// A running capture: the pump, or the file's reader. Dropped, it delivers what is whole and
 /// joins that one thread; the sources' threads let their devices go on their own.
 pub struct Capture {
-    tx: mpsc::Sender<Msg>,
+    tx: ThreadTx<Msg>,
+    stop: Arc<AtomicBool>,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -511,6 +644,7 @@ impl Capture {
     pub fn start(
         source: Source,
         policy: GapPolicy,
+        stats: &Stats,
         sink: impl FnMut(Block) + Send + 'static,
         notice: impl FnMut(Notice) + Send + 'static,
     ) -> Result<Capture, End> {
@@ -519,66 +653,87 @@ impl Capture {
             Source::System => vec![cpal_source(true, None)],
             Source::Both { device } => vec![cpal_source(false, device), cpal_source(true, None)],
             Source::File(path) => {
-                let (decoder, (tx, rx)) = (file::Decoder::open(&path)?, mpsc::channel());
-                let thread = thread::spawn(move || file::run(decoder, &rx, sink, notice));
-                return Ok(Capture { tx, now_ms: Arc::new(wall_ms), thread: Some(thread) });
+                let decoder = file::Decoder::open(&path)?;
+                let (tx, rx) = queue::threads(stats, "capture.file", FILE_MAIL_MSGS, Full::Drop);
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_file = stop.clone();
+                let thread = supervise::thread("capture.file", move || {
+                    file::run(decoder, &rx, &stop_file, sink, notice);
+                });
+                return Ok(Capture { tx, stop, now_ms: Arc::new(wall_ms), thread: Some(thread) });
             }
         };
-        Ok(Self::with(opens, policy, wall_ms, sink, notice))
+        Ok(Self::with(opens, policy, stats, wall_ms, sink, notice))
     }
 
     /// The same capture over any sources and any clock, its pump turned on a thread of its own.
     pub fn with(
         opens: Vec<Open>,
         policy: GapPolicy,
+        stats: &Stats,
         now_ms: impl Fn() -> u64 + Send + Sync + 'static,
         sink: impl FnMut(Block) + Send + 'static,
         notice: impl FnMut(Notice) + Send + 'static,
     ) -> Capture {
-        let (mut capture, mut turner) = Self::by_hand(opens, policy, now_ms, sink, notice);
-        capture.thread =
-            Some(thread::spawn(move || while turner.turn(Duration::from_millis(TICK_MS)) {}));
+        let (mut capture, mut turner) = Self::by_hand(opens, policy, stats, now_ms, sink, notice);
+        capture.thread = Some(supervise::thread("capture.pump", move || {
+            while turner.turn(Duration::from_millis(TICK_MS)) {}
+        }));
         capture
     }
 
     /// The same capture, with no pump thread: whoever holds the `Turner` turns it. Dropped,
-    /// the capture only says `Stop`; the next turn takes it and returns `false`.
+    /// the capture sets the stop flag and offers `Stop`; the next turn takes it and returns `false`.
     pub fn by_hand(
         opens: Vec<Open>,
         policy: GapPolicy,
+        stats: &Stats,
         now_ms: impl Fn() -> u64 + Send + Sync + 'static,
         sink: impl FnMut(Block) + Send + 'static,
         notice: impl FnMut(Notice) + Send + 'static,
     ) -> (Capture, Turner) {
         let now_ms: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(now_ms);
-        let (over, (tx, rx)) = (Arc::new(AtomicBool::new(false)), mpsc::channel());
-        let (pump, enders) = (Pump::new(opens.len(), policy), vec![None; opens.len()]);
+        let over = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = queue::threads(stats, "capture.pump", PUMP_MAIL_MSGS, Full::Wait);
+        let drop_tx = tx.with(Full::Drop);
+        let count = opens.len();
+        let (pump, enders) = (Pump::new(count, policy), vec![None; count]);
         for (i, open) in opens.into_iter().enumerate() {
-            let (now_ms, tx, over) = (now_ms.clone(), tx.clone(), over.clone());
-            thread::spawn(move || hold(i, open, &*now_ms, &tx, &over));
+            let (now_ms, tx, stats, over) =
+                (now_ms.clone(), tx.clone(), stats.clone(), over.clone());
+            let name = SOURCE_THREADS.get(i).copied().unwrap_or("capture.source.extra");
+            // Not joined: a device call can hang in the OS, and stop must never wait on it; the
+            // thread watches `over` and exits on its own.
+            supervise::thread(name, move || hold(i, open, &*now_ms, &tx, &stats, &over));
         }
         let turner = Turner {
             pump,
             rx,
             enders,
+            ring_lost: vec![(None, 0); count],
+            padded_ms: 0,
+            blocks_stat: stats.counter("capture.blocks"),
+            padded_ms_stat: stats.counter("capture.padded_ms"),
             sink: Box::new(sink),
             notice: Box::new(notice),
             now_ms: now_ms.clone(),
+            stop: stop.clone(),
             over,
             attached: 0,
             blocks: Vec::new(),
             rebuild: Vec::new(),
         };
-        (Capture { tx, now_ms, thread: None }, turner)
+        (Capture { tx: drop_tx, stop, now_ms, thread: None }, turner)
     }
 
     /// Paused, the sources stay open, nothing is delivered, and the clock stands from now.
     pub fn pause(&self) {
-        let _ = self.tx.send(Msg::Pause(true, (self.now_ms)())); // dropped: receiver is gone only once the pump has stopped
+        let _ = self.tx.offer(Msg::Pause(true, (self.now_ms)())); // dropped: a pump that takes no messages is seen by the Capture mark
     }
 
     pub fn resume(&self) {
-        let _ = self.tx.send(Msg::Pause(false, (self.now_ms)())); // dropped: receiver is gone only once the pump has stopped
+        let _ = self.tx.offer(Msg::Pause(false, (self.now_ms)())); // dropped: a pump that takes no messages is seen by the Capture mark
     }
 
     /// Delivers what is whole and joins the one thread. Nothing here waits for a device.
@@ -597,9 +752,10 @@ impl Hearing for Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop); // dropped: receiver is gone only once the pump has stopped
+        self.stop.store(true, Relaxed);
+        let _ = self.tx.offer(Msg::Stop); // dropped: stop flag is set; offer only wakes a waiting pump early
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join(); // dropped: Drop cannot propagate a thread panic; P1-14 moves capture threads onto supervise::thread
+            let _ = thread.join(); // dropped: Drop cannot propagate a panic; supervise::thread logs it
         }
     }
 }

@@ -91,8 +91,8 @@ impl Config {
         let realtime = "wss://stt-rt.soniox.com/transcribe-websocket".into();
         let (soniox, openrouter) =
             ("https://api.soniox.com/v1".into(), "https://openrouter.ai/api/v1".into());
-        let hear: Hear = Arc::new(|source, sink, notice| {
-            let capture = Capture::start(source, wall_clock_policy, sink, notice)?;
+        let hear: Hear = Arc::new(|source, sink, notice, stats| {
+            let capture = Capture::start(source, wall_clock_policy, stats, sink, notice)?;
             Ok(Box::new(capture) as Box<dyn Hearing>)
         });
         let (dial, reels) = (wire::dial(), tape::reels());
@@ -1163,8 +1163,10 @@ impl Task {
             Notice::Fatal(code) if file => end_once(&ended, code),
             Notice::Restarted(code) | Notice::Fatal(code) => said.say(code),
         };
-        let mut capture =
-            Some((self.config.hear)(source, Box::new(sink), Box::new(notice)).map_err(code)?);
+        let mut capture = Some(
+            (self.config.hear)(source, Box::new(sink), Box::new(notice), &self.stats)
+                .map_err(code)?,
+        );
         let (mut draft, mut n) = (self.shelf.open(&self.id, LINE).map_err(fail)?, 0);
         let mut open = !streams.is_empty();
         let (mut composer, mut frame_tick) = (Composer::new(&about.shown, streams), tick());

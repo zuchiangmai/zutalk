@@ -57,11 +57,17 @@ pub struct Clock {
     origin_ms: Option<u64>, // wall time of the first sample
     blocks: u32,
     pending: Vec<i16>,
+    padded_ms: u64,
 }
 
 impl Clock {
     pub fn new(policy: GapPolicy) -> Self {
-        Self { policy, origin_ms: None, blocks: 0, pending: Vec::new() }
+        Self { policy, origin_ms: None, blocks: 0, pending: Vec::new(), padded_ms: 0 }
+    }
+
+    /// Total silence milliseconds padded by the gap policy so far.
+    pub fn padded_ms(&self) -> u64 {
+        self.padded_ms
     }
 
     /// Audio that finished arriving at wall time `now_ms`. Completed blocks go to `out`.
@@ -74,7 +80,10 @@ impl Clock {
         let got_to = self.blocks as u64 * 100 + self.pending.len() as u64 * 1000 / RATE;
         match (self.policy)(starts_at.saturating_sub(got_to)) {
             Gap::Keep => {}
-            Gap::Pad(ms) => self.take(&vec![0; (ms as u64 * RATE / 1000) as usize], out),
+            Gap::Pad(ms) => {
+                self.padded_ms += ms as u64;
+                self.take(&vec![0; (ms as u64 * RATE / 1000) as usize], out);
+            }
             Gap::End => return false,
         }
         self.take(pcm, out);

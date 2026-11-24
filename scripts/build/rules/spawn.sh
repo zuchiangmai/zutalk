@@ -11,7 +11,6 @@ cd "$(dirname "$0")/../../.."
 # Debt: file, count, who pays it.
 debt='
 core/src/app/hub.rs 14 P1-16/P1-19/P1-20
-core/src/capture/audio.rs 3 P1-14
 core/src/ai/write.rs 2 P1-21
 core/src/out/city.rs 1 P1-21
 app/src/main.rs 1 P1-23

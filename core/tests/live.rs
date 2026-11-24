@@ -1174,7 +1174,7 @@ fn synthesize(dir: &std::path::Path, name: &str, text: &str) -> Option<Vec<i16>>
 type Passed = (u128, bool, u32, Value);
 
 /// Stands between the lane and the real service and notes what passes, without the key.
-async fn relay(listener: TcpListener, upstream: String, log: mpsc::UnboundedSender<Passed>) {
+async fn relay(listener: TcpListener, upstream: String, log: mpsc::Sender<Passed>) {
     while let Ok((stream, _)) = listener.accept().await {
         let mut near = accept_async(stream).await.unwrap();
         let (mut far, _) = connect_async(upstream.as_str()).await.expect("the real service");
@@ -1192,7 +1192,7 @@ async fn relay(listener: TcpListener, upstream: String, log: mpsc::UnboundedSend
                             if said.get("api_key").is_some() {
                                 said["api_key"] = json!("<key>");
                             }
-                            let _ = log.send((at, true, sent_ms, said));
+                            log.try_send((at, true, sent_ms, said)).expect("relay log has room");
                         }
                         _ => {}
                     }
@@ -1201,7 +1201,8 @@ async fn relay(listener: TcpListener, upstream: String, log: mpsc::UnboundedSend
                 message = far.next() => {
                     let Some(Ok(message)) = message else { break };
                     if let Message::Text(text) = &message {
-                        let _ = log.send((at, false, sent_ms, read(text)));
+                        log.try_send((at, false, sent_ms, read(text)))
+                            .expect("relay log has room");
                     }
                     if near.send(message).await.is_err() { break }
                 }
@@ -1241,7 +1242,7 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
     let (Some(first), Some(second)) = (first, synthesize(dir.path(), "second", SECOND)) else {
         return eprintln!("skipped: no speech synthesizer here");
     };
-    let (log, mut frames) = mpsc::unbounded_channel();
+    let (log, mut frames) = mpsc::channel(4_096);
     let frames_to = std::env::var("SONIOX_TEST_FRAMES").ok();
     let endpoint = if frames_to.is_some() {
         let (listener, endpoint) = listen().await;

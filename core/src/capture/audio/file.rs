@@ -3,9 +3,10 @@
 
 use super::{Msg, Notice, Resampler, TICK_MS};
 use crate::capture::clock::{BLOCK, Block, Clock, Gap};
+use crate::rt::queue::{RecvTimeoutError, ThreadRx};
 use crate::rt::supervise::End;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::errors::Error;
@@ -81,7 +82,8 @@ impl Decoder {
 /// The file's reader. Paused, it waits; stopped, it leaves the rest of the file.
 pub(super) fn run(
     mut decoder: Decoder,
-    said: &Receiver<Msg>,
+    said: &ThreadRx<Msg>,
+    stop: &AtomicBool,
     mut sink: impl FnMut(Block),
     mut notice: impl FnMut(Notice),
 ) {
@@ -89,6 +91,9 @@ pub(super) fn run(
     let (mut mono, mut pcm, mut blocks, mut paused) = (Vec::new(), Vec::new(), Vec::new(), false);
     let mut resampler: Option<(u32, Resampler)> = None;
     loop {
+        if stop.load(Relaxed) {
+            return;
+        }
         match said.recv_timeout(if paused {
             Duration::from_millis(TICK_MS)
         } else {
@@ -97,6 +102,9 @@ pub(super) fn run(
             Ok(Msg::Pause(now, _)) => paused = now,
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             _ => {}
+        }
+        if stop.load(Relaxed) {
+            return;
         }
         if paused {
             continue;

@@ -102,3 +102,10 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `command.done` | info；被拒绝时 warn | hub 处理完一条命令 | `kind` `code`（`ok`：收下了；或拒绝它的代码） `took_us` |
 | `command.refused` | warn | 命令没进邮箱 | `kind` `code`（`busy`） |
 | `hub.turn.slow` | warn | hub 处理一条消息超过预算（`HUB_TURN_BUDGET_US`） | `kind` `took_us` |
+| `capture.source.open` | info | 一个声源的设备打开了 | `source`（第几个声源，0 起） `ms` |
+| `capture.source.broke` | warn | 一个声源的设备坏了，退避后重开 | `source` `why` `wait_ms` |
+| `capture.source.ended` | error | 一个声源的设备重开也没用，放弃它 | `source` `why` |
+| `capture.pad` | warn | 时钟的策略补了一段静音 | `ms` |
+| `capture.end` | error | 时钟的策略结束了采集（如合盖睡眠） | `why`（`asleep`） |
+| `capture.pause` | info | 暂停或继续到了泵 | `paused` |
+| `capture.ring.lost` | warn | 泵这一圈发现某个声源的环丢过样本 | `source` `samples` |

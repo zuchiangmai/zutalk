@@ -19,6 +19,7 @@ use zutalk_core::capture::clock::{BLOCK, Block, Gap, wall_ms};
 use zutalk_core::capture::tape;
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::Shelf;
+use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::End;
 
 pub const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
@@ -87,13 +88,13 @@ pub fn wav(file: &Path, ms: u32) {
 }
 
 /// A microphone that hums, in real time, until it is closed. A file is read as it is.
-fn hum(source: Source, sink: Sink, notice: Tell) -> Result<Box<dyn Hearing>, End> {
+fn hum(source: Source, sink: Sink, notice: Tell, stats: &Stats) -> Result<Box<dyn Hearing>, End> {
     if let Source::File(_) = source {
-        let capture = Capture::start(source, |_| Gap::Keep, sink, notice)?;
+        let capture = Capture::start(source, |_| Gap::Keep, stats, sink, notice)?;
         return Ok(Box::new(capture));
     }
-    let open: Open = Box::new(|_| {
-        let (mut ring, feed) = Feed::new(16_000, 1)?;
+    let open: Open = Box::new(|_, lost| {
+        let (mut ring, feed) = Feed::new(16_000, 1, lost.clone())?;
         thread::spawn(move || {
             while !ring.is_abandoned() {
                 offer(&mut ring, (0..320).map(|i| (i as f32 * 0.17).sin() * 0.3));
@@ -102,7 +103,7 @@ fn hum(source: Source, sink: Sink, notice: Tell) -> Result<Box<dyn Hearing>, End
         });
         Ok((feed, Box::new(|| None) as Keep))
     });
-    Ok(Box::new(Capture::with(vec![open], |_| Gap::Keep, wall_ms, sink, notice)))
+    Ok(Box::new(Capture::with(vec![open], |_| Gap::Keep, stats, wall_ms, sink, notice)))
 }
 
 /// With nothing in reach, and a microphone that hums.
