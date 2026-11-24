@@ -1,15 +1,16 @@
-//! Off-hub work: the sequential `desk` queue for local data IO, plus dedicated supervised tasks
-//! on the `work` subtree for search, export file writes, rooms/slots, whole-recording
-//! transcription, city filing, and 0.8 library migration (`P1.md` §3.6–§3.8, `P1-19`).
+//! Off-hub work: the sequential `desk` queue for local data/settings/key-store IO, plus dedicated
+//! supervised tasks on the `work` subtree for boot devices, search, export file writes, sign-in,
+//! identity creation, invite claiming, city calendar, rooms/slots, whole-recording transcription,
+//! city filing, 0.8 migration, and update installation (`P1.md` §3.6–§3.8, `P1-19`, `P1-20`).
 
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, Open, Room, Row, State, Writing};
+use crate::app::proto::{Change, From, Open, Room, Row, Setup, State, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
-use crate::id::keys::{self, Chain, Me, Ours, Service, Who};
+use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
@@ -26,6 +27,7 @@ use crate::rt::stats::Counter;
 use crate::rt::supervise::{End, Tree, again};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -160,7 +162,7 @@ pub(crate) struct Survey {
     pub filings: Vec<(String, Filing)>,
 }
 
-/// Complete result of switching the signing identity on `desk`.
+/// Complete result of switching the signing identity on `desk` (carries no keys).
 pub(crate) struct SignedOut {
     pub me: Option<String>,
     pub rotation_unsaved: bool,
@@ -168,6 +170,12 @@ pub(crate) struct SignedOut {
     pub rooms: Vec<Room>,
     pub survey: Survey,
     pub say: Vec<&'static str>,
+}
+
+/// Complete result of booting the core on `desk` (carries no keys or device names).
+pub(crate) struct BootOut {
+    pub setup: Setup,
+    pub signed: SignedOut,
 }
 
 /// Result of updating an own service key on `desk`.
@@ -210,73 +218,35 @@ struct Snapshot {
 }
 
 enum Job {
-    Sign {
-        who: Who,
-        why: &'static str,
-        made: bool,
-        keep: Option<u32>,
-        busy: Vec<String>,
-        boot: Option<oneshot::Sender<Result<SignedOut, &'static str>>>,
-    },
-    Refresh {
-        rev: u64,
-        opened: Option<String>,
-        retain: Option<Option<u32>>,
-        include_rooms: bool,
-    },
-    Change {
-        id: String,
-        change: Change,
-    },
-    Remove {
-        id: String,
-    },
-    Restore {
-        id: String,
-    },
-    Term {
-        said: String,
-        written: Option<BTreeMap<String, String>>,
-    },
-    DestroyAudio {
-        id: String,
-        under_way: Option<String>,
-    },
-    Export {
-        id: String,
-        exporter: &'static str,
-        languages: Vec<String>,
-        to: String,
-    },
-    SharePrepare {
-        recording: Option<String>,
-    },
-    PutShare {
-        id: String,
-        share: Option<Share>,
-        reply: oneshot::Sender<Result<(), &'static str>>,
-    },
-    UnsharePrepare {
-        id: String,
-        recording: Option<String>,
-    },
-    BeginFile {
-        id: String,
-        calendar: Calendar,
-        event: String,
-        audio: bool,
-    },
-    OwnKey {
-        service: Service,
-        key: Option<String>,
-        busy: Vec<String>,
-    },
+    Boot,
+    Settings { setup: Setup },
+    Sign { who: Who, why: &'static str, made: bool, keep: Option<u32>, busy: Vec<String> },
+    SignOut { keep: Option<u32>, busy: Vec<String> },
+    Clip,
+    RotationSaved,
+    Refresh { rev: u64, opened: Option<String>, retain: Option<Option<u32>>, include_rooms: bool },
+    Change { id: String, change: Change },
+    Remove { id: String },
+    Restore { id: String },
+    Term { said: String, written: Option<BTreeMap<String, String>> },
+    DestroyAudio { id: String, under_way: Option<String> },
+    Export { id: String, exporter: &'static str, languages: Vec<String>, to: String },
+    SharePrepare { recording: Option<String> },
+    PutShare { id: String, share: Option<Share>, reply: oneshot::Sender<Result<(), &'static str>> },
+    UnsharePrepare { id: String, recording: Option<String> },
+    BeginFile { id: String, calendar: Calendar, event: String, audio: bool },
+    OwnKey { service: Service, key: Option<String>, busy: Vec<String> },
 }
 
 impl DeskJob for Job {
     fn kind(&self) -> &'static str {
         match self {
+            Job::Boot => "boot",
+            Job::Settings { .. } => "settings",
             Job::Sign { .. } => "sign",
+            Job::SignOut { .. } => "signout",
+            Job::Clip => "clip",
+            Job::RotationSaved => "rotation_saved",
             Job::Refresh { .. } => "refresh",
             Job::Change { .. } => "change",
             Job::Remove { .. } => "remove",
@@ -296,8 +266,17 @@ impl DeskJob for Job {
 enum DeskOut {
     Changed,
     Silent,
-    BootReplied,
-    Signed(SignedOut),
+    Copied,
+    RotationSaved,
+    Booted {
+        out: BootOut,
+        start_create: bool,
+        start_claim: Option<Secret>,
+    },
+    Signed {
+        out: SignedOut,
+        start_claim: Option<Secret>,
+    },
     Refreshed(Refreshed),
     ExportWrite {
         to: PathBuf,
@@ -324,6 +303,15 @@ enum DeskOut {
     OwnKey(OwnKeyOut),
 }
 
+struct DeskEnv {
+    config: Arc<Config>,
+    http: reqwest::Client,
+    identity: Arc<Mutex<Identity>>,
+    invite: Arc<Mutex<Option<Secret>>>,
+    signing: Arc<Mutex<Option<CancellationToken>>>,
+    keep_hint: Arc<Mutex<Option<u32>>>,
+}
+
 /// Everything the hub hands off: sequential `desk` jobs and separate supervised tasks on the
 /// `work` subtree.
 pub(crate) struct Work {
@@ -336,6 +324,8 @@ pub(crate) struct Work {
     tree: Tree,
     frame: Reading<Frame>,
     identity: Arc<Mutex<Identity>>,
+    signing: Arc<Mutex<Option<CancellationToken>>>,
+    keep_hint: Arc<Mutex<Option<u32>>>,
     desk: Desk<Job>,
     next_seq: Arc<AtomicU64>,
     slot: Arc<Mutex<Option<(String, CancellationToken)>>>,
@@ -361,12 +351,22 @@ impl Work {
         let search_stale = stats.counter("search.stale");
         let next_seq = Arc::new(AtomicU64::new(1));
         let identity = Arc::new(Mutex::new(Identity::starting()));
+        let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
+        let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let keep_hint: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let slot: Arc<Mutex<Option<(String, CancellationToken)>>> = Arc::new(Mutex::new(None));
 
-        let run_cfg = config.clone();
-        let run_http = http.clone();
-        let run_id = identity.clone();
+        let run_env = Arc::new(DeskEnv {
+            config: config.clone(),
+            http: http.clone(),
+            identity: identity.clone(),
+            invite: invite.clone(),
+            signing: signing.clone(),
+            keep_hint: keep_hint.clone(),
+        });
 
+        let deliver_cfg = config.clone();
+        let deliver_http = http.clone();
         let deliver_results = results.clone();
         let deliver_tree = tree.clone();
         let deliver_seq = next_seq.clone();
@@ -376,6 +376,9 @@ impl Work {
         let deliver_frame = frame.clone();
         let deliver_said = said.clone();
         let deliver_id = identity.clone();
+        let deliver_invite = invite.clone();
+        let deliver_signing = signing.clone();
+        let deliver_keep = keep_hint.clone();
 
         let desk_tx_holder: Arc<Mutex<Option<Desk<Job>>>> = Arc::new(Mutex::new(None));
         let deliver_desk = desk_tx_holder.clone();
@@ -383,8 +386,10 @@ impl Work {
         let desk = Desk::start(
             &tree,
             next_seq.clone(),
-            move |job| run_desk_job(job, &run_cfg, &run_http, &run_id),
+            move |job| run_desk_job(job, &run_env),
             move |kind, outcome| {
+                let config = deliver_cfg.clone();
+                let http = deliver_http.clone();
                 let results = deliver_results.clone();
                 let tree = deliver_tree.clone();
                 let next_seq = deliver_seq.clone();
@@ -394,23 +399,90 @@ impl Work {
                 let frame = deliver_frame.clone();
                 let said = deliver_said.clone();
                 let identity = deliver_id.clone();
+                let invite = deliver_invite.clone();
+                let signing = deliver_signing.clone();
+                let keep_hint = deliver_keep.clone();
                 let desk_holder = deliver_desk.clone();
                 async move {
                     match outcome {
                         Ok(DeskOut::Changed) => {
                             let _ = results.send(Msg::DeskChanged).await; // dropped: the hub has ended
                         }
-                        Ok(DeskOut::Silent) | Ok(DeskOut::BootReplied) => {}
-                        Ok(DeskOut::Signed(out)) => {
+                        Ok(DeskOut::Silent) => {}
+                        Ok(DeskOut::Copied) => {
+                            let _ = results.send(Msg::Copied).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::RotationSaved) => {
+                            let _ = results.send(Msg::RotationSaved).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::Booted { out, start_create, start_claim }) => {
+                            let live = out
+                                .signed
+                                .rooms
+                                .iter()
+                                .find(|r| r.recording.is_none())
+                                .map(|r| r.id.clone());
+                            let snap = snapshot(&identity);
+                            sync_slot_inner(
+                                &tree, &slot, live, snap.ours, &frame, &said, &next_seq, &jobs_done,
+                            );
+                            if start_create {
+                                let desk = desk_holder
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .clone();
+                                if let Some(desk) = desk {
+                                    spawn_create_net(
+                                        &tree,
+                                        &signing,
+                                        &next_seq,
+                                        &jobs_done,
+                                        &jobs_failed,
+                                        http,
+                                        config.directory.clone(),
+                                        desk,
+                                        keep_hint,
+                                        results.clone(),
+                                    );
+                                }
+                            } else if let Some(token) = start_claim {
+                                spawn_claim_net(
+                                    &tree,
+                                    &signing,
+                                    &invite,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    snap.keys,
+                                    token,
+                                    results.clone(),
+                                );
+                            }
+                            let _ = results.send(Msg::Booted(out)).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::Signed { out, start_claim }) => {
                             let live = out
                                 .rooms
                                 .iter()
                                 .find(|r| r.recording.is_none())
                                 .map(|r| r.id.clone());
-                            let ours = snapshot(&identity).ours;
+                            let snap = snapshot(&identity);
                             sync_slot_inner(
-                                &tree, &slot, live, ours, &frame, &said, &next_seq, &jobs_done,
+                                &tree, &slot, live, snap.ours, &frame, &said, &next_seq, &jobs_done,
                             );
+                            if let Some(token) = start_claim {
+                                spawn_claim_net(
+                                    &tree,
+                                    &signing,
+                                    &invite,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    snap.keys,
+                                    token,
+                                    results.clone(),
+                                );
+                            }
                             let _ = results.send(Msg::Signed(Ok(out))).await; // dropped: the hub has ended
                         }
                         Ok(DeskOut::Refreshed(refreshed)) => {
@@ -496,7 +568,7 @@ impl Work {
                         Err(code) => {
                             let msg = match kind {
                                 "refresh" => Msg::Refreshed(Err(code)),
-                                "sign" => Msg::Signed(Err(code)),
+                                "sign" | "signout" => Msg::Signed(Err(code)),
                                 "own_key" => Msg::OwnKeyDone(Err(code)),
                                 _ => Msg::DeskFailed(code),
                             };
@@ -518,6 +590,8 @@ impl Work {
             tree,
             frame,
             identity,
+            signing,
+            keep_hint,
             desk,
             next_seq,
             slot,
@@ -531,40 +605,145 @@ impl Work {
         self.next_seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Snapshot of the current key chain (used by `hub.rs` for invite claim until `P1-20`).
-    pub(crate) fn keys_snapshot(&self) -> Arc<Chain> {
-        snapshot(&self.identity).keys
+    /// Kicks off boot on `desk` (settings, identity, invites) and device enumeration on a
+    /// separate `devices` task so slow OS audio queries never delay boot (`P1-20`).
+    pub(crate) fn boot(&self) {
+        let _ = self.desk.offer(Job::Boot); // dropped: desk was just created with capacity 64
+        let devices = self.config.devices.clone();
+        let tree = self.tree.clone();
+        let results = self.results.clone();
+        self.tree.spawn("devices", async move {
+            let started = std::time::Instant::now();
+            let outcome = tree.blocking("devices", move || (devices)()).await;
+            let ms = started.elapsed().as_millis() as u64;
+            match outcome {
+                Ok(list) => {
+                    info!("boot.step", step = "devices", code = "ok", ms = ms, n = list.len());
+                    let _ = results.send(Msg::Devices(list)).await; // dropped: the hub has ended
+                }
+                Err(_) => {
+                    if !tree.is_cancelled() {
+                        warn!("boot.step", step = "devices", code = "panic", ms = ms, n = 0usize);
+                    }
+                }
+            }
+        });
     }
 
-    /// Initial boot sign on `desk`, returning a oneshot awaited before `Hub` enters its loop
-    /// (moved into async boot in `P1-20`).
-    pub(crate) fn sign_boot(
-        &self,
-        who: Who,
-        made: bool,
-        keep: Option<u32>,
-    ) -> Result<oneshot::Receiver<Result<SignedOut, &'static str>>, &'static str> {
-        let (tx, rx) = oneshot::channel();
-        self.desk.offer(Job::Sign {
-            who,
-            why: "boot",
-            made,
-            keep,
-            busy: Vec::new(),
-            boot: Some(tx),
-        })?;
-        Ok(rx)
+    pub(crate) fn save_setup(&self, setup: Setup) -> Result<(), &'static str> {
+        self.desk.offer(Job::Settings { setup }).map(|_| ())
     }
 
-    pub(crate) fn sign(
+    /// Starts a sign-in relay wait on `net.signin` and returns the QR URL to display.
+    /// Keys stay inside `Work` and never cross the hub's mailbox (`P1-20`).
+    pub(crate) fn sign_in(&self) -> Result<String, &'static str> {
+        let sign_in = SignIn::begin(&self.config.server).map_err(code)?;
+        let url = sign_in.code().to_owned();
+        let cancel = replace_signing(&self.signing);
+        let http = self.http.clone();
+        let desk = self.desk.clone();
+        let keep_hint = self.keep_hint.clone();
+        let results = self.results.clone();
+        let seq = self.alloc_seq();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        self.tree.spawn("net.signin", async move {
+            info!("job.start", kind = "signin", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let outcome = tokio::select! {
+                () = cancel.cancelled() => None,
+                res = sign_in.finish(&http) => Some(res),
+            };
+            let ms = started.elapsed().as_millis() as u64;
+            match outcome {
+                None => {
+                    info!("job.done", kind = "signin", job = seq, code = "cancelled", ms = ms);
+                }
+                Some(Ok(me)) => {
+                    info!("job.done", kind = "signin", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                    let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
+                    let job = Job::Sign {
+                        who: Who::Person(me),
+                        why: "sign_in",
+                        made: false,
+                        keep,
+                        busy: Vec::new(),
+                    };
+                    let _ = desk.send(job).await; // dropped: desk ended on shutdown
+                }
+                Some(Err(end)) => {
+                    let c = code(end);
+                    warn!("job.done", kind = "signin", job = seq, code = c, ms = ms);
+                    jobs_failed.add(1);
+                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                }
+            }
+        });
+        Ok(url)
+    }
+
+    pub(crate) fn sign_out(
         &self,
-        who: Who,
-        why: &'static str,
-        made: bool,
         keep: Option<u32>,
         busy: Vec<String>,
     ) -> Result<(), &'static str> {
-        self.desk.offer(Job::Sign { who, why, made, keep, busy, boot: None }).map(|_| ())
+        self.desk.offer(Job::SignOut { keep, busy }).map(|_| ())
+    }
+
+    pub(crate) fn copy_rotation(&self) -> Result<(), &'static str> {
+        self.desk.offer(Job::Clip).map(|_| ())
+    }
+
+    pub(crate) fn rotation_saved(&self) -> Result<(), &'static str> {
+        self.desk.offer(Job::RotationSaved).map(|_| ())
+    }
+
+    pub(crate) fn city(&self, address: String) {
+        let http = self.http.clone();
+        let results = self.results.clone();
+        let seq = self.alloc_seq();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        self.tree.spawn("net.calendar", async move {
+            info!("job.start", kind = "calendar", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let res = city::calendar(&http, &address).await;
+            let ms = started.elapsed().as_millis() as u64;
+            match &res {
+                Ok(_) => {
+                    info!("job.done", kind = "calendar", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                }
+                Err(end) => {
+                    warn!("job.done", kind = "calendar", job = seq, code = code(*end), ms = ms);
+                    jobs_failed.add(1);
+                }
+            }
+            let _ = results.send(Msg::City(res)).await; // dropped: the hub has ended
+        });
+    }
+
+    /// Runs `config.install` in a blocking call on `work`; if it returns, reports failure to hub.
+    pub(crate) fn install(&self) {
+        let install = self.config.install.clone();
+        let tree = self.tree.clone();
+        let results = self.results.clone();
+        let seq = self.alloc_seq();
+        let jobs_failed = self.jobs_failed.clone();
+        self.tree.spawn("update.install", async move {
+            info!("job.start", kind = "install", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let outcome = tree.blocking("update.install", move || (install)()).await;
+            let ms = started.elapsed().as_millis() as u64;
+            if outcome.is_err() && tree.is_cancelled() {
+                return;
+            }
+            let c = if outcome.is_err() { "panic" } else { "update.install" };
+            warn!("job.done", kind = "install", job = seq, code = c, ms = ms);
+            jobs_failed.add(1);
+            let _ = results.send(Msg::InstallFailed(c)).await; // dropped: the hub has ended
+        });
     }
 
     pub(crate) fn refresh(
@@ -901,25 +1080,77 @@ impl Work {
     }
 }
 
+fn replace_signing(cell: &Mutex<Option<CancellationToken>>) -> CancellationToken {
+    let next = CancellationToken::new();
+    let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(old) = guard.replace(next.clone()) {
+        old.cancel();
+    }
+    next
+}
+
+fn cancel_signing(cell: &Mutex<Option<CancellationToken>>) {
+    let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(old) = guard.take() {
+        old.cancel();
+    }
+}
+
 fn snapshot(identity: &Mutex<Identity>) -> Snapshot {
     let id = identity.lock().unwrap_or_else(PoisonError::into_inner);
     Snapshot { shelf: id.shelf(), ours: id.ours.clone(), keys: id.keys.clone() }
 }
 
-fn run_desk_job(
-    job: Job,
-    config: &Config,
-    http: &reqwest::Client,
-    identity: &Mutex<Identity>,
-) -> Result<DeskOut, &'static str> {
+fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
+    let config = &env.config;
+    let http = &env.http;
+    let identity = &env.identity;
     match job {
-        Job::Sign { who, why, made, keep, busy, boot } => {
-            let res = run_sign(config, http, identity, who, why, made, keep, &busy);
-            if let Some(reply) = boot {
-                let _ = reply.send(res); // dropped: caller timed out or shut down
-                return Ok(DeskOut::BootReplied);
+        Job::Boot => run_boot(env),
+        Job::Settings { setup } => {
+            *env.keep_hint.lock().unwrap_or_else(PoisonError::into_inner) = setup.keep;
+            let json = serde_json::to_vec(&setup).map_err(|_| "settings")?;
+            fs::create_dir_all(&config.data)
+                .and_then(|()| fs::write(config.data.join("settings.json"), json))
+                .map_err(|_| "settings")?;
+            Ok(DeskOut::Silent)
+        }
+        Job::Sign { who, why, made, keep, busy } => {
+            let has_person = who.person().is_some();
+            let out = run_sign(config, http, identity, who, why, made, keep, &busy)?;
+            let start_claim = if has_person {
+                env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone()
+            } else {
+                None
+            };
+            Ok(DeskOut::Signed { out, start_claim })
+        }
+        Job::SignOut { keep, busy } => {
+            cancel_signing(&env.signing);
+            keys::set("identity", None).map_err(code)?;
+            let local = keys::local().map(|(me, _)| me);
+            let out = run_sign(
+                config,
+                http,
+                identity,
+                Who::of(None, local),
+                "sign_out",
+                false,
+                keep,
+                &busy,
+            )?;
+            Ok(DeskOut::Signed { out, start_claim: None })
+        }
+        Job::Clip => {
+            let key = keys::rotation().map_err(code)?.ok_or("rotation.none")?;
+            if !(config.clip)(&key) {
+                return Err("clip");
             }
-            res.map(DeskOut::Signed)
+            Ok(DeskOut::Copied)
+        }
+        Job::RotationSaved => {
+            keys::saved().map_err(code)?;
+            Ok(DeskOut::RotationSaved)
         }
         Job::Refresh { rev, opened, retain, include_rooms } => {
             let snap = snapshot(identity);
@@ -1016,6 +1247,96 @@ fn run_desk_job(
             Ok(DeskOut::OwnKey(OwnKeyOut { keys: keys_from, left, survey }))
         }
     }
+}
+
+fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
+    let mut boot_say = Vec::new();
+
+    // Step 1: settings.json
+    let t = std::time::Instant::now();
+    let setup = match fs::read(env.config.data.join("settings.json")) {
+        Ok(json) => match serde_json::from_slice::<Setup>(&json) {
+            Ok(setup) => {
+                let ms = t.elapsed().as_millis() as u64;
+                info!("boot.step", step = "settings", code = "ok", ms = ms);
+                setup
+            }
+            Err(_) => {
+                let ms = t.elapsed().as_millis() as u64;
+                warn!("boot.step", step = "settings", code = "settings", ms = ms);
+                boot_say.push("settings");
+                Setup::default()
+            }
+        },
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            let ms = t.elapsed().as_millis() as u64;
+            info!("boot.step", step = "settings", code = "ok", ms = ms);
+            Setup::default()
+        }
+        Err(_) => {
+            let ms = t.elapsed().as_millis() as u64;
+            warn!("boot.step", step = "settings", code = "settings", ms = ms);
+            boot_say.push("settings");
+            Setup::default()
+        }
+    };
+    *env.keep_hint.lock().unwrap_or_else(PoisonError::into_inner) = setup.keep;
+
+    // Step 2: identity (kept person + local device identity + Who::of + shelf/refresh/survey)
+    let t = std::time::Instant::now();
+    let kept = keys::kept();
+    let kept_is_none = matches!(kept, Ok(None));
+    let kept = kept.unwrap_or_else(|end| {
+        boot_say.push(code(end));
+        None
+    });
+    let (local, made) = match keys::local() {
+        Ok((me, made)) => (Ok(me), made),
+        Err(end) => (Err(end), false),
+    };
+    let who = Who::of(kept, local);
+    let who_err = match &who {
+        Who::Nobody(c) => Some(*c),
+        Who::Local(_) | Who::Person(_) => None,
+    };
+    let has_person = who.person().is_some();
+    let mut signed =
+        run_sign(&env.config, &env.http, &env.identity, who, "boot", made, setup.keep, &[])?;
+    let id_ms = t.elapsed().as_millis() as u64;
+    if let Some(c) = who_err {
+        warn!("boot.step", step = "identity", code = c, ms = id_ms);
+    } else {
+        info!("boot.step", step = "identity", code = "ok", ms = id_ms);
+    }
+
+    // Step 3: 0.8 community invite (never blocks boot; network work spawns on work subtree)
+    let t = std::time::Instant::now();
+    let invite_path = env.config.old.as_ref().map(|old| old.join("Secrets/community-invite.json"));
+    let invite_res = invite_path.as_deref().map(keys::invite).transpose().map_err(code);
+    let (start_create, start_claim) = match invite_res {
+        Ok(opt) => {
+            let invite = opt.flatten();
+            let ms = t.elapsed().as_millis() as u64;
+            info!("boot.step", step = "invites", code = "ok", ms = ms);
+            *env.invite.lock().unwrap_or_else(PoisonError::into_inner) = invite.clone();
+            match invite {
+                Some(_) if kept_is_none => (true, None),
+                Some(token) if has_person => (false, Some(token)),
+                _ => (false, None),
+            }
+        }
+        Err(c) => {
+            let ms = t.elapsed().as_millis() as u64;
+            warn!("boot.step", step = "invites", code = c, ms = ms);
+            boot_say.push(c);
+            (false, None)
+        }
+    };
+
+    boot_say.extend(signed.say);
+    signed.say = boot_say;
+
+    Ok(DeskOut::Booted { out: BootOut { setup, signed }, start_create, start_claim })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1198,6 +1519,104 @@ fn run_survey(
         Vec::new()
     };
     Ok(Survey { writes, sweep: has_key, filings })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_create_net(
+    tree: &Tree,
+    signing: &Mutex<Option<CancellationToken>>,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    jobs_failed: &Counter,
+    http: reqwest::Client,
+    directory: String,
+    desk: Desk<Job>,
+    keep_hint: Arc<Mutex<Option<u32>>>,
+    results: Tx<Msg>,
+) {
+    let cancel = replace_signing(signing);
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("net.create", async move {
+        info!("job.start", kind = "create", job = seq, waited_ms = 0u64);
+        let started = std::time::Instant::now();
+        let outcome = tokio::select! {
+            () = cancel.cancelled() => None,
+            res = again(|| keys::create(&http, &directory)) => Some(res),
+        };
+        let ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            None => {
+                info!("job.done", kind = "create", job = seq, code = "cancelled", ms = ms);
+            }
+            Some(Ok(me)) => {
+                info!("job.done", kind = "create", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+                let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
+                let job = Job::Sign {
+                    who: Who::Person(me),
+                    why: "sign_in",
+                    made: false,
+                    keep,
+                    busy: Vec::new(),
+                };
+                let _ = desk.send(job).await; // dropped: desk ended on shutdown
+            }
+            Some(Err(end)) => {
+                let c = code(end);
+                warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
+                let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_claim_net(
+    tree: &Tree,
+    signing: &Mutex<Option<CancellationToken>>,
+    invite: &Arc<Mutex<Option<Secret>>>,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    jobs_failed: &Counter,
+    chain: Arc<Chain>,
+    token: Secret,
+    results: Tx<Msg>,
+) {
+    let cancel = replace_signing(signing);
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let invite = invite.clone();
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("net.claim", async move {
+        info!("job.start", kind = "claim", job = seq, waited_ms = 0u64);
+        let started = std::time::Instant::now();
+        let outcome = tokio::select! {
+            () = cancel.cancelled() => None,
+            res = again(|| chain.claim(&token)) => Some(res),
+        };
+        let ms = started.elapsed().as_millis() as u64;
+        let Some(claimed) = outcome else {
+            info!("job.done", kind = "claim", job = seq, code = "cancelled", ms = ms);
+            return;
+        };
+        // Gone over, or refused for good: either way it is not sent again.
+        let done = keys::carried(&token).and(claimed).map_err(code);
+        *invite.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        match done {
+            Ok(()) => {
+                info!("job.done", kind = "claim", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+            }
+            Err(c) => {
+                warn!("job.done", kind = "claim", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
+            }
+        }
+        let _ = results.send(Msg::Claimed(done)).await; // dropped: the hub has ended
+    });
 }
 
 fn spawn_export_write(

@@ -4,9 +4,9 @@
 //! HTTP client construction, or task spawning (`P1-20` `hub.sh`).
 
 use crate::app::hub::{HUB_MAIL_MSGS, Hub, Msg};
-use crate::app::proto::{Level as SoundLevel, Notices, Session, State};
+use crate::app::proto::{Device, Level as SoundLevel, Notices, Session, State};
 use crate::app::work::Work;
-use crate::capture::audio::{Capture, Hear, Hearing};
+use crate::capture::audio::{self, Capture, Hear, Hearing};
 use crate::capture::clock::wall_clock_policy;
 use crate::capture::tape::{self, Reels};
 use crate::live::frame::Frame;
@@ -27,6 +27,9 @@ const CONNECT_TIMEOUT_MS: u64 = 10_000;
 /// Idle read timeout for outbound HTTP requests: 30 s without a byte means a dead connection,
 /// while long whole-recording uploads keep streaming without a whole-request timeout (`P1-18`).
 const READ_TIMEOUT_MS: u64 = 30_000;
+
+/// Lists the system's audio input devices: real OS query in production, fake in tests.
+pub type Devices = Arc<dyn Fn() -> Vec<Device> + Send + Sync>;
 
 /// Puts text on the system clipboard: the shell's to give. `false`: it could not.
 pub type Clip = Arc<dyn Fn(&str) -> bool + Send + Sync>;
@@ -54,6 +57,8 @@ pub struct Config {
     pub old: Option<PathBuf>,
     /// How sound is heard: real audio capture in production, fake microphone in tests.
     pub hear: Hear,
+    /// How the system's audio input devices are listed.
+    pub devices: Devices,
     /// How a live caption lane connects to the realtime service.
     pub dial: Dial,
     /// How a recording's tape is opened for writing.
@@ -77,6 +82,7 @@ impl Config {
             let capture = Capture::start(source, wall_clock_policy, stats, sink, notice)?;
             Ok(Box::new(capture) as Box<dyn Hearing>)
         });
+        let devices: Devices = Arc::new(audio::devices);
         let (dial, reels, drafts) = (wire::dial(), tape::reels(), shelf::drafts());
         let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
         // Without a shell to give them, nothing can be put on the clipboard, nor installed.
@@ -91,6 +97,7 @@ impl Config {
             directory,
             old,
             hear,
+            devices,
             dial,
             reels,
             drafts,
@@ -206,18 +213,16 @@ impl Core {
         };
         let commands_refused = stats.counter("commands.refused");
         let work = Work::new(
-            config.clone(),
-            http.clone(),
+            config,
+            http,
             results.clone(),
             progress,
             said.clone(),
             root.clone(),
             frame_reg.read(),
         );
+        work.boot();
         let hub = Hub::new(
-            config,
-            http,
-            results.clone(),
             work,
             root.clone(),
             state_reg,

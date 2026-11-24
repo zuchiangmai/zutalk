@@ -217,5 +217,7 @@
  "code.shell": "The window fell behind",
  "code.panic": "Stopped unexpectedly and restarted",
  "code.keys": "Could not get a key in time",
+ "code.starting": "Starting up",
+ "code.update.installing": "Installing an update",
  "reconnect": "Reconnect"
 }

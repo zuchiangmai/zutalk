@@ -217,5 +217,7 @@
  "code.shell": "窗口刷新慢了",
  "code.panic": "意外中断，已重开",
  "code.keys": "取钥匙超时",
+ "code.starting": "正在启动",
+ "code.update.installing": "正在安装更新",
  "reconnect": "重连"
 }

@@ -160,7 +160,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 负责人定（2026-11-16）：新版作为旧版的更新装上之后，用 Tauri 官方的更新插件自己更新；发布时的做法在 `RELEASE.md`。
 
 - **外壳做 IO。** 启动时和之后每 6 小时，外壳看一次 `app/tauri.conf.json` 里唯一的地址，有更新的版本就下载并核对签名，再经 `Core::looked` 告诉枢纽：`State.update` 是那个版本号，界面顶栏出现「更新」。看不成就说一次 `update`，直到某次看得顺利。
-- **枢纽定什么时候装。** `Command::Update` 来时有录音就拒绝（`update.recording`）；没有才调外壳给的端口 `Config.install`：把下好的版本放到应用的位置，然后重启。端口只在装不上时返回，枢纽说 `update.install`。装和重启都在枢纽处理这条命令时同步完成，中间不会开始新的录音。
+- **枢纽定什么时候装。** `Command::Update` 来时有录音就拒绝（`update.recording`）；没有才把枢纽的启动状态 `Boot` 切到 `Installing`，并交由 `Work` 在独立阻塞任务（`update.install`）里调外壳给的端口 `Config.install`：把下好的版本放到应用的位置，然后重启。`Installing` 期间枢纽照常应答别的消息，只拒绝 `Start` 与 `Import`（`update.installing`），因此安装期间同样不会开始新的录音；端口只在装不上时返回，枢纽将 `Boot` 切回 `Ready` 并说 `update.install`。
 - **平台是数据。** 各平台的文件和签名写在 `latest.json` 里，由 `scripts/updates.py` 从构建好的文件生成；平台的差别是它 `KINDS` 表里的一行。
 - **从 Sparkle 跳过来。** 同一个 bundle id、同一个包名、构建号大于交接录音的 0.8.6（66；新版从 67 起）、整包 ad-hoc 签名；这几条写在配置里，由 `app/tests/updates.rs` 守着。新版在旧版 appcast 的 `zu` 频道上，0.8.6 写好交接才看得到它（§5.12，`RELEASE.md` §4）。
 

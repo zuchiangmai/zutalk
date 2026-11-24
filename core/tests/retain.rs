@@ -164,6 +164,7 @@ async fn once_the_record_is_written_audio_kept_only_until_then_goes() {
         soniox: format!("{}/v1", stt.uri()),
         ..config(data)
     });
+    app.until(|_| true).await;
     let setup = Setup { spoken: vec!["en".into()], keep: Some(0), ..Setup::default() };
     app.send(Command::Setup { setup });
     let file = data.join("Planning.wav");

@@ -217,5 +217,7 @@
  "code.shell": "창 업데이트가 늦어졌어요",
  "code.panic": "예기치 않게 멈춰 다시 시작했어요",
  "code.keys": "키를 제때 가져오지 못했습니다",
+ "code.starting": "시작하는 중입니다",
+ "code.update.installing": "업데이트를 설치하는 중입니다",
  "reconnect": "다시 연결"
 }

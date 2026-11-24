@@ -103,6 +103,7 @@ async fn the_glossary_reaches_the_live_captions_and_the_whole_session_transcript
         ..config(dir.path())
     };
     let mut app = App::with(config);
+    app.until(|_| true).await;
     let written = Some(owned(&[("th", "ซูซาลู")]));
     app.send(Command::Term { said: "Zuzalu".into(), written });
     let state = app.until(|state| !state.terms.is_empty()).await;

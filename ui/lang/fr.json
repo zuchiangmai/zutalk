@@ -217,5 +217,7 @@
  "code.shell": "La fenêtre a pris du retard",
  "code.panic": "Arrêt inattendu, relancé",
  "code.keys": "Clé non obtenue à temps",
+ "code.starting": "Démarrage en cours",
+ "code.update.installing": "Installation de la mise à jour",
  "reconnect": "Reconnecter"
 }

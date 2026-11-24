@@ -217,5 +217,7 @@
  "code.shell": "画面の更新が遅れています",
  "code.panic": "予期せず停止し、再開しました",
  "code.keys": "キーの取得がタイムアウトしました",
+ "code.starting": "起動中です",
+ "code.update.installing": "アップデートをインストール中です",
  "reconnect": "再接続"
 }

@@ -217,5 +217,7 @@
  "code.shell": "La ventana se retrasó",
  "code.panic": "Se detuvo inesperadamente y se reinició",
  "code.keys": "No se obtuvo la clave a tiempo",
+ "code.starting": "Iniciando",
+ "code.update.installing": "Instalando actualización",
  "reconnect": "Reconectar"
 }

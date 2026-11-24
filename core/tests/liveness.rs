@@ -2655,3 +2655,47 @@ async fn i8_what_one_change_sends_does_not_grow_with_the_library() {
         "State size grew with library: 5 recs = {bytes_5} B, 100 recs = {bytes_100} B (ratio {ratio:.2} > 1.2)"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
+    let _store = STORE.lock().await;
+    let data = tempfile::tempdir().expect("data tempdir");
+    hub::nobody();
+    let existing = "19a0000000400000001";
+    seed_recording(&hub::local_shelf(data.path()), existing, "existing", 5, Some("findme"));
+
+    let speech = Speech::build(SpeechSpec::standard(5 * 60 * 1_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+    opts.data = Some(data.path().to_path_buf());
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    // 20 varied commands spread across 5 virtual minutes of recording.
+    for i in 0..20usize {
+        tokio::time::sleep(Duration::from_millis(15_000)).await;
+        match i % 5 {
+            0 => bench.send(Command::Change {
+                id: existing.into(),
+                change: Change::Title { text: format!("Renamed {i}") },
+            }),
+            1 => bench.send(Command::Search { query: "findme".into() }),
+            2 => bench.send(Command::Open { id: existing.into() }),
+            3 => bench.send(Command::Captions { show: i % 2 == 0 }),
+            _ => bench
+                .send(Command::Term { said: format!("Term{i}"), written: Some(BTreeMap::new()) }),
+        }
+    }
+    bench.send(Command::Close);
+    let _ = rec_id;
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let spread = bench.spread("hub.turn_us");
+    let slow = bench.seen().of("hub.turn.slow");
+    eprintln!("P1-20 5-min bench: hub.turn_us={spread:?} hub.turn.slow={} ({slow:?})", slow.len());
+    assert!(spread.as_ref().is_some_and(|s| s.n >= 20), "expected >= 20 hub turns: {spread:?}");
+    bench.finish();
+}

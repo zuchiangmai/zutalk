@@ -201,8 +201,7 @@ async fn more_codes_than_are_kept_lose_the_oldest() {
 
     // One more distinct code pushes out the oldest and keeps the newest at the tail.
     app.send(Command::CopyRotation);
-    app.send(Command::Captions { show: false });
-    app.until(|s| !s.captions).await;
+    app.notice("rotation.none").await;
     let (_, after) = app.outlet.said.now();
     assert_eq!(after.next, 21);
     assert_eq!(after.codes.len(), Notices::KEEP_CODES);
@@ -747,6 +746,7 @@ async fn an_imported_file_is_a_recording_and_a_change_is_one_more_record() {
     store(true);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
+    app.until(|_| true).await;
     let file = dir.path().join("Board meeting.wav");
     wav(&file, 1_500);
     app.send(Command::Import { path: file.to_string_lossy().into() });
@@ -813,6 +813,7 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
     let realtime = format!("ws://{}", soniox.local_addr().expect("an address"));
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::on(dir.path(), &server, &realtime);
+    app.until(|_| true).await;
     let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
     app.send(Command::Setup { setup });
     // A room for the live captions: a link with the key after `#`, and nothing in it yet.
@@ -888,6 +889,7 @@ async fn a_change_is_one_more_record() {
     store(true);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
+    app.until(|_| true).await;
     app.send(Command::Start);
     app.session(|s| s.is_some()).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -965,6 +967,16 @@ async fn the_recovery_key_goes_to_the_clipboard_and_through_nothing_else() {
     checked.push(serde_json::to_string(&saved).expect("state is JSON"));
     checked.push(serde_json::to_string(&*app.outlet.said.now().1).expect("notices are JSON"));
     assert!(checked.iter().all(|json| !json.contains(&written[1..])), "the key reached the page");
+    // Observability privacy check (P1-20 #5): neither the recovery key nor the signed-in DID
+    // or handle appears in any captured log event.
+    let multikey_tail = &written[1..];
+    for line in app.seen.all() {
+        let rendered = format!("{line:?}");
+        assert!(!rendered.contains(multikey_tail), "recovery key leaked into log: {line:?}");
+        assert!(!rendered.contains(ME), "signed-in DID leaked into log: {line:?}");
+        assert!(!rendered.contains("did:zu:"), "DID leaked into log: {line:?}");
+    }
+    assert_eq!(app.seen.refused(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -973,6 +985,7 @@ async fn without_a_recovery_key_or_a_clipboard_it_says_so() {
     store(true);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
+    app.until(|_| true).await;
     app.send(Command::CopyRotation);
     app.notice("rotation.none").await;
     keys::set("rotation.unsaved", Some(&[7; 32])).expect("a recovery key is kept");
@@ -991,6 +1004,7 @@ async fn an_update_is_installed_only_while_nothing_is_recording() {
     let counted = installs.clone();
     let install: Install = Arc::new(move || _ = counted.fetch_add(1, SeqCst));
     let mut app = App::with(Config { install, ..config(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
     app.core.looked(Err("update")).await;
     app.notice("update").await;
     app.core.looked(Ok("0.9.1".into())).await;
@@ -1015,7 +1029,7 @@ async fn the_core_runs_on_a_tree_with_a_name() {
     let app = App::with_log(hub::config(dir.path()), zutalk_log::Level::Debug);
 
     let starts = app.seen.of("task.start");
-    assert_eq!(starts.len(), 3, "{starts:?}");
+    assert_eq!(starts.len(), 4, "{starts:?}");
     assert!(
         starts
             .iter()
@@ -1034,10 +1048,16 @@ async fn the_core_runs_on_a_tree_with_a_name() {
             .any(|line| line.text("tree") == Some("work") && line.text("task") == Some("desk")),
         "expected desk task.start, got {starts:?}"
     );
+    assert!(
+        starts
+            .iter()
+            .any(|line| line.text("tree") == Some("work") && line.text("task") == Some("devices")),
+        "expected devices task.start, got {starts:?}"
+    );
 
     let tally = app.core.stats().tally();
     let started = tally.counts.iter().find(|row| row.name == "task.started").map(|row| row.n);
-    assert_eq!(started, Some(3));
+    assert_eq!(started, Some(4));
     assert_eq!(app.seen.refused(), 0);
 }
 
@@ -2212,6 +2232,504 @@ async fn no_job_says_what_it_was_about() {
         assert!(!rendered.contains(secret_title), "title leaked: {line:?}");
         assert!(!rendered.contains(secret_query), "query leaked: {line:?}");
         assert!(!rendered.contains(secret_path), "export path leaked: {line:?}");
+    }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[test]
+fn the_hub_boots_as_its_table_says() {
+    use zutalk_core::app::hub::{Boot, BootEvent, boot_step};
+
+    assert_eq!(Boot::Starting.code(), "Starting");
+    assert_eq!(Boot::Ready.code(), "Ready");
+    assert_eq!(Boot::Installing.code(), "Installing");
+
+    let transitions = [
+        (Boot::Starting, BootEvent::Ready, Boot::Ready),
+        (Boot::Starting, BootEvent::Install, Boot::Starting),
+        (Boot::Starting, BootEvent::InstallFailed, Boot::Starting),
+        (Boot::Ready, BootEvent::Ready, Boot::Ready),
+        (Boot::Ready, BootEvent::Install, Boot::Installing),
+        (Boot::Ready, BootEvent::InstallFailed, Boot::Ready),
+        (Boot::Installing, BootEvent::Ready, Boot::Installing),
+        (Boot::Installing, BootEvent::Install, Boot::Installing),
+        (Boot::Installing, BootEvent::InstallFailed, Boot::Ready),
+    ];
+    for (from, event, expected) in transitions {
+        assert_eq!(boot_step(from, event), expected, "{from:?} + {event:?}");
+    }
+
+    let commands = [
+        ("Start", Command::Start),
+        ("Import", Command::Import { path: "a.wav".into() }),
+        ("Pause", Command::Pause),
+        ("Setup", Command::Setup { setup: Setup::default() }),
+    ];
+    for (name, cmd) in &commands {
+        assert_eq!(Boot::Starting.accepts(cmd), Err("starting"), "Starting × {name}");
+        assert_eq!(Boot::Ready.accepts(cmd), Ok(()), "Ready × {name}");
+        let expected_installing = match cmd {
+            Command::Start | Command::Import { .. } => Err("update.installing"),
+            _ => Ok(()),
+        };
+        assert_eq!(Boot::Installing.accepts(cmd), expected_installing, "Installing × {name}");
+    }
+}
+
+#[tokio::test]
+async fn a_command_before_the_core_is_ready_is_turned_away() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+
+    let mut app = App::start(dir.path());
+    // Immediately send Start before yielding to the runtime: hub is still Starting.
+    app.send(Command::Start);
+    app.notice("starting").await;
+
+    // Wait for first State (hub transitioned Starting -> Ready).
+    app.until(|_| true).await;
+
+    // Now Start succeeds.
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    let all = app.seen.all();
+    for line in &all {
+        if matches!(line.code, "task.start" | "boot.step" | "hub.boot" | "identity.who") {
+            eprintln!("P1-20 boot log: {line:?}");
+        }
+    }
+
+    let start_cmds: Vec<_> = app
+        .seen
+        .of("command.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("Start"))
+        .collect();
+    assert_eq!(start_cmds.len(), 2, "{start_cmds:?}");
+    assert_eq!(start_cmds[0].level, zutalk_log::Level::Warn);
+    assert_eq!(start_cmds[0].text("code"), Some("starting"));
+    assert_eq!(start_cmds[1].level, zutalk_log::Level::Info);
+    assert_eq!(start_cmds[1].text("code"), Some("ok"));
+
+    let boot_events = app.seen.of("hub.boot");
+    assert_eq!(boot_events.len(), 1, "{boot_events:?}");
+    assert_eq!(boot_events[0].text("from"), Some("Starting"));
+    assert_eq!(boot_events[0].text("to"), Some("Ready"));
+    assert_eq!(boot_events[0].text("why"), Some("boot"));
+
+    // Ordering: Starting->Ready comes before the `ok` Start command.
+    let boot_idx = all.iter().position(|l| l.code == "hub.boot").expect("hub.boot index");
+    let ok_start_idx = all
+        .iter()
+        .position(|l| {
+            l.code == "command.done"
+                && l.text("kind") == Some("Start")
+                && l.text("code") == Some("ok")
+        })
+        .expect("ok Start index");
+    assert!(
+        boot_idx < ok_start_idx,
+        "hub.boot ({boot_idx}) must precede ok Start ({ok_start_idx})"
+    );
+
+    let steps = app.seen.of("boot.step");
+    for step in ["settings", "identity", "invites"] {
+        assert!(
+            steps.iter().any(|l| l.text("step") == Some(step) && l.text("code").is_some()),
+            "missing boot.step({step}) in {steps:?}"
+        );
+    }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_list_that_never_comes_holds_up_nothing() {
+    use std::sync::{Condvar, Mutex};
+    use zutalk_core::app::hub::Devices;
+    use zutalk_core::app::proto::Device;
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate_cb = gate.clone();
+    let secret_device = "SecretMicName42";
+    let devices: Devices = Arc::new(move || {
+        let (lock, cv) = &*gate_cb;
+        let mut open = lock.lock().expect("gate lock");
+        while !*open {
+            let (guard, timed) = cv.wait_timeout(open, Duration::from_secs(10)).expect("gate cv");
+            open = guard;
+            assert!(!timed.timed_out() || *open, "devices gate stayed closed");
+        }
+        vec![Device { id: "dev-1".into(), name: secret_device.into(), default: true }]
+    });
+
+    let mut app = App::with(Config { devices, ..config(dir.path(), NOWHERE) });
+
+    // Hub reaches Ready and answers commands even while `devices` is blocked.
+    let first = app.until(|_| true).await;
+    assert!(first.devices.is_empty());
+    app.send(Command::Captions { show: true });
+    app.until(|s| s.captions).await;
+
+    assert!(
+        app.seen.of("hub.boot").iter().any(|l| l.text("to") == Some("Ready")),
+        "hub must reach Ready while devices is blocked"
+    );
+    assert!(
+        !app.seen.of("boot.step").iter().any(|l| l.text("step") == Some("devices")),
+        "boot.step(devices) must not appear while blocked"
+    );
+    let running = app.core.running();
+    assert!(
+        running.iter().any(|r| r.task == "devices"),
+        "Tree::running() must show blocked devices task: {running:?}"
+    );
+
+    // Release gate: `boot.step(devices)` fires and `state.devices` populates; no device name in logs.
+    {
+        let (lock, cv) = &*gate;
+        *lock.lock().expect("gate lock") = true;
+        cv.notify_all();
+    }
+    let with_devs = app.until(|s| s.devices.len() == 1).await;
+    assert_eq!(with_devs.devices[0].name, secret_device);
+    let dev_steps: Vec<_> = app
+        .seen
+        .of("boot.step")
+        .into_iter()
+        .filter(|l| l.text("step") == Some("devices"))
+        .collect();
+    assert_eq!(dev_steps.len(), 1, "{dev_steps:?}");
+    assert_eq!(dev_steps[0].text("code"), Some("ok"));
+    assert_eq!(dev_steps[0].u64("n"), Some(1));
+
+    for line in app.seen.all() {
+        let rendered = format!("{line:?}");
+        assert!(!rendered.contains(secret_device), "device name leaked into log: {line:?}");
+    }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_setting_takes_effect_at_once_and_is_kept() {
+    use tokio::io::duplex;
+    use tokio_tungstenite::{accept_async, client_async};
+    use zutalk_core::live::wire::{Dial, Wire};
+    use zutalk_core::rt::supervise::End;
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+
+    // In-memory duplex Soniox server that replies with one word in en and zh.
+    let dial: Dial = Arc::new(|_| {
+        Box::pin(async move {
+            let (client_io, server_io) = duplex(64 * 1024);
+            let server = tokio::spawn(async move {
+                let mut ws = accept_async(server_io).await.expect("accept duplex");
+                let _ = ws.next().await;
+                let msg = json!({
+                    "tokens": [
+                        { "text": "Hello", "start_ms": 100, "end_ms": 300, "is_final": true, "language": "en", "speaker": "1" },
+                        { "text": "你好", "start_ms": 100, "end_ms": 300, "is_final": true, "language": "zh", "source_language": "en", "translation_status": "translation", "speaker": "1" },
+                        { "text": "<end>", "is_final": true }
+                    ],
+                    "final_audio_proc_ms": 400,
+                    "total_audio_proc_ms": 400
+                });
+                let _ = ws.send(Message::text(msg.to_string())).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if matches!(&m, Message::Text(t) if t.is_empty()) {
+                        let _ = ws.send(Message::text(r#"{"tokens":[],"finished":true}"#)).await;
+                        break;
+                    }
+                }
+            });
+            let (ws, _) = client_async("ws://bench.local/setup", client_io)
+                .await
+                .map_err(|_| End::Retry("connect"))?;
+            drop(server);
+            Ok(Box::new(ws) as Wire)
+        })
+    });
+
+    let mut app = App::with(Config { dial, ..config(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
+
+    let setup = Setup {
+        spoken: vec!["en".into(), "zh".into()],
+        shown: vec!["en".into(), "zh".into()],
+        ..Setup::default()
+    };
+    // Send Setup and Start back-to-back without awaiting in between.
+    app.send(Command::Setup { setup: setup.clone() });
+    app.send(Command::Start);
+
+    let frame = app.frame(|f| f.columns.len() == 2).await;
+    assert_eq!(frame.columns.len(), 2);
+
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !app
+        .seen
+        .of("job.done")
+        .iter()
+        .any(|l| l.text("kind") == Some("settings") && l.text("code") == Some("ok"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "settings job did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(app);
+
+    let mut again = App::start(dir.path());
+    let restored = again.until(|_| true).await;
+    assert_eq!(restored.setup, setup);
+}
+
+#[tokio::test]
+async fn settings_that_cannot_be_saved_say_so_and_still_hold() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    // Occupy `settings.json` with a directory so writing it fails.
+    fs::create_dir_all(dir.path().join("settings.json")).expect("block settings.json");
+
+    let chosen = Setup {
+        spoken: vec!["en".into()],
+        shown: vec!["en".into(), "zh".into()],
+        ..Setup::default()
+    };
+    app.send(Command::Setup { setup: chosen.clone() });
+    app.notice("settings").await;
+
+    let (_, state) = app.outlet.state.now();
+    assert_eq!(state.setup, chosen, "in-memory setup must still hold when disk save fails");
+
+    let settings_jobs: Vec<_> = app
+        .seen
+        .of("job.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("settings"))
+        .collect();
+    assert_eq!(settings_jobs.len(), 1, "{settings_jobs:?}");
+    assert_eq!(settings_jobs[0].level, zutalk_log::Level::Warn);
+    assert_eq!(settings_jobs[0].text("code"), Some("settings"));
+    assert!(
+        app.seen.of("notice.said").iter().any(|l| l.text("code") == Some("settings")),
+        "expected notice.said(settings)"
+    );
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nothing_is_recorded_while_an_update_is_being_put_in_place() {
+    use std::sync::{Condvar, Mutex};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+
+    let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let gate_cb = gate.clone();
+    let install: Install = Arc::new(move || {
+        let (lock, cv) = &*gate_cb;
+        let mut state = lock.lock().expect("install gate");
+        state.0 = true; // entered
+        cv.notify_all();
+        while !state.1 {
+            let (guard, timed) =
+                cv.wait_timeout(state, Duration::from_secs(10)).expect("install cv");
+            state = guard;
+            assert!(!timed.timed_out() || state.1, "install gate stayed closed");
+        }
+    });
+
+    let mut app = App::with(Config { install, ..config(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
+
+    app.send(Command::Update);
+    // Wait until installer blocking call has entered.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !gate.0.lock().expect("install gate").0 {
+        assert!(tokio::time::Instant::now() < deadline, "install did not start");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // While installing: Start & Import are rejected with `update.installing`, while Pause still
+    // responds immediately (`recording.none`), proving the hub is not blocked.
+    app.send(Command::Start);
+    app.notice("update.installing").await;
+    app.send(Command::Import { path: "dummy.wav".into() });
+    app.notice("update.installing").await;
+    app.send(Command::Pause);
+    app.notice("recording.none").await;
+
+    assert!(
+        app.seen.of("job.start").iter().any(|l| l.text("kind") == Some("install")),
+        "expected job.start(install) while blocked"
+    );
+    assert!(
+        !app.seen.of("job.done").iter().any(|l| l.text("kind") == Some("install")),
+        "job.done(install) must not appear while blocked"
+    );
+    assert!(
+        app.seen.of("command.done").iter().any(|l| {
+            l.text("kind") == Some("Start") && l.text("code") == Some("update.installing")
+        }),
+        "expected command.done(Start, update.installing)"
+    );
+
+    // Release gate: installer returns (could not relaunch) -> Ready + `update.install`.
+    {
+        let (lock, cv) = &*gate;
+        lock.lock().expect("install gate").1 = true;
+        cv.notify_all();
+    }
+    app.notice("update.install").await;
+
+    let boot_lines = app.seen.of("hub.boot");
+    let boot_seq: Vec<(&str, &str)> = boot_lines
+        .iter()
+        .map(|l| (l.text("from").unwrap_or("?"), l.text("to").unwrap_or("?")))
+        .collect();
+    assert_eq!(boot_seq, [("Starting", "Ready"), ("Ready", "Installing"), ("Installing", "Ready")]);
+
+    // Start works again now that Boot is back to Ready.
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_just_set_counts_for_the_next_recording() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+    app.send(Command::Setup { setup });
+    app.until(|s| s.setup.shown == ["en"]).await;
+
+    // Set own Soniox key: state.keys reflects Own immediately before desk refresh.
+    app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-own-test-key".into()) });
+    app.until(|s| s.keys.iter().any(|(svc, from)| svc == "soniox" && *from == keys::From::Own))
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !app
+        .seen
+        .of("job.done")
+        .iter()
+        .any(|l| l.text("kind") == Some("own_key") && l.text("code") == Some("ok"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "own_key job did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.seen.of("recording.start").is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "first recording.start did not arrive");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.seen.of("recording.start")[0].text("captions"), Some("live"));
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    // Clear key: state.keys immediately returns to Nowhere, and next recording is audio-only.
+    app.send(Command::OwnKey { service: "soniox".into(), key: None });
+    app.until(|s| s.keys.iter().any(|(svc, from)| svc == "soniox" && *from == keys::From::Nowhere))
+        .await;
+
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.seen.of("recording.start").len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "second recording.start did not arrive");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.seen.of("recording.start")[1].text("captions"), Some("captions.no_key"));
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_out_goes_back_to_the_device_off_the_hub() {
+    use zutalk_core::record::shelf::{About, RECORDING};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let kept = [&[5; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept)).expect("sign in person");
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let local_id = "localrec2001";
+    let local_about = About {
+        started: now,
+        length_ms: 1_000,
+        title: "Device Note".into(),
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    hub::local_shelf(dir.path())
+        .put(local_id, RECORDING, &[(local_id.into(), Some(local_about))], now)
+        .expect("seed local");
+
+    let mut app = App::start(dir.path());
+    let signed = app.until(|s| s.me.as_deref() == Some(ME)).await;
+    assert!(signed.library.is_empty());
+
+    app.send(Command::SignOut);
+    let back = app.until(|s| s.me.is_none() && s.library.iter().any(|r| r.id == local_id)).await;
+    assert_eq!(back.library.len(), 1);
+
+    let who: Vec<_> = app
+        .seen
+        .of("identity.who")
+        .into_iter()
+        .filter(|l| l.text("why") == Some("sign_out"))
+        .collect();
+    assert_eq!(who.len(), 1, "{who:?}");
+    assert_eq!(who[0].text("from"), Some("person"));
+    assert_eq!(who[0].text("to"), Some("local"));
+
+    let signout_jobs: Vec<_> = app
+        .seen
+        .of("job.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("signout") && l.text("code") == Some("ok"))
+        .collect();
+    assert_eq!(signout_jobs.len(), 1, "{signout_jobs:?}");
+
+    let local_did = hub::local_did();
+    for line in app.seen.all() {
+        let rendered = format!("{line:?}");
+        assert!(!rendered.contains(ME), "person DID leaked into log: {line:?}");
+        assert!(!rendered.contains(&local_did), "local DID leaked into log: {line:?}");
+        assert!(!rendered.contains("did:zu:"), "did:zu leaked into log: {line:?}");
+        assert!(!rendered.contains("did:key:"), "did:key leaked into log: {line:?}");
     }
     assert_eq!(app.seen.refused(), 0);
 }

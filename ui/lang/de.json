@@ -217,5 +217,7 @@
  "code.shell": "Das Fenster hängt nach",
  "code.panic": "Unerwartet beendet und neu gestartet",
  "code.keys": "Schlüssel nicht rechtzeitig erhalten",
+ "code.starting": "Wird gestartet",
+ "code.update.installing": "Update wird installiert",
  "reconnect": "Neu verbinden"
 }

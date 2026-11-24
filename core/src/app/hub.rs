@@ -1,39 +1,90 @@
-//! The hub. Commands, and reports from the work under way, come into one mailbox; after each,
-//! the state is sent whole if it changed. All data IO runs off the hub on `Work` (`P1-19`);
-//! identity, settings, devices, updates, and boot move off in `P1-20`.
+//! The hub: pure state machine over one bounded mailbox (`P1.md` §3.8, `P1-19`, `P1-20`).
+//!
+//! No disk IO, no network IO, no key-store calls, no device queries, and no tasks started here: every
+//! external action is handed to [`Work`] and its result arrives back as a [`Msg`]. The only
+//! `.await` in this file receives the next message from the mailbox.
 
 pub(crate) use crate::app::core::Voice;
-pub use crate::app::core::{Clip, Config, Core, Install, Outlet};
+pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    Change, Command, From, Level as SoundLevel, Room, Row, Session, Sound, State, Status, Writing,
+    Change, Command, Device, From, Level as SoundLevel, Room, Row, Session, Sound, State, Status,
+    Writing,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
-use crate::app::work::{OwnKeyOut, Refreshed, SignedOut, Survey, Work};
-use crate::capture::audio::{self, Source};
+use crate::app::work::{BootOut, OwnKeyOut, Refreshed, SignedOut, Survey, Work};
+use crate::capture::audio::Source;
 use crate::capture::clock::wall_ms;
-use crate::id::keys::{self, Me, Secret, Service, SignIn, Who};
+use crate::id::keys::Service;
 use crate::live::frame::{Frame, MAX_COLUMNS};
 use crate::live::lane::{self, Mode};
-use crate::out::city::{self, Calendar, Filing};
+use crate::out::city::{Calendar, Filing};
 use crate::out::export::EXPORTERS;
 use crate::record::shelf::About;
-use crate::rt::queue::{Rx, Tx};
+use crate::rt::queue::Rx;
 use crate::rt::signal::Register;
 use crate::rt::stats::{Counter, Spread};
-use crate::rt::supervise::{End, Tree, again};
+use crate::rt::supervise::{End, Tree};
 use crate::rt::water::{Gauge, Water};
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::{fs, sync::Arc};
 use tokio::sync::watch;
-use tokio::task::AbortHandle;
 use zutalk_log::{info, warn};
 
 /// The hub's mail. 256: a burst of clicks is a few dozen; the hub answers each in under a millisecond.
 pub const HUB_MAIL_MSGS: usize = 256;
 /// One turn of the hub (PLAN.md §4.1): a command should take under a millisecond.
 pub const HUB_TURN_BUDGET_US: u64 = 1_000;
+
+/// Lifecycle phase of the hub (`P1.md` §3.13.11, `P1-20`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boot {
+    Starting,
+    Ready,
+    Installing,
+}
+
+impl Boot {
+    /// Stable plain code for `hub.boot` log events.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Boot::Starting => "Starting",
+            Boot::Ready => "Ready",
+            Boot::Installing => "Installing",
+        }
+    }
+
+    /// Whether `command` may be accepted in this boot phase (`P1-20`).
+    pub fn accepts(self, command: &Command) -> Result<(), &'static str> {
+        match self {
+            Boot::Starting => Err("starting"),
+            Boot::Ready => Ok(()),
+            Boot::Installing => match command {
+                Command::Start | Command::Import { .. } => Err("update.installing"),
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+/// Transition input for [`boot_step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootEvent {
+    Ready,
+    Install,
+    InstallFailed,
+}
+
+/// Pure transition table for [`Boot`] (`P1.md` §3.13.11).
+pub fn boot_step(boot: Boot, event: BootEvent) -> Boot {
+    match (boot, event) {
+        (Boot::Starting, BootEvent::Ready) => Boot::Ready,
+        (Boot::Ready, BootEvent::Install) => Boot::Installing,
+        (Boot::Installing, BootEvent::InstallFailed) => Boot::Ready,
+        (same, _) => same,
+    }
+}
 
 /// Pure coalescing decision for library refreshes: returns `Some(dirty)` when no refresh is in
 /// flight and `dirty` has advanced past `synced`, else `None`.
@@ -43,13 +94,18 @@ pub fn next_refresh(dirty: u64, in_flight: Option<u64>, synced: u64) -> Option<u
 
 pub(crate) enum Msg {
     Do(Command),
+    Booted(BootOut),
+    Devices(Vec<Device>),
     RecordingOpened,
     Sealed(Row),
     Ended(String),
     Writing(Writing),
     Wrote(String),
-    SignedIn(Result<Me, End>),
+    SignInFailed(&'static str),
     Signed(Result<SignedOut, &'static str>),
+    Copied,
+    RotationSaved,
+    InstallFailed(&'static str),
     Refreshed(Result<Refreshed, &'static str>),
     DeskChanged,
     DeskFailed(&'static str),
@@ -76,13 +132,18 @@ impl Msg {
     fn kind(&self) -> &'static str {
         match self {
             Msg::Do(command) => command.kind(),
+            Msg::Booted(_) => "Booted",
+            Msg::Devices(_) => "Devices",
             Msg::RecordingOpened => "RecordingOpened",
             Msg::Sealed(_) => "Sealed",
             Msg::Ended(_) => "Ended",
             Msg::Writing(_) => "Writing",
             Msg::Wrote(_) => "Wrote",
-            Msg::SignedIn(_) => "SignedIn",
+            Msg::SignInFailed(_) => "SignInFailed",
             Msg::Signed(_) => "Signed",
+            Msg::Copied => "Copied",
+            Msg::RotationSaved => "RotationSaved",
+            Msg::InstallFailed(_) => "InstallFailed",
             Msg::Refreshed(_) => "Refreshed",
             Msg::DeskChanged => "DeskChanged",
             Msg::DeskFailed(_) => "DeskFailed",
@@ -115,9 +176,6 @@ fn writing(id: &str, step: &str) -> Writing {
 }
 
 pub(crate) struct Hub {
-    config: Arc<Config>,
-    http: reqwest::Client,
-    results: Tx<Msg>,
     work: Work,
     tree: Tree,
     state_reg: Register<State>,
@@ -135,13 +193,12 @@ pub(crate) struct Hub {
     screen: Arc<Gauge>,
     next_snap: Arc<AtomicU64>,
     said: Voice,
+    boot: Boot,
     state: State,
     sent: Option<State>,
     recording: Option<(String, watch::Sender<Mode>, watch::Sender<u64>)>,
     opened: Option<String>,
-    signing: Option<AbortHandle>, // a sign-in, an identity being made, or an invite carried
-    invite: Option<Secret>,       // a 0.8 community invite not carried over yet
-    moving: bool,                 // the 0.8 library is being moved in
+    moving: bool, // the 0.8 library is being moved in
     dirty: u64,
     refresh_in_flight: Option<u64>,
     refresh_synced: u64,
@@ -153,9 +210,6 @@ pub(crate) struct Hub {
 impl Hub {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        config: Arc<Config>,
-        http: reqwest::Client,
-        results: Tx<Msg>,
         work: Work,
         tree: Tree,
         state_reg: Register<State>,
@@ -174,10 +228,12 @@ impl Hub {
         let hub_turns_slow = stats.counter("hub.turns.slow");
         let hub_turn_us = stats.spread("hub.turn_us");
         let refresh_merged = stats.counter("refresh.merged");
+        let state = State {
+            languages: crate::live::lang::ALL.iter().map(|profile| profile.lang.into()).collect(),
+            exporters: EXPORTERS.iter().map(|exporter| exporter.id.into()).collect(),
+            ..State::default()
+        };
         Self {
-            config,
-            http,
-            results,
             work,
             tree,
             state_reg,
@@ -195,12 +251,11 @@ impl Hub {
             screen,
             next_snap: Arc::new(AtomicU64::new(1)),
             said,
-            state: State::default(),
+            boot: Boot::Starting,
+            state,
             sent: None,
             recording: None,
             opened: None,
-            signing: None,
-            invite: None,
             moving: false,
             dirty: 0,
             refresh_in_flight: None,
@@ -212,37 +267,6 @@ impl Hub {
     }
 
     pub(crate) async fn run(mut self, mut mail: Rx<Msg>) {
-        // None kept yet is the default; one that does not read is said, then replaced.
-        if let Ok(json) = fs::read(self.config.data.join("settings.json")) {
-            match serde_json::from_slice(&json) {
-                Ok(setup) => self.state.setup = setup,
-                Err(_) => self.said.say("settings"),
-            }
-        }
-        self.state.languages =
-            crate::live::lang::ALL.iter().map(|profile| profile.lang.into()).collect();
-        self.state.exporters = EXPORTERS.iter().map(|exporter| exporter.id.into()).collect();
-        self.state.devices = audio::devices();
-        let kept = keys::kept();
-        // An identity that does not read is said, not replaced by one made for an invite.
-        if let Err(code) = self.carry(matches!(kept, Ok(None))) {
-            self.said.say(code);
-        }
-        let kept = kept.unwrap_or_else(|end| {
-            self.said.say(code(end));
-            None
-        });
-        // Always read or make the device's own identity at boot so SignOut can return to it.
-        let (local, made) = match keys::local() {
-            Ok((me, made)) => (Ok(me), made),
-            Err(end) => (Err(end), false),
-        };
-        if let Ok(rx) = self.work.sign_boot(Who::of(kept, local), made, self.state.setup.keep)
-            && let Ok(Ok(out)) = rx.await
-        {
-            self.apply_signed(out);
-        }
-        self.publish();
         while let Some(msg) = mail.recv().await {
             let is_command = matches!(&msg, Msg::Do(_));
             let kind = msg.kind();
@@ -270,7 +294,19 @@ impl Hub {
         self.tree.cancel();
     }
 
+    fn set_boot(&mut self, event: BootEvent, why: &'static str) {
+        let from = self.boot;
+        let to = boot_step(from, event);
+        if to != from {
+            info!("hub.boot", from = from.code(), to = to.code(), why = why);
+            self.boot = to;
+        }
+    }
+
     fn publish(&mut self) {
+        if self.boot == Boot::Starting {
+            return;
+        }
         if self.sent.as_ref() != Some(&self.state) {
             self.sent = Some(self.state.clone());
             self.state_reg.set(self.state.clone());
@@ -337,6 +373,7 @@ impl Hub {
         for c in out.say {
             self.said.say(c);
         }
+        self.state.login = None;
         self.state.me = out.me;
         self.opened = None;
         self.state.open = None;
@@ -345,19 +382,6 @@ impl Hub {
         self.state.rooms = out.rooms;
         let live = self.state.rooms.iter().find(|r| r.recording.is_none()).map(|r| r.id.clone());
         self.work.sync_slot(live);
-        // An invite not carried over yet goes to whoever is signed in now.
-        if let (Some(_), Some(token)) = (&self.state.me, self.invite.clone()) {
-            let (chain, results) = (self.work.keys_snapshot(), self.results.clone());
-            let claim = tokio::spawn(async move {
-                let claimed = again(|| chain.claim(&token)).await;
-                // Gone over, or refused for good: either way it is not sent again.
-                let done = keys::carried(&token).and(claimed).map_err(code);
-                let _ = results.send(Msg::Claimed(done)).await; // dropped: the hub has ended
-            });
-            if let Some(earlier) = self.signing.replace(claim.abort_handle()) {
-                earlier.abort();
-            }
-        }
         self.apply_survey(out.survey);
         self.migrate();
     }
@@ -365,6 +389,12 @@ impl Hub {
     fn take(&mut self, msg: Msg) -> Result<(), &'static str> {
         match msg {
             Msg::Do(command) => self.command(command)?,
+            Msg::Booted(out) => {
+                self.state.setup = out.setup;
+                self.apply_signed(out.signed);
+                self.set_boot(BootEvent::Ready, "boot");
+            }
+            Msg::Devices(devices) => self.state.devices = devices,
             Msg::RecordingOpened => self.mark_dirty(),
             Msg::Sealed(sealed_row) => {
                 if let Some(existing) =
@@ -390,19 +420,16 @@ impl Hub {
                 self.need_retain = true;
                 self.mark_dirty();
             }
-            Msg::SignedIn(me) => {
+            Msg::SignInFailed(c) => {
                 self.state.login = None;
-                let me = me.map_err(code)?;
-                self.work.sign(
-                    Who::Person(me),
-                    "sign_in",
-                    false,
-                    self.state.setup.keep,
-                    self.busy_ids(),
-                )?;
+                return Err(c);
             }
-            Msg::Signed(out) => {
-                self.apply_signed(out?);
+            Msg::Signed(out) => self.apply_signed(out?),
+            Msg::Copied => self.said.say("copied"),
+            Msg::RotationSaved => self.state.rotation_unsaved = false,
+            Msg::InstallFailed(c) => {
+                self.set_boot(BootEvent::InstallFailed, "update.install");
+                return Err(c);
             }
             Msg::Refreshed(res) => {
                 self.refresh_in_flight = None;
@@ -461,7 +488,6 @@ impl Hub {
                 self.mark_dirty();
             }
             Msg::Claimed(done) => {
-                self.invite = None;
                 done?;
                 self.mark_dirty();
             }
@@ -489,6 +515,7 @@ impl Hub {
     }
 
     fn command(&mut self, command: Command) -> Result<(), &'static str> {
+        self.boot.accepts(&command)?;
         if command.needs_person() && self.state.me.is_none() {
             return Err("sign_in.first");
         }
@@ -510,11 +537,9 @@ impl Hub {
                 if setup.shown.len() > MAX_COLUMNS {
                     return Err("captions.columns");
                 }
-                let json = serde_json::to_vec(&setup).map_err(|_| "settings")?;
-                let saved = fs::create_dir_all(&self.config.data)
-                    .and_then(|()| fs::write(self.config.data.join("settings.json"), json));
-                saved.map_err(|_| "settings")?;
-                self.state.setup = setup;
+                // Apply immediately in memory so the next Start uses it; desk persists it.
+                self.state.setup = setup.clone();
+                self.work.save_setup(setup)?;
             }
             Command::Open { id } => {
                 self.opened = Some(id);
@@ -556,42 +581,15 @@ impl Hub {
                 self.work.unshare(room, recording)?;
             }
             Command::SignIn => {
-                let sign_in = SignIn::begin(&self.config.server).map_err(code)?;
-                self.state.login = Some(sign_in.code().into());
-                let (results, http) = (self.results.clone(), self.http.clone());
-                let task = tokio::spawn(async move {
-                    let _ = results.send(Msg::SignedIn(sign_in.finish(&http).await)).await; // dropped: the hub has ended
-                });
-                if let Some(earlier) = self.signing.replace(task.abort_handle()) {
-                    earlier.abort();
-                }
+                let url = self.work.sign_in()?;
+                self.state.login = Some(url);
             }
             Command::SignOut => {
-                keys::set("identity", None).map_err(code)?;
-                if let Some(signing) = self.signing.take() {
-                    signing.abort();
-                }
                 self.state.login = None;
-                let local = keys::local().map(|(me, _)| me);
-                self.work.sign(
-                    Who::of(None, local),
-                    "sign_out",
-                    false,
-                    self.state.setup.keep,
-                    self.busy_ids(),
-                )?;
+                self.work.sign_out(self.state.setup.keep, self.busy_ids())?;
             }
-            Command::CopyRotation => {
-                let key = keys::rotation().map_err(code)?.ok_or("rotation.none")?;
-                if !(self.config.clip)(&key) {
-                    return Err("clip");
-                }
-                self.said.say("copied");
-            }
-            Command::RotationSaved => {
-                keys::saved().map_err(code)?;
-                self.state.rotation_unsaved = false;
-            }
+            Command::CopyRotation => self.work.copy_rotation()?,
+            Command::RotationSaved => self.work.rotation_saved()?,
             Command::OwnKey { service, key } => {
                 let service = Service::ALL.into_iter().find(|s| s.name() == service);
                 let service = service.ok_or("keys.which")?;
@@ -616,16 +614,12 @@ impl Hub {
             Command::Term { said, written } => self.work.term(said, written)?,
             // Installing relaunches the app, so never while recording.
             Command::Update if self.recording.is_some() => return Err("update.recording"),
+            Command::Update if self.boot == Boot::Installing => return Err("update.installing"),
             Command::Update => {
-                (self.config.install)();
-                return Err("update.install"); // it returned: it could not
+                self.set_boot(BootEvent::Install, "update");
+                self.work.install();
             }
-            Command::City { address } => {
-                let (http, results) = (self.http.clone(), self.results.clone());
-                tokio::spawn(async move {
-                    let _ = results.send(Msg::City(city::calendar(&http, &address).await)).await; // dropped: the hub has ended
-                });
-            }
+            Command::City { address } => self.work.city(address),
             // What is still being written is filed once it is written.
             Command::File { id, .. } if self.busy(&id) => return Err("recording.writing"),
             Command::File { id, event, audio } => {
@@ -737,31 +731,12 @@ impl Hub {
         }
     }
 
-    /// A community invite the 0.8 app left here is carried over once, and nothing is asked of
-    /// its holder: to the identity kept here, or, with `make`, to one made for them now. Its
-    /// token is read where the old app kept it and copied nowhere. Kept as-is rather than moving
-    /// invites to the device's local identity (`docs/build/phases/P1.md` §3.14.8).
-    fn carry(&mut self, make: bool) -> Result<(), &'static str> {
-        let path = self.config.old.as_ref().map(|old| old.join("Secrets/community-invite.json"));
-        self.invite = path.as_deref().map(keys::invite).transpose().map_err(code)?.flatten();
-        if make && self.invite.is_some() {
-            let (http, directory) = (self.http.clone(), self.config.directory.clone());
-            let results = self.results.clone();
-            let made = tokio::spawn(async move {
-                let me = again(|| keys::create(&http, &directory)).await;
-                let _ = results.send(Msg::SignedIn(me)).await; // dropped: the hub has ended
-            });
-            self.signing = Some(made.abort_handle());
-        }
-        Ok(())
-    }
-
     /// The library the 0.8 app left here comes to whoever is signed in: once, on its own.
     /// Never moved to the device's local identity because `moved.json` records one recipient
     /// once (`docs/build/phases/P1.md` §3.14.8).
     fn migrate(&mut self) {
         let Some(me) = self.state.me.clone() else { return };
-        if self.config.old.is_none() || self.moving {
+        if self.moving {
             return;
         }
         if self.work.migrate(me) {
