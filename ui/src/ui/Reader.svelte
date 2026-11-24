@@ -2,7 +2,7 @@
   import type { Change } from '$proto/Change';
   import type { Open } from '$proto/Open';
   import type { State } from '$proto/State';
-  import { pick, say, send } from '../lib/core.svelte';
+  import { pick, say, send, store } from '../lib/core.svelte';
   import { clock, langName, t, text, word } from '../lib/words.svelte';
   import City from './City.svelte';
   import Meta from './Meta.svelte';
@@ -23,7 +23,7 @@
   const write = (exporter: string) =>
     pick(row.title || 'ZuTalk').then((to) => void (to && send({ do: 'Export', id: row.id, exporter, languages: shown, to })));
   const shared = $derived(s.rooms.find((r) => r.recording === row.id));
-  const taking = $derived(s.session?.id === row.id); // neither shared nor removed while it is taken
+  const taking = $derived(store.session?.id === row.id); // neither shared nor removed while it is taken
   let editing = $state(''), draft = $state('');
   const edit = (id: string, body: string) => ((editing = id), (draft = body));
   function key(e: KeyboardEvent, was: string, commit: (text: string) => void) {

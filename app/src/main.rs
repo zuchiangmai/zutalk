@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, RunEvent, State, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use zutalk_core::app::hub::{Clip, Config, Core, Install, Outlet};
-use zutalk_core::app::proto::{Command, Event};
+use zutalk_core::app::proto::{Command, Event, Signal, Stamped};
 use zutalk_core::id::keys;
 use zutalk_core::rt::supervise::Tree;
 use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
@@ -52,11 +52,32 @@ fn fan(app: &AppHandle, windows: &Windows, event: Event) {
 async fn forward(app: AppHandle, windows: Windows, mut outlet: Outlet) {
     let (mut state_seq, initial_state) = outlet.state.now();
     if state_seq > 0 {
-        fan(&app, &windows, Event::State(Box::new((*initial_state).clone())));
+        fan(&app, &windows, Event::State(initial_state));
     }
     let (mut frame_seq, initial_frame) = outlet.frame.now();
     if frame_seq > 0 {
-        fan(&app, &windows, Event::Live(initial_frame.columns.clone()));
+        let signal = Signal::Frame(initial_frame);
+        fan(&app, &windows, Event::Signal(Stamped { seq: frame_seq, signal }));
+    }
+    let (mut session_seq, initial_session) = outlet.session.now();
+    if session_seq > 0 {
+        let signal = Signal::Session(initial_session);
+        fan(&app, &windows, Event::Signal(Stamped { seq: session_seq, signal }));
+    }
+    let (mut level_seq, initial_level) = outlet.level.now();
+    if level_seq > 0 {
+        let signal = Signal::Level(initial_level);
+        fan(&app, &windows, Event::Signal(Stamped { seq: level_seq, signal }));
+    }
+    let (mut water_seq, initial_water) = outlet.water.now();
+    if water_seq > 0 {
+        let signal = Signal::Water(initial_water);
+        fan(&app, &windows, Event::Signal(Stamped { seq: water_seq, signal }));
+    }
+    let (mut stats_seq, initial_stats) = outlet.stats.now();
+    if stats_seq > 0 {
+        let signal = Signal::Stats(initial_stats);
+        fan(&app, &windows, Event::Signal(Stamped { seq: stats_seq, signal }));
     }
     let (_, initial_said) = outlet.said.now();
     let mut said_at = initial_said.next;
@@ -69,7 +90,7 @@ async fn forward(app: AppHandle, windows: Windows, mut outlet: Outlet) {
                 Some((seq, state)) => {
                     if seq > state_seq {
                         state_seq = seq;
-                        fan(&app, &windows, Event::State(Box::new((*state).clone())));
+                        fan(&app, &windows, Event::State(state));
                     }
                 }
                 None => break,
@@ -78,7 +99,48 @@ async fn forward(app: AppHandle, windows: Windows, mut outlet: Outlet) {
                 Some((seq, frame)) => {
                     if seq > frame_seq {
                         frame_seq = seq;
-                        fan(&app, &windows, Event::Live(frame.columns.clone()));
+                        let signal = Signal::Frame(frame);
+                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.session.next() => match next {
+                Some((seq, session)) => {
+                    if seq > session_seq {
+                        session_seq = seq;
+                        let signal = Signal::Session(session);
+                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.level.next() => match next {
+                Some((seq, level)) => {
+                    if seq > level_seq {
+                        level_seq = seq;
+                        let signal = Signal::Level(level);
+                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.water.next() => match next {
+                Some((seq, water)) => {
+                    if seq > water_seq {
+                        water_seq = seq;
+                        let signal = Signal::Water(water);
+                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.stats.next() => match next {
+                Some((seq, stats)) => {
+                    if seq > stats_seq {
+                        stats_seq = seq;
+                        let signal = Signal::Stats(stats);
+                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
                     }
                 }
                 None => break,

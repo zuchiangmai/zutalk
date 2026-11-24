@@ -28,10 +28,15 @@ pub fn sweep(tapes: &Path, state: &mut State, now: i64) -> Result<(), &'static s
 }
 
 /// Destroys a recording's audio at the person's word: one of theirs, and not while it is taken.
-pub fn destroy(tapes: &Path, state: &State, id: &str) -> Result<(), &'static str> {
-    if state.session.as_ref().is_some_and(|session| session.id == id) {
+pub fn destroy(
+    tapes: &Path,
+    library: &[Row],
+    under_way: Option<&str>,
+    id: &str,
+) -> Result<(), &'static str> {
+    if under_way == Some(id) {
         return Err("recording.under_way");
     }
-    let row = state.library.iter().find(|row| row.id == id).ok_or("recording.gone")?;
+    let row = library.iter().find(|row| row.id == id).ok_or("recording.gone")?;
     tape::destroy(&tapes.join(&row.id)).map_err(|_| "tape.destroy")
 }

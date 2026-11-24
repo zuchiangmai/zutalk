@@ -250,6 +250,18 @@ async fn without_a_key_the_bench_records_sound_and_no_caption() {
     assert!(mic_blocks >= 290, "expected ~300 blocks in 30 s, got {mic_blocks}");
     assert_eq!(tape_blocks, mic_blocks, "tape must keep every block the mic delivered");
 
+    let starts = bench.seen().of("recording.start");
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].text("captions"), Some("captions.no_key"));
+    assert_eq!(starts[0].u64("lanes"), Some(0));
+    let statuses = bench.seen().of("session.status");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].text("to"), Some("AudioOnly"));
+    assert_eq!(statuses[0].text("why"), Some("captions.no_key"));
+    let ends = bench.seen().of("recording.end");
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].text("code"), Some("done"));
+
     bench.finish();
 }
 
@@ -305,7 +317,8 @@ async fn nothing_said_or_secret_reaches_the_log() {
 
     assert!(!lines.is_empty(), "log files must not be empty");
     let has_code = |code: &str| lines.iter().any(|l| l.contains(&format!(r#""event":"{code}""#)));
-    assert!(has_code("task.start"), "expected task.start in log");
+    assert!(has_code("recording.start"), "expected recording.start in log");
+    assert!(has_code("recording.end"), "expected recording.end in log");
     assert!(has_code("identity.who"), "expected identity.who in log");
 
     let mut forbidden = forbidden_words;
@@ -474,6 +487,294 @@ async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn i1_captions_do_not_resend_the_state() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(70_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _id = bench.start_recording().await;
+
+    let (state_seq_before, _) = bench.outlet().state.now();
+    let (frame_seq_before, _) = bench.outlet().frame.now();
+
+    tokio::time::sleep(Duration::from_millis(60_000)).await;
+
+    let (state_seq_after, _) = bench.outlet().state.now();
+    let (frame_seq_after, _) = bench.outlet().frame.now();
+    let frame_delta = frame_seq_after.saturating_sub(frame_seq_before);
+
+    assert_eq!(
+        state_seq_after, state_seq_before,
+        "steady captions must not resend State (seq {state_seq_before} -> {state_seq_after})"
+    );
+    assert!(
+        frame_delta >= 150,
+        "expected well over a hundred frames in 60 s, got {frame_delta} ({frame_seq_before} -> {frame_seq_after})"
+    );
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_clears_the_session_and_no_late_status_brings_it_back() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(20_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+    // Delay service replies by 3 s so the lane and recording task are still wrapping up after Stop.
+    opts.fault = Fault::Slow { extra_ms: 3_000 };
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+    assert!(
+        bench.outlet().session.now().1.is_some(),
+        "expected active session in outlet.session before Stop"
+    );
+    assert!(
+        !bench.outlet().frame.now().1.columns.is_empty(),
+        "expected non-empty frame columns before Stop"
+    );
+
+    bench.stop_recording().await;
+
+    let (session_seq_stop, session_at_stop) = bench.outlet().session.now();
+    let (frame_seq_stop, frame_at_stop) = bench.outlet().frame.now();
+    assert!(session_at_stop.is_none(), "outlet.session must be None immediately after Stop");
+    assert!(frame_at_stop.columns.is_empty(), "outlet.frame must be empty immediately after Stop");
+
+    // Advance 10 virtual seconds while the recording task finishes closing its slow lane.
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, s) = bench.outlet().session.now();
+        let (_, f) = bench.outlet().frame.now();
+        assert!(s.is_none(), "late status brought session back after Stop: {s:?}");
+        assert!(f.columns.is_empty(), "late frame repopulated outlet.frame after Stop: {f:?}");
+    }
+
+    let (session_seq_after, _) = bench.outlet().session.now();
+    let (frame_seq_after, _) = bench.outlet().frame.now();
+    assert_eq!(session_seq_after, session_seq_stop, "outlet.session seq moved after Stop");
+    assert_eq!(frame_seq_after, frame_seq_stop, "outlet.frame seq moved after Stop");
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_level_follows_the_sound_and_falls_to_nothing_when_paused() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(30_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _id = bench.start_recording().await;
+
+    // First sentence begins at 500 ms (`LEAD_SILENCE_MS`); at ~1,000 ms blocks are loud (~8000).
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let (seq_loud, loud) = bench.outlet().level.now();
+    assert!(seq_loud > 0, "outlet.level must be written per block");
+    assert!(loud.peak >= 7_000 && loud.rms >= 6_000, "expected loud level, got {loud:?}");
+
+    // Advance into the inter-sentence silence after sentence 0 (`end_ms` .. `sentence[1].start_ms`).
+    let s0_end = bench.speech.sentences[0].end_ms;
+    let s1_start = bench.speech.sentences[1].start_ms;
+    assert!(s1_start >= s0_end + 300, "expected silence gap between sentences 0 and 1");
+    let target_quiet_ms = u64::from(s0_end) + 200;
+    tokio::time::sleep(Duration::from_millis(target_quiet_ms.saturating_sub(1_000))).await;
+    let (_, quiet) = bench.outlet().level.now();
+    assert!(quiet.peak < 100 && quiet.rms < 20, "expected quiet level in pause gap, got {quiet:?}");
+
+    // Advance into sentence 1 so sound rises again, then pause and verify level drops to zero.
+    let target_loud2_ms = u64::from(s1_start) + 300;
+    tokio::time::sleep(Duration::from_millis(target_loud2_ms - target_quiet_ms)).await;
+    let (_, loud_again) = bench.outlet().level.now();
+    assert!(loud_again.peak >= 7_000, "expected level to rise again on speech, got {loud_again:?}");
+
+    bench.send(Command::Pause);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (seq_paused, paused_lvl) = bench.outlet().level.now();
+    assert_eq!(*paused_lvl, zutalk_core::app::proto::Level { peak: 0, rms: 0 });
+
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let (seq_paused_after, paused_after) = bench.outlet().level.now();
+    assert_eq!(seq_paused_after, seq_paused, "level seq must not advance while paused");
+    assert_eq!(*paused_after, zutalk_core::app::proto::Level { peak: 0, rms: 0 });
+
+    bench.stop_recording().await;
+    assert_eq!(*bench.outlet().level.now().1, zutalk_core::app::proto::Level { peak: 0, rms: 0 });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recording_the_capture_ends_is_ended_by_the_recording_task() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(30_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    // Speak long enough for at least one sentence to settle into the draft.
+    tokio::time::sleep(Duration::from_millis(10_000)).await;
+    assert!(bench.outlet().session.now().1.is_some());
+
+    // Capture ends on its own (as on lid close).
+    bench.mic.end();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while bench.outlet().session.now().1.is_some() {
+        assert!(Instant::now() < deadline, "session did not clear after capture ended");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert!(bench.outlet().session.now().1.is_none());
+    let recorded = bench.shelf().read(&rec_id).expect("read shelf").expect("draft must remain");
+    assert!(!recorded.lines.is_empty(), "draft lines spoken before capture ended must remain");
+    let first_word = &bench.speech.words[bench.speech.sentences[0].first_word];
+    let draft_text: String =
+        recorded.lines.iter().map(|(_, s)| s.line.text.as_str()).collect::<Vec<_>>().join(" ");
+    assert!(draft_text.contains(&first_word.needle), "draft missing first sentence");
+
+    // Observability: recording.end at level error with the capture code, and notice.said with same code.
+    let ends = bench.seen().of("recording.end");
+    assert_eq!(ends.len(), 1, "expected one recording.end, got {ends:?}");
+    assert_eq!(ends[0].level, Level::Error);
+    assert_eq!(ends[0].text("rec"), Some(rec_id.as_str()));
+    let end_code = ends[0].text("code").expect("recording.end code");
+    assert_eq!(end_code, "audio.closed");
+    assert!(
+        bench.seen().of("notice.said").iter().any(|l| l.text("code") == Some(end_code)),
+        "expected notice.said with `{end_code}`"
+    );
+    assert!(bench.notices().iter().any(|c| c == end_code));
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recording_says_when_it_starts_how_it_goes_and_when_it_ends() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(60_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+
+    // First recording: 30 s, Pause, Resume, Stop.
+    let rec1 = bench.start_recording().await;
+    tokio::time::sleep(Duration::from_millis(30_000)).await;
+
+    bench.send(Command::Pause);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(bench.status(), Some(Status::Paused));
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+    bench.send(Command::Resume);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(bench.status(), Some(Status::Recording));
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let starts = bench.seen().of("recording.start");
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    assert_eq!(starts[0].level, Level::Info);
+    assert_eq!(starts[0].text("rec"), Some(rec1.as_str()));
+    assert_eq!(starts[0].text("source"), Some("mic"));
+    assert_eq!(starts[0].u64("lanes"), Some(1));
+    assert_eq!(starts[0].u64("columns"), Some(2));
+    assert_eq!(starts[0].text("captions"), Some("live"));
+
+    let statuses: Vec<_> = bench
+        .seen()
+        .of("session.status")
+        .into_iter()
+        .filter(|l| l.text("rec") == Some(rec1.as_str()))
+        .collect();
+    let transitions: Vec<(&str, &str, &str)> = statuses
+        .iter()
+        .map(|l| {
+            assert_eq!(l.level, Level::Info);
+            (
+                l.text("from").unwrap_or("?"),
+                l.text("to").unwrap_or("?"),
+                l.text("why").unwrap_or("?"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        transitions,
+        [("Connecting", "Recording", ""), ("Recording", "Paused", ""), ("Paused", "Recording", ""),]
+    );
+
+    let ends = bench.seen().of("recording.end");
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0].level, Level::Info);
+    assert_eq!(ends[0].text("rec"), Some(rec1.as_str()));
+    assert_eq!(ends[0].text("code"), Some("done"));
+    let all_rec1: Vec<&str> = bench
+        .seen()
+        .all()
+        .into_iter()
+        .filter(|l| l.text("rec") == Some(rec1.as_str()))
+        .map(|l| l.code)
+        .collect();
+    assert_eq!(
+        all_rec1,
+        ["recording.start", "session.status", "session.status", "session.status", "recording.end"]
+    );
+
+    // Second recording back-to-back: carries its own id.
+    let rec2 = bench.start_recording().await;
+    assert_ne!(rec2, rec1);
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let starts2: Vec<_> = bench
+        .seen()
+        .of("recording.start")
+        .into_iter()
+        .filter(|l| l.text("rec") == Some(rec2.as_str()))
+        .collect();
+    assert_eq!(starts2.len(), 1);
+    let statuses2: Vec<_> = bench
+        .seen()
+        .of("session.status")
+        .into_iter()
+        .filter(|l| l.text("rec") == Some(rec2.as_str()))
+        .collect();
+    assert_eq!(statuses2.len(), 1);
+    assert_eq!(statuses2[0].text("from"), Some("Connecting"));
+    assert_eq!(statuses2[0].text("to"), Some("Recording"));
+    let ends2: Vec<_> = bench
+        .seen()
+        .of("recording.end")
+        .into_iter()
+        .filter(|l| l.text("rec") == Some(rec2.as_str()))
+        .collect();
+    assert_eq!(ends2.len(), 1);
+    assert_eq!(ends2[0].text("code"), Some("done"));
+
+    bench.finish();
+}
+
 // ---- 3. I2: slow/blocked paths never stall captions or commands ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -546,7 +847,7 @@ async fn i2_a_tape_that_stands_still_holds_no_caption_back() {
             .await
             .expect("overflowing tape queue must end recording with code `tape`");
         bench
-            .wait_state(|s| s.session.is_none(), Duration::from_secs(6))
+            .wait_session(|s| s.is_none(), Duration::from_secs(6))
             .await
             .expect("recording must end after tape overflow");
     }
@@ -639,16 +940,16 @@ async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
     // Pause and Resume must respond.
     bench.send(Command::Pause);
     bench
-        .wait_state(
-            |s| matches!(&s.session, Some(sess) if sess.status == Status::Paused),
+        .wait_session(
+            |s| matches!(s, Some(sess) if sess.status == Status::Paused),
             Duration::from_secs(4),
         )
         .await
         .expect("Pause did not take effect while export was blocked");
     bench.send(Command::Resume);
     bench
-        .wait_state(
-            |s| matches!(&s.session, Some(sess) if sess.status != Status::Paused),
+        .wait_session(
+            |s| matches!(s, Some(sess) if sess.status != Status::Paused),
             Duration::from_secs(4),
         )
         .await

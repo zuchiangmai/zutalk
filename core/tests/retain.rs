@@ -136,11 +136,11 @@ async fn audio_destroyed_at_the_persons_word_is_gone_for_good_and_its_text_stays
     app.notice("recording.gone").await;
     // Not while it is being recorded.
     app.send(Command::Start);
-    let id = app.until(|state| state.session.is_some()).await.session.expect("one").id;
+    let id = app.session(|s| s.is_some()).await.expect("one").id;
     app.send(Command::DestroyAudio { id });
     app.notice("recording.under_way").await;
     app.send(Command::Stop);
-    app.until(|state| state.session.is_none()).await;
+    app.session(|s| s.is_none()).await;
     drop(app);
     // Started again, the draft without its audio is not written again: its text stays.
     let mut app = App::with(config(data));

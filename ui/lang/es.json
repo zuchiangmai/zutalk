@@ -141,6 +141,7 @@
  "code.migrate.audio": "Su audio de ZuTalk 0.8 no se abre",
  "code.captions.off": "Sin texto en vivo",
  "code.captions.no_key": "Sin clave para texto en vivo",
+ "code.captions.columns": "Como máximo cuatro idiomas de subtítulos a la vez",
  "code.disk": "No se pudo escribir en el disco",
  "code.journal": "El registro de avance de la transcripción está dañado",
  "code.id.code": "No se pudo crear el código de inicio de sesión",

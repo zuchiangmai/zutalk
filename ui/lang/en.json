@@ -141,6 +141,7 @@
  "code.migrate.audio": "Its audio from ZuTalk 0.8 does not open",
  "code.captions.off": "No live text",
  "code.captions.no_key": "No key for live text",
+ "code.captions.columns": "At most four caption languages at once",
  "code.disk": "Could not write to disk",
  "code.journal": "The transcript’s progress record is damaged",
  "code.id.code": "The sign-in code could not be made",

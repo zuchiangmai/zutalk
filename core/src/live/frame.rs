@@ -42,6 +42,27 @@ pub enum Status {
     Behind,
 }
 
+impl Status {
+    /// Stable plain code for structured log events (`P1.md` §3.13.11).
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Status::Recording => "Recording",
+            Status::Paused => "Paused",
+            Status::AudioOnly { .. } => "AudioOnly",
+            Status::Connecting => "Connecting",
+            Status::Behind => "Behind",
+        }
+    }
+
+    /// Reason code carried by `AudioOnly`, or `""` for every other status.
+    pub fn why(&self) -> &str {
+        match self {
+            Status::AudioOnly { why } => why.as_str(),
+            Status::Recording | Status::Paused | Status::Connecting | Status::Behind => "",
+        }
+    }
+}
+
 /// One caption, cut where it may be revealed: `units` are where each one ends, as UTF-16
 /// offsets in `text` (only on a tail).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -113,6 +134,18 @@ pub fn status(paused: bool, links: &[Link], quiet: &str) -> Status {
         Status::Behind
     } else {
         Status::Recording
+    }
+}
+
+/// Static reason code for [`status`]: non-empty only when the status is `AudioOnly`.
+pub fn status_reason(paused: bool, links: &[Link], quiet: &'static str) -> &'static str {
+    if !paused && links.iter().all(|l| matches!(l, Link::Stopped(_))) {
+        links
+            .iter()
+            .find_map(|l| if let Link::Stopped(why) = l { Some(*why) } else { None })
+            .unwrap_or(quiet)
+    } else {
+        ""
     }
 }
 

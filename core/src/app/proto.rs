@@ -8,11 +8,14 @@ use crate::knowledge::glossary::Term;
 pub use crate::live::frame::{Caption, Column, Frame, Status};
 use crate::out::city::{Calendar, Filing};
 use crate::record::shelf::Said;
+use crate::rt::stats::Tally;
+use crate::rt::water::Water;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use ts_rs::TS;
 
-/// Everything on screen that is not live text. It is small, so it is never patched.
+/// Everything on screen that is not live text or a signal.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct State {
@@ -27,7 +30,6 @@ pub struct State {
     pub devices: Vec<Device>,
     pub languages: Vec<String>, // the ones there are rules for
     pub exporters: Vec<String>,
-    pub session: Option<Session>,
     pub library: Vec<Row>,
     pub open: Option<Open>,
     pub hits: Vec<(String, String)>, // a recording's id and a line's key
@@ -95,6 +97,24 @@ pub struct Level {
     pub rms: u16,
 }
 
+impl Level {
+    /// Peak and root-mean-square amplitude of a 16-bit PCM slice (`0` when empty).
+    pub fn of(pcm: &[i16]) -> Self {
+        if pcm.is_empty() {
+            return Self::default();
+        }
+        let mut peak = 0u16;
+        let mut sum_sq = 0u64;
+        for &sample in pcm {
+            let amp = sample.unsigned_abs();
+            peak = peak.max(amp);
+            sum_sq += u64::from(amp) * u64::from(amp);
+        }
+        let rms = (sum_sq as f64 / pcm.len() as f64).sqrt().round() as u16;
+        Self { peak, rms }
+    }
+}
+
 /// The codes said lately, oldest first, and the number the next one will have. At most
 /// [`Notices::KEEP_CODES`] are kept: a reader that falls further behind misses the oldest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
@@ -142,14 +162,35 @@ pub struct Room {
     pub link: String,
 }
 
-/// Live columns are ready to draw: the interface does not merge, it replaces. A notice is
-/// said once, as a code the interface has words for.
+/// One signal value stamped with the monotonic sequence number of its own signal kind (`P1.md` §3.3).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct Stamped {
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub signal: Signal,
+}
+
+/// Latest-value signals pushed from the core to the interface (`P1.md` §3.3).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+#[serde(tag = "of", content = "is")]
+pub enum Signal {
+    Frame(Arc<Frame>),
+    Session(Arc<Option<Session>>),
+    Level(Arc<Level>),
+    Water(Arc<Water>),
+    Stats(Arc<Tally>),
+}
+
+/// Bounded state replaced whole, latest-value signals stamped with per-kind sequence numbers,
+/// or one-shot notice codes (`P1.md` §3.3).
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "kind", content = "is")]
 pub enum Event {
-    State(Box<State>),
-    Live(Vec<Column>),
+    State(Arc<State>),
+    Signal(Stamped),
     Notice(String),
 }
 

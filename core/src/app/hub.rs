@@ -14,7 +14,7 @@ use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
 use crate::capture::tape::{self, Reels};
 use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
-use crate::live::frame::{Composer, Fit, Frame, status};
+use crate::live::frame::{Composer, Fit, Frame, MAX_COLUMNS, status, status_reason};
 use crate::live::lane::{self, Mode, Stream};
 use crate::live::lines::Line;
 use crate::live::wire::{self, Dial};
@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
-use zutalk_log::{Level, info, warn};
+use zutalk_log::{Id, Level, error, info, warn};
 
 const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
@@ -132,8 +132,6 @@ impl Config {
 
 enum Msg {
     Do(Command),
-    Live(String, Frame),
-    Status(String, Status),
     Ended(String),
     Writing(Writing),
     Wrote(String),
@@ -146,7 +144,6 @@ enum Msg {
     Filed(String, &'static str),
     Moving(Writing),
     Moved(Result<Vec<(String, String)>, &'static str>),
-    Say(&'static str),
 }
 
 /// Everything the core says outward: latest-value registers readable at once or on change,
@@ -232,8 +229,8 @@ impl Core {
             state_reg,
             state_sent,
             frame_reg,
-            _session_reg: session_reg,
-            _level_reg: level_reg,
+            session_reg,
+            level_reg,
             _water_reg: water_reg,
             said,
             http,
@@ -300,8 +297,8 @@ struct Hub {
     state_reg: Register<State>,
     state_sent: Counter,
     frame_reg: Register<Frame>,
-    _session_reg: Register<Option<Session>>,
-    _level_reg: Register<SoundLevel>,
+    session_reg: Register<Option<Session>>,
+    level_reg: Register<SoundLevel>,
     _water_reg: Register<Water>,
     said: Voice,
     http: reqwest::Client,
@@ -366,14 +363,8 @@ impl Hub {
     }
 
     fn take(&mut self, msg: Msg) -> Result<(), &'static str> {
-        let reread = !matches!(msg, Msg::Live(..) | Msg::Status(..));
         match msg {
             Msg::Do(command) => self.command(command)?,
-            Msg::Live(id, frame) if self.under_way(&id) => self.frame_reg.set(frame),
-            Msg::Status(id, status) => {
-                let session = self.state.session.as_mut().filter(|s| s.id == id);
-                session.into_iter().for_each(|session| session.status = status.clone());
-            }
             Msg::Ended(id) if self.under_way(&id) => self.stop(),
             Msg::Writing(writing) => {
                 self.state.writing.retain(|w| w.id != writing.id);
@@ -408,10 +399,9 @@ impl Hub {
                 (self.moving, self.state.moving) = (false, None);
                 self.state.unmoved = skipped?;
             }
-            Msg::Say(code) => return Err(code),
-            Msg::Live(..) | Msg::Ended(..) => {} // from a recording that has stopped
+            Msg::Ended(_) => {} // from a recording that has stopped
         }
-        if reread { self.refresh() } else { Ok(()) }
+        self.refresh()
     }
 
     fn shelf(&self) -> Result<Arc<Shelf>, &'static str> {
@@ -439,6 +429,9 @@ impl Hub {
             Command::Resume => self.mode(Mode::Recording)?,
             Command::Stop => self.stop(),
             Command::Setup { setup } => {
+                if setup.shown.len() > MAX_COLUMNS {
+                    return Err("captions.columns");
+                }
                 let json = serde_json::to_vec(&setup).map_err(|_| "settings")?;
                 let saved = fs::create_dir_all(&self.config.data)
                     .and_then(|()| fs::write(self.config.data.join("settings.json"), json));
@@ -520,7 +513,8 @@ impl Hub {
             }
             Command::Captions { show } => self.state.captions = show,
             Command::DestroyAudio { id } => {
-                retain::destroy(&self.config.tapes(), &self.state, &id)?
+                let under_way = self.recording.as_ref().map(|(rec, _)| rec.as_str());
+                retain::destroy(&self.config.tapes(), &self.state.library, under_way, &id)?
             }
             Command::Term { said, written } => {
                 glossary::put(&*self.shelf()?, &said, written, now())?
@@ -581,14 +575,19 @@ impl Hub {
     }
 
     fn task(&self, id: &str, shelf: &Arc<Shelf>) -> Task {
-        let (config, tx, keys, shelf, stats) = (
-            self.config.clone(),
-            self.tx.clone(),
-            self.keys.clone(),
-            shelf.clone(),
-            self.tree.stats().clone(),
-        );
-        Task { id: id.into(), shelf, keys, config, tx, stats, terms: self.state.terms.clone() }
+        Task {
+            id: id.into(),
+            shelf: shelf.clone(),
+            keys: self.keys.clone(),
+            config: self.config.clone(),
+            tx: self.tx.clone(),
+            frame: self.frame_reg.clone(),
+            session: self.session_reg.clone(),
+            level: self.level_reg.clone(),
+            said: self.said.clone(),
+            stats: self.tree.stats().clone(),
+            terms: self.state.terms.clone(),
+        }
     }
 
     /// A recording from the sound the person chose, or from a file: a file has no live
@@ -616,11 +615,11 @@ impl Hub {
         let about =
             About { started, title, spoken, shown, source: source_name, ..About::default() };
         shelf.put(&id, RECORDING, &[(id.clone(), Some(about.clone()))], started).map_err(fail)?;
+        self.session_reg.set(Some(Session { id: id.clone(), started, status: initial }));
         let (mode, watching) = watch::channel(Mode::Recording);
         tokio::spawn(zutalk_log::carry(
             self.task(&id, &shelf).record(source, about, captions, watching),
         ));
-        self.state.session = Some(Session { id: id.clone(), started, status: initial });
         self.recording = Some((id, mode));
         Ok(())
     }
@@ -633,8 +632,9 @@ impl Hub {
     fn stop(&mut self) {
         if let Some((id, mode)) = self.recording.take() {
             mode.send_replace(Mode::Stopped);
+            self.session_reg.set(None);
             self.frame_reg.set(Frame::default());
-            self.state.session = None;
+            self.level_reg.set(SoundLevel::default());
             self.state.writing.push(writing(&id, "closing"));
         }
     }
@@ -748,7 +748,7 @@ impl Hub {
             self.slot.take().into_iter().for_each(|(_, task)| task.abort());
             if let (Some(id), Some(ours)) = (live, self.ours.clone()) {
                 let task =
-                    tokio::spawn(slot(ours, id.clone(), self.frame_reg.read(), self.tx.clone()));
+                    tokio::spawn(slot(ours, id.clone(), self.frame_reg.read(), self.said.clone()));
                 self.slot = Some((id, task.abort_handle()));
             }
         }
@@ -858,14 +858,15 @@ impl Hub {
             return;
         }
         self.state.writing.extend(owing.iter().map(|task| writing(&task.id, "closing")));
-        let (soniox, keys, tx) = (self.config.soniox.clone(), self.keys.clone(), self.tx.clone());
+        let (soniox, keys, said) =
+            (self.config.soniox.clone(), self.keys.clone(), self.said.clone());
         tokio::spawn(zutalk_log::carry(async move {
             if let End::Retry(code) | End::Fatal(code) = write::sweep(&tapes, &soniox, &*keys).await
             {
-                let _ = tx.send(Msg::Say(code)); // dropped: unbounded mailbox; fails only after the hub has stopped
+                said.say(code);
             }
             for task in owing {
-                drop(tokio::spawn(zutalk_log::carry(task.finish()))); // dropped: detached handle until P1-21 moves finishing onto the tree
+                drop(tokio::spawn(zutalk_log::carry(task.finish_recovered()))); // dropped: detached handle until P1-21 moves finishing onto the tree
             }
         }));
     }
@@ -879,10 +880,10 @@ fn open(recording: Recording, tapes: &Path) -> Open {
 
 /// Keeps a live room's slot showing what the captions show: the latest, at most every
 /// `SLOT_MS`, and nothing between recordings. Its trouble is said once, when it changes.
-async fn slot(ours: Ours, id: String, mut live: Reading<Frame>, tx: Sender) {
+async fn slot(ours: Ours, id: String, mut live: Reading<Frame>, voice: Voice) {
     let key = match keys::derive("room", &id) {
         Ok(key) => key,
-        Err(end) => return drop(tx.send(Msg::Say(code(end)))), // dropped: unbounded mailbox; fails only after the hub has stopped
+        Err(end) => return voice.say(code(end)),
     };
     let mut said = None;
     let (_, mut current) = live.now();
@@ -891,7 +892,7 @@ async fn slot(ours: Ours, id: String, mut live: Reading<Frame>, tx: Sender) {
             serde_json::to_vec(&current.columns).ok().filter(|_| !current.columns.is_empty());
         let wrote = room::write(&ours, &id, &key, Write::Slot(bytes.as_deref())).await.err();
         if wrote != said {
-            wrote.into_iter().for_each(|end| drop(tx.send(Msg::Say(code(end))))); // dropped: unbounded mailbox; fails only after the hub has stopped
+            wrote.into_iter().for_each(|end| voice.say(code(end)));
             said = wrote;
         }
         tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
@@ -929,6 +930,21 @@ fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<(), &'static str> {
 
 type Sender = mpsc::UnboundedSender<Msg>;
 
+enum ListenEnd {
+    StoppedByHub,
+    EndedByCapture(&'static str),
+}
+
+fn end_once(ended: &watch::Sender<Option<&'static str>>, why: &'static str) {
+    ended.send_if_modified(|current| {
+        let first = current.is_none();
+        if first {
+            *current = Some(why);
+        }
+        first
+    });
+}
+
 /// One recording, from its first block to its written transcript.
 struct Task {
     id: String,
@@ -936,6 +952,10 @@ struct Task {
     keys: Arc<Chain>,
     config: Arc<Config>,
     tx: Sender,
+    frame: Register<Frame>,
+    session: Register<Option<Session>>,
+    level: Register<SoundLevel>,
+    said: Voice,
     stats: Stats,
     terms: Vec<Term>, // the glossary as it was when the task began
 }
@@ -949,6 +969,29 @@ impl Task {
         self.config.tapes().join(&self.id)
     }
 
+    fn is_active(&self) -> bool {
+        (*self.session.read().now().1).as_ref().is_some_and(|s| s.id == self.id)
+    }
+
+    fn report_status(&self, told: &mut Option<Status>, next: Status, why: &'static str) {
+        if told.as_ref() == Some(&next) {
+            return;
+        }
+        let mut active = false;
+        self.session.change(|current| {
+            let session = current.as_ref().filter(|s| s.id == self.id)?;
+            active = true;
+            (session.status != next)
+                .then(|| Some(Session { status: next.clone(), ..session.clone() }))
+        });
+        if !active {
+            return;
+        }
+        let from = told.as_ref().map_or("", Status::code);
+        *told = Some(next.clone());
+        info!("session.status", rec = Id(&self.id), from = from, to = next.code(), why = why);
+    }
+
     async fn record(
         self,
         source: Source,
@@ -956,12 +999,38 @@ impl Task {
         captions: Result<Vec<Stream>, &'static str>,
         mode: watch::Receiver<Mode>,
     ) {
-        if let Err(code) = self.listen(source, &about, captions, mode).await {
-            // Whatever ends the listening ends the recording; what was kept is kept.
-            self.tell(Msg::Say(code));
-            self.tell(Msg::Ended(self.id.clone()));
-        }
-        self.finish().await;
+        let started_at = tokio::time::Instant::now();
+        let source_code = source.code();
+        let (lanes, columns, captions_code) = match &captions {
+            Ok(streams) => (streams.len(), about.shown.len().min(MAX_COLUMNS), "live"),
+            Err(why) => (0, 0, *why),
+        };
+        info!(
+            "recording.start",
+            rec = Id(&self.id),
+            source = source_code,
+            lanes = lanes,
+            columns = columns,
+            captions = captions_code,
+        );
+        let end_code = match self.listen(source, &about, captions, mode).await {
+            Ok(ListenEnd::StoppedByHub) => "done",
+            Ok(ListenEnd::EndedByCapture(_)) => {
+                self.tell(Msg::Ended(self.id.clone()));
+                "done"
+            }
+            Err(code) => {
+                // Whatever ends the listening ends the recording; what was kept is kept.
+                self.said.say(code);
+                self.tell(Msg::Ended(self.id.clone()));
+                code
+            }
+        };
+        self.finish(Some((started_at, end_code))).await;
+    }
+
+    async fn finish_recovered(self) {
+        self.finish(None).await;
     }
 
     /// Hears until the recording stops: the tape, the captions, and the live draft, which is
@@ -973,7 +1042,7 @@ impl Task {
         about: &About,
         captions: Result<Vec<Stream>, &'static str>,
         mut mode: watch::Receiver<Mode>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<ListenEnd, &'static str> {
         let key = keys::derive("tape", &self.id).map_err(code)?;
         let mut tape = (self.config.reels)(&self.tape(), &key).map_err(|_| "tape")?;
         let (streams, quiet) = match captions {
@@ -999,23 +1068,26 @@ impl Task {
             }));
         }
         drop(lanes);
-        let (tx, id, mut kept) = (self.tx.clone(), self.id.clone(), true);
+        let (ended_tx, mut ended_rx) = watch::channel(None);
+        let (ended, level, mode_rx, mut kept) =
+            (ended_tx.clone(), self.level.clone(), mode.clone(), true);
         let sink = move |block: Block| {
-            // Without the tape there is no recording: say so, and end it.
+            // Without the tape there is no recording: record why and end it.
             if kept && tape.append(&block).is_err() {
                 kept = false;
-                let _ = tx.send(Msg::Say("tape")); // dropped: unbounded mailbox; fails only after the hub has stopped
-                let _ = tx.send(Msg::Ended(id.clone())); // dropped: unbounded mailbox; fails only after the hub has stopped
+                end_once(&ended, "tape");
+            }
+            if *mode_rx.borrow() == Mode::Recording {
+                level.set(SoundLevel::of(&block.pcm));
             }
             let _ = audio.send(Arc::new(block)); // dropped: broadcast fails only when no caption lanes are listening
         };
-        let (tx, id) = (self.tx.clone(), self.id.clone());
-        let notice = move |notice| {
-            let msg = match notice {
-                Notice::Ended => Msg::Ended(id.clone()),
-                Notice::Restarted(code) | Notice::Fatal(code) => Msg::Say(code),
-            };
-            let _ = tx.send(msg); // dropped: unbounded mailbox; fails only after the hub has stopped
+        let file = matches!(source, Source::File(_));
+        let (ended, said) = (ended_tx, self.said.clone());
+        let notice = move |notice| match notice {
+            Notice::Ended => end_once(&ended, if file { "done" } else { "audio.closed" }),
+            Notice::Fatal(code) if file => end_once(&ended, code),
+            Notice::Restarted(code) | Notice::Fatal(code) => said.say(code),
         };
         let mut capture =
             Some((self.config.hear)(source, Box::new(sink), Box::new(notice)).map_err(code)?);
@@ -1027,17 +1099,35 @@ impl Task {
             self.stats.counter("frame.cut"),
             self.stats.peak("frame.bound_bytes"),
         );
-        let (mut last_fit, mut told) = (Fit::Whole, None);
+        let mut last_fit = Fit::Whole;
+        let mut told = quiet.is_empty().then_some(Status::Connecting);
+        let mut outcome = ListenEnd::StoppedByHub;
         while capture.is_some() || open {
             tokio::select! {
                 changed = mode.changed(), if capture.is_some() => {
                     let now = changed.map_or(Mode::Stopped, |()| *mode.borrow_and_update());
                     match (now, &capture) {
-                        (Mode::Paused, Some(capture)) => capture.pause(),
+                        (Mode::Paused, Some(capture)) => {
+                            capture.pause();
+                            if self.is_active() {
+                                self.level.set(SoundLevel::default());
+                            }
+                        }
                         (Mode::Recording, Some(capture)) => capture.resume(),
                         _ => capture = None, // the last blocks are delivered, the tape closed
                     }
                     composer.pause(now == Mode::Paused);
+                }
+                changed = ended_rx.changed(), if capture.is_some() => {
+                    if changed.is_ok()
+                        && let Some(why) = *ended_rx.borrow_and_update()
+                    {
+                        outcome = ListenEnd::EndedByCapture(why);
+                        capture = None;
+                        if self.is_active() {
+                            self.level.set(SoundLevel::default());
+                        }
+                    }
                 }
                 event = heard.recv(), if open => match event {
                     None => open = false,
@@ -1067,22 +1157,45 @@ impl Task {
                             );
                             last_fit = fit;
                         }
-                        self.tell(Msg::Live(self.id.clone(), frame));
-                        let status = status(composer.paused(), composer.links(), quiet);
-                        if told.replace(status.clone()) != Some(status.clone()) {
-                            self.tell(Msg::Status(self.id.clone(), status));
+                        if *mode.borrow() != Mode::Stopped && self.is_active() {
+                            self.frame.set(frame);
                         }
+                        let next = status(composer.paused(), composer.links(), quiet);
+                        let why = status_reason(composer.paused(), composer.links(), quiet);
+                        self.report_status(&mut told, next, why);
                     }
                 }
             }
         }
-        draft.sync().map_err(fail)
+        draft.sync().map_err(fail)?;
+        match outcome {
+            ListenEnd::EndedByCapture(why) if why != "done" => Err(why),
+            other => Ok(other),
+        }
     }
 
     /// The tape is closed: a torn tail is cut off, its length goes on the record, and its
     /// transcript is written. A recording that kept no sound is nothing, and is removed.
-    async fn finish(self) {
-        match self.seal().await {
+    async fn finish(self, recorded: Option<(tokio::time::Instant, &'static str)>) {
+        let sealed = self.seal().await;
+        match (&sealed, recorded) {
+            (Err(code), Some((started_at, "done"))) => {
+                self.said.say(code);
+                let ms = started_at.elapsed().as_millis() as u64;
+                error!("recording.end", rec = Id(&self.id), code = *code, ms = ms);
+            }
+            (_, Some((started_at, end_code))) => {
+                let ms = started_at.elapsed().as_millis() as u64;
+                if end_code == "done" {
+                    info!("recording.end", rec = Id(&self.id), code = end_code, ms = ms);
+                } else {
+                    error!("recording.end", rec = Id(&self.id), code = end_code, ms = ms);
+                }
+            }
+            (Err(code), None) => self.said.say(code),
+            (Ok(_), None) => {}
+        }
+        match sealed {
             Ok(Some(about)) if about.length_ms == 0 => drop(fs::remove_dir_all(self.tape())),
             Ok(Some(about)) => {
                 let audio = tape::kept(&self.tape());
@@ -1094,7 +1207,7 @@ impl Task {
                 }
             }
             Ok(None) => {} // removed meanwhile: the tape stays for a restore
-            Err(code) => self.tell(Msg::Say(code)),
+            Err(_) => {}
         }
         self.tell(Msg::Wrote(self.id.clone()));
     }
@@ -1145,7 +1258,7 @@ impl Task {
             }
         });
         if let Err(end) = written.await {
-            self.tell(Msg::Say(code(end)));
+            self.said.say(code(end));
         }
     }
 }

@@ -2,7 +2,7 @@
   import type { Setup } from '$proto/Setup';
   import type { Sound } from '$proto/Sound';
   import type { State } from '$proto/State';
-  import { pick, send } from '../lib/core.svelte';
+  import { pick, send, store } from '../lib/core.svelte';
   import { t, word } from '../lib/words.svelte';
   import Langs from './Langs.svelte';
   import Meta from './Meta.svelte';
@@ -20,8 +20,8 @@
 
 <section class="start">
   <p>
-    <button class="primary" disabled={!!s.session} onclick={() => send({ do: 'Start' })}>{t('start')}</button>
-    <button disabled={!!s.session} onclick={take}>{t('import')}</button>
+    <button class="primary" disabled={!!store.session} onclick={() => send({ do: 'Start' })}>{t('start')}</button>
+    <button disabled={!!store.session} onclick={take}>{t('import')}</button>
   </p>
   <Langs label={t('setup.spoken')} all={s.languages} list={s.setup.spoken} set={(spoken) => set({ spoken })} />
   <Langs label={t('setup.shown')} all={s.languages} list={s.setup.shown} set={(shown) => set({ shown })} />

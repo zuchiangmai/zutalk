@@ -5,12 +5,11 @@ import type { From } from "./From";
 import type { Open } from "./Open";
 import type { Room } from "./Room";
 import type { Row } from "./Row";
-import type { Session } from "./Session";
 import type { Setup } from "./Setup";
 import type { Term } from "./Term";
 import type { Writing } from "./Writing";
 
 /**
- * Everything on screen that is not live text. It is small, so it is never patched.
+ * Everything on screen that is not live text or a signal.
  */
-export type State = { me: string | null, login: string | null, rotation_unsaved: boolean, update: string | null, keys: Array<[string, From]>, left: number | null, setup: Setup, devices: Array<Device>, languages: Array<string>, exporters: Array<string>, session: Session | null, library: Array<Row>, open: Open | null, hits: Array<[string, string]>, rooms: Array<Room>, terms: Array<Term>, city: Calendar | null, writing: Array<Writing>, filing: Array<Writing>, moving: Writing | null, unmoved: Array<[string, string]>, captions: boolean, };
+export type State = { me: string | null, login: string | null, rotation_unsaved: boolean, update: string | null, keys: Array<[string, From]>, left: number | null, setup: Setup, devices: Array<Device>, languages: Array<string>, exporters: Array<string>, library: Array<Row>, open: Open | null, hits: Array<[string, string]>, rooms: Array<Room>, terms: Array<Term>, city: Calendar | null, writing: Array<Writing>, filing: Array<Writing>, moving: Writing | null, unmoved: Array<[string, string]>, captions: boolean, };

@@ -25,7 +25,7 @@ use tape::{CountingTape, GatedTape};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use zutalk_core::app::hub::{Config, Core, Outlet};
-use zutalk_core::app::proto::{Column, Command, Frame, Setup, State, Status};
+use zutalk_core::app::proto::{Column, Command, Frame, Session, Setup, State, Status};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::Shelf;
 use zutalk_core::rt::stats::{PeakRow, QueueRow, Tally};
@@ -101,9 +101,9 @@ impl BenchOptions {
 struct ProbeState {
     /// First virtual instant each spoken word (`id - 1`) appeared in a live caption frame.
     word_seen: Vec<Option<Instant>>,
-    /// Total `Event::Live` frames received.
+    /// Total live `Frame` updates received.
     frames: u64,
-    /// `Event::Live` frames carrying at least one column.
+    /// Live `Frame` updates carrying at least one column.
     non_empty_column_frames: u64,
     /// Whether column `i` ever carried non-empty caption text.
     column_active: Vec<bool>,
@@ -113,6 +113,8 @@ struct ProbeState {
     max_frame_bytes: usize,
     /// Latest whole `State` snapshot from the core.
     state: Option<State>,
+    /// Latest `Session` signal from the core (`None` when idle).
+    session: Option<Session>,
     /// Serialized JSON size of the latest `State` snapshot.
     last_state_bytes: usize,
     /// Distinct session statuses seen since the last reset.
@@ -131,6 +133,7 @@ impl ProbeState {
             max_bound_bytes: 0,
             max_frame_bytes: 0,
             state: None,
+            session: None,
             last_state_bytes: 0,
             statuses: Vec::new(),
             notices: Vec::new(),
@@ -174,12 +177,16 @@ impl ProbeState {
     }
 
     fn take_state(&mut self, state: State) {
-        if let Some(session) = &state.session
-            && self.statuses.last() != Some(&session.status)
-        {
-            self.statuses.push(session.status.clone());
-        }
         self.state = Some(state);
+    }
+
+    fn take_session(&mut self, session: Option<Session>) {
+        if let Some(ref s) = session
+            && self.statuses.last() != Some(&s.status)
+        {
+            self.statuses.push(s.status.clone());
+        }
+        self.session = session;
     }
 
     fn take_notice(&mut self, code: String) {
@@ -313,15 +320,19 @@ impl Bench {
         let drain_task = tokio::spawn(async move {
             let (mut state_seq, initial_state) = drain_outlet.state.now();
             let (mut frame_seq, initial_frame) = drain_outlet.frame.now();
+            let (mut session_seq, initial_session) = drain_outlet.session.now();
             let (_, initial_said) = drain_outlet.said.now();
             let mut said_at = initial_said.next;
-            if state_seq > 0 || frame_seq > 0 || initial_said.next > 0 {
+            if state_seq > 0 || frame_seq > 0 || session_seq > 0 || initial_said.next > 0 {
                 let mut state = drain_probe.lock().expect("probe lock");
                 if state_seq > 0 {
                     state.take_state((*initial_state).clone());
                 }
                 if frame_seq > 0 {
                     state.take_live(Instant::now(), &initial_frame);
+                }
+                if session_seq > 0 {
+                    state.take_session((*initial_session).clone());
                 }
                 for code in &initial_said.codes {
                     state.take_notice(code.clone());
@@ -337,6 +348,16 @@ impl Bench {
                                 frame_seq = seq;
                                 let at = Instant::now();
                                 drain_probe.lock().expect("probe lock").take_live(at, &frame);
+                                drain_notify.notify_waiters();
+                            }
+                        }
+                        None => break,
+                    },
+                    next = drain_outlet.session.next() => match next {
+                        Some((seq, s)) => {
+                            if seq > session_seq {
+                                session_seq = seq;
+                                drain_probe.lock().expect("probe lock").take_session((*s).clone());
                                 drain_notify.notify_waiters();
                             }
                         }
@@ -456,11 +477,12 @@ impl Bench {
         self.probe.lock().expect("probe lock").statuses.clear();
         self.mic.reset_for_next();
         self.send(Command::Start);
-        let state = self
-            .wait_state(|s| s.session.is_some(), Duration::from_secs(10))
+        let session = self
+            .wait_session(|s| s.is_some(), Duration::from_secs(10))
             .await
-            .expect("recording session started");
-        let id = state.session.expect("session").id;
+            .expect("recording session started")
+            .expect("session");
+        let id = session.id;
         // Wait until `Task::listen` has invoked `config.hear`.
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.mic.started_at().is_none() {
@@ -470,12 +492,39 @@ impl Bench {
         id
     }
 
-    /// Stops the active recording and waits until `State.session` clears.
+    /// Stops the active recording and waits until `Outlet.session` clears.
     pub async fn stop_recording(&self) {
         self.send(Command::Stop);
-        self.wait_state(|s| s.session.is_none(), Duration::from_secs(15))
+        self.wait_session(|s| s.is_none(), Duration::from_secs(15))
             .await
             .expect("recording session stopped");
+    }
+
+    /// Waits until `pred` holds on `Outlet.session`, or returns `Err` on timeout.
+    pub async fn wait_session(
+        &self,
+        pred: impl Fn(Option<&Session>) -> bool,
+        limit: Duration,
+    ) -> Result<Option<Session>, String> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let notified = self.notify.notified();
+            let current = (*self.outlet.session.now().1).clone();
+            if pred(current.as_ref()) {
+                return Ok(current);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for session signal".into());
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                let latest = (*self.outlet.session.now().1).clone();
+                if pred(latest.as_ref()) {
+                    return Ok(latest);
+                }
+                return Err("timed out waiting for session signal".into());
+            }
+        }
     }
 
     /// Waits until `pred` holds on the latest `State`, or returns `Err` on timeout.
@@ -566,13 +615,7 @@ impl Bench {
     }
 
     pub fn status(&self) -> Option<Status> {
-        self.probe
-            .lock()
-            .expect("probe lock")
-            .state
-            .as_ref()
-            .and_then(|s| s.session.as_ref())
-            .map(|s| s.status.clone())
+        (*self.outlet.session.now().1).as_ref().map(|s| s.status.clone())
     }
 
     pub fn statuses(&self) -> Vec<Status> {

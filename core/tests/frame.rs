@@ -280,6 +280,18 @@ fn a_columns_health_is_its_links() {
 fn the_status_line_says_what_most_needs_saying() {
     use Link::{Behind, Connecting, Live, Stopped};
     let only = |why: &str| Status::AudioOnly { why: why.into() };
+    assert_eq!(
+        [
+            Status::Recording.code(),
+            Status::Paused.code(),
+            only("captions.off").code(),
+            Status::Connecting.code(),
+            Status::Behind.code(),
+        ],
+        ["Recording", "Paused", "AudioOnly", "Connecting", "Behind"]
+    );
+    assert_eq!(Status::Recording.why(), "");
+    assert_eq!(only("captions.no_key").why(), "captions.no_key");
     assert_eq!(status(true, &[Connecting], "captions.off"), Status::Paused);
     assert_eq!(status(false, &[], "captions.off"), only("captions.off"));
     assert_eq!(status(false, &[], "captions.no_key"), only("captions.no_key"));

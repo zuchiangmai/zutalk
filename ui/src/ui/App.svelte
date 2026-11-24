@@ -9,13 +9,14 @@
   // What is on screen. An open recording is the core's; the rest is where the person went.
   let page = $state<'home' | 'live' | 'settings'>('home');
   const s = $derived(store.state);
+  const session = $derived(store.session);
   let was: string | undefined;
   $effect(() => {
-    const id = s?.session?.id;
+    const id = session?.id;
     if (id !== was) page = id ? 'live' : 'home';
     was = id;
   });
-  const pages = $derived<(typeof page)[]>(s?.session ? ['home', 'live', 'settings'] : ['home', 'settings']);
+  const pages = $derived<(typeof page)[]>(session ? ['home', 'live', 'settings'] : ['home', 'settings']);
   const go = (to: typeof page) => ((page = to), s?.open && send({ do: 'Close' }));
   // Each notice is said once, for a moment; one that can be undone stays a little longer.
   const top = $derived(store.notices[0]);
@@ -33,11 +34,11 @@
       <button aria-current={p === page && !s.open ? 'page' : undefined} onclick={() => go(p)}>{t(`nav.${p}`)}</button>
     {/each}
     <!-- Installing relaunches the app, so it is not offered while recording. -->
-    {#if s.update && !s.session}<button class="primary" title={s.update} onclick={() => send({ do: 'Update' })}>{t('update')}</button>{/if}
+    {#if s.update && !session}<button class="primary" title={s.update} onclick={() => send({ do: 'Update' })}>{t('update')}</button>{/if}
   </header>
   <main>
     {#if s.open}<Reader {s} open={s.open} />
-    {:else if page === 'live' && s.session}<Live {s} session={s.session} />
+    {:else if page === 'live' && session}<Live {s} {session} />
     {:else if page === 'settings'}<Settings {s} />
     {:else}<Home {s} />{/if}
   </main>

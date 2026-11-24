@@ -13,7 +13,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
 use zutalk_core::ai::write::wav_header;
 use zutalk_core::app::hub::{Config, Core, Outlet};
-use zutalk_core::app::proto::{Command, Frame, State};
+use zutalk_core::app::proto::{Command, Frame, Session, State};
 use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
 use zutalk_core::capture::clock::{BLOCK, Block, Gap, wall_ms};
 use zutalk_core::capture::tape;
@@ -183,6 +183,19 @@ impl App {
                 }
             }
             panic!("the core stopped");
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("it came in time")
+    }
+
+    pub async fn session(&mut self, holds: impl Fn(Option<&Session>) -> bool) -> Option<Session> {
+        let wait = async {
+            loop {
+                let (_, current) = self.outlet.session.now();
+                if holds((*current).as_ref()) {
+                    return (*current).clone();
+                }
+                self.outlet.session.next().await.expect("the core runs");
+            }
         };
         timeout(Duration::from_secs(20), wait).await.expect("it came in time")
     }

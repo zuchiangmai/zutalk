@@ -1,8 +1,10 @@
 // A scripted core, so `npm run dev` shows every surface in a browser. Not part of the app.
+import type { Column } from '$proto/Column';
 import type { Command } from '$proto/Command';
 import type { Event } from '$proto/Event';
 import type { Row } from '$proto/Row';
 import type { Said } from '$proto/Said';
+import type { Session } from '$proto/Session';
 import type { State } from '$proto/State';
 import type { Bus } from '../src/lib/core.svelte';
 import { KEY } from './key';
@@ -13,7 +15,7 @@ export const EMPTY: State = {
   me: null, login: null, rotation_unsaved: false, update: null, keys: [['soniox', 'Nowhere'], ['openrouter', 'Nowhere']], left: null,
   setup: { spoken: [], shown: [], sound: 'Mic', device: null, mode: 'Audience', language: null, keep: null }, devices: [],
   languages: ['en', 'fr', 'es', 'de', 'zh', 'ja', 'ko', 'th'], exporters: ['markdown', 'srt', 'vtt'],
-  session: null, library: [], open: null, hits: [], rooms: [], terms: [], writing: [], moving: null, unmoved: [], captions: false, city: null, filing: [],
+  library: [], open: null, hits: [], rooms: [], terms: [], writing: [], moving: null, unmoved: [], captions: false, city: null, filing: [],
 };
 
 const H = 3_600_000, now = Date.now();
@@ -53,9 +55,15 @@ export function mockBus(recording = false): Bus {
     unmoved: [['Board call', 'migrate.audio'] as [string, string]],
   });
   const gone = new Map<string, Row>();
+  let session: Session | null = null;
+  const seq = { Frame: 0, Session: 0 };
   let on: (e: Event) => void = () => {};
   const emit = () => on({ kind: 'State', is: structuredClone(s) });
+  const emitSession = () => on({ kind: 'Signal', is: { seq: ++seq.Session, signal: { of: 'Session', is: structuredClone(session) } } });
+  const emitFrame = (columns: Column[]) =>
+    on({ kind: 'Signal', is: { seq: ++seq.Frame, signal: { of: 'Frame', is: { t_audio: session ? Date.now() - session.started : 0, columns } } } });
   const later = (ms: number, f: () => void) => setTimeout(() => (f(), emit()), ms);
+  const laterSession = (ms: number, f: () => void) => setTimeout(() => (f(), emitSession()), ms);
   const write = (id: string, steps = ['closing', 'uploading', 'transcribing', 'translating', 'signing'], done = 0): void => {
     const [step] = steps, of = 6;
     s.writing = s.writing.filter((w) => w.id !== id).concat(step ? [{ id, step, done, of }] : []);
@@ -65,19 +73,22 @@ export function mockBus(recording = false): Bus {
   };
   const handlers: { [D in Command['do']]: (c: Extract<Command, { do: D }>) => void } = {
     Start: () => {
-      s.session = { id: `s${Date.now()}`, started: Date.now(), status: { is: 'Connecting' } };
-      later(1500, () => s.session && (s.session.status = { is: 'Recording' }));
+      session = { id: `s${Date.now()}`, started: Date.now(), status: { is: 'Connecting' } };
+      emitSession();
+      laterSession(1500, () => session && (session.status = { is: 'Recording' }));
       later(9000, () => on({ kind: 'Notice', is: 'audio.mic.changed' }));
-      later(20000, () => s.session && (s.session.status = { is: 'Behind' }));
-      later(24000, () => s.session && (s.session.status = { is: 'Recording' }));
+      laterSession(20000, () => session && (session.status = { is: 'Behind' }));
+      laterSession(24000, () => session && (session.status = { is: 'Recording' }));
     },
     Import: () => handlers.Start({ do: 'Start' }),
-    Pause: () => s.session && (s.session.status = { is: 'Paused' }),
-    Resume: () => s.session && (s.session.status = { is: 'Recording' }),
+    Pause: () => session && ((session.status = { is: 'Paused' }), emitSession()),
+    Resume: () => session && ((session.status = { is: 'Recording' }), emitSession()),
     Stop: () => {
-      const id = s.session!.id;
-      s.library.unshift(row(id, 0, Date.now() - s.session!.started, '', s.setup.spoken, true));
-      s.session = null;
+      const id = session!.id;
+      s.library.unshift(row(id, 0, Date.now() - session!.started, '', s.setup.spoken, true));
+      session = null;
+      emitSession();
+      emitFrame([]);
       write(id);
     },
     Setup: (c) => (s.setup = c.setup),
@@ -157,9 +168,10 @@ export function mockBus(recording = false): Bus {
     listen(f) {
       on = f;
       emit();
+      if (session) emitSession();
       const id = setInterval(() => {
-        const live = s.session && s.session.status.is !== 'Paused';
-        if (live) on({ kind: 'Live', is: talk(Date.now() - s.session!.started, s.setup.shown.filter((l) => l in SCRIPT)) });
+        const live = session && session.status.is !== 'Paused';
+        if (live) emitFrame(talk(Date.now() - session!.started, s.setup.shown.filter((l) => l in SCRIPT)));
       }, 100);
       return () => clearInterval(id);
     },

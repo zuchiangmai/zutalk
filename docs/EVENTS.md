@@ -96,3 +96,6 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `lane.gap` | warn | lane 说了一段空缺 | `lane` `t0_ms` `t1_ms` `why` |
 | `frame.fit` | info | 一帧为了放得下而让掉的东西变了 | `from` `to`（`Whole` / `Lines` / `Units` / `Tail`） `bytes` |
 | `notice.said` | info | 一个代码被说给人听 | `code` |
+| `recording.start` | info | 一场录音开始 | `rec` `source`（`mic` / `system` / `both` / `file`） `lanes` `columns` `captions`（`live` / `file` / `captions.off` / `captions.no_key`） |
+| `recording.end` | info；带失败的代码时 error | 一场录音结束（到封好 tape 为止） | `rec` `code`（`done` 或结束它的失败代码） `ms` |
+| `session.status` | info | 录音的状态句变了 | `rec` `from` `to`（`Recording` / `Paused` / `AudioOnly` / `Connecting` / `Behind`） `why` |
