@@ -22,14 +22,16 @@ use crate::out::city::{self, Calendar, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
 use crate::record::shelf::{
-    About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Said, Share,
+    self, About, DraftGap, DraftStep, Drafts, FILING, LINE, NOTE, RECORDING, Recording, SHARE,
+    SPEAKER, Said, Share,
 };
 use crate::record::shelf::{Shelf, Words};
 use crate::record::{migrate, retain};
+use crate::rt::keep;
 use crate::rt::queue::{self, Back, Full, Rx, Tx};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::{self, Counter, Spread, Stats, Tally};
-use crate::rt::supervise::{End, Tree, again};
+use crate::rt::supervise::{End, Restarts, Tree, again};
 use crate::rt::water::Water;
 use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
@@ -47,6 +49,12 @@ const SLOT_MS: u64 = 250;
 pub const HUB_MAIL_MSGS: usize = 256;
 /// One turn of the hub (PLAN.md §4.1): a command should take under a millisecond.
 pub const HUB_TURN_BUDGET_US: u64 = 1_000;
+/// Audio blocks buffered for the tape writer: 600 × 100 ms = 60 s; longer means disk is stuck
+/// (`P1.md` §3.7, provisional `P1.md` §4 item 3).
+pub const TAPE_QUEUE_BLOCKS: usize = 600;
+/// Live draft lines buffered for the draft writer: 256 lines covers minutes of speech before
+/// collapsing dropped lines into one gap (`P1.md` §3.7, provisional `P1.md` §4 item 3).
+pub const DRAFT_QUEUE_LINES: usize = 256;
 
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
@@ -71,6 +79,8 @@ pub struct Config {
     pub dial: Dial,
     /// How a recording's tape is opened for writing.
     pub reels: Reels,
+    /// How a recording's live draft is opened for writing.
+    pub drafts: Drafts,
     /// Puts text on the clipboard.
     pub clip: Clip,
     /// Installs a newer version.
@@ -95,7 +105,7 @@ impl Config {
             let capture = Capture::start(source, wall_clock_policy, stats, sink, notice)?;
             Ok(Box::new(capture) as Box<dyn Hearing>)
         });
-        let (dial, reels) = (wire::dial(), tape::reels());
+        let (dial, reels, drafts) = (wire::dial(), tape::reels(), shelf::drafts());
         let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
         // Without a shell to give them, nothing can be put on the clipboard, nor installed.
         let (clip, install): (Clip, Install) = (Arc::new(|_| false), Arc::new(|| {}));
@@ -111,6 +121,7 @@ impl Config {
             hear,
             dial,
             reels,
+            drafts,
             clip,
             install,
             log,
@@ -661,6 +672,7 @@ impl Hub {
             level: self.level_reg.clone(),
             said: self.said.clone(),
             stats: self.tree.stats().clone(),
+            tree: self.tree.clone(),
             terms: self.state.terms.clone(),
         }
     }
@@ -1035,6 +1047,7 @@ struct Task {
     level: Register<SoundLevel>,
     said: Voice,
     stats: Stats,
+    tree: Tree,
     terms: Vec<Term>, // the glossary as it was when the task began
 }
 
@@ -1118,7 +1131,9 @@ impl Task {
         mut mode: watch::Receiver<Mode>,
     ) -> Result<ListenEnd, &'static str> {
         let key = keys::derive("tape", &self.id).map_err(code)?;
-        let mut tape = (self.config.reels)(&self.tape(), &key).map_err(|_| "tape")?;
+        let recording = self.tree.child("recording");
+        let (tape_tx, tape_rx) =
+            queue::bounded(recording.stats(), "tape", TAPE_QUEUE_BLOCKS, Full::End);
         let (streams, quiet) = match captions {
             Ok(streams) => (streams, ""),
             Err(why) => (Vec::new(), why),
@@ -1142,21 +1157,29 @@ impl Task {
             }));
         }
         drop(lanes);
+        let file = matches!(source, Source::File(_));
         let (ended_tx, mut ended_rx) = watch::channel(None);
+        let tape_wait = file.then(|| tape_tx.with(Full::Wait));
         let (ended, level, mode_rx, mut kept) =
             (ended_tx.clone(), self.level.clone(), mode.clone(), true);
         let sink = move |block: Block| {
-            // Without the tape there is no recording: record why and end it.
-            if kept && tape.append(&block).is_err() {
-                kept = false;
-                end_once(&ended, "tape");
-            }
+            let block = Arc::new(block);
             if *mode_rx.borrow() == Mode::Recording {
                 level.set(SoundLevel::of(&block.pcm));
             }
-            let _ = audio.send(Arc::new(block)); // dropped: broadcast fails only when no caption lanes are listening
+            // Without the tape there is no recording: record why and end it.
+            if kept {
+                let ok = match &tape_wait {
+                    Some(tx) => tx.send_blocking(block.clone()).is_ok(),
+                    None => tape_tx.offer(block.clone()).is_ok(),
+                };
+                if !ok {
+                    kept = false;
+                    end_once(&ended, "tape");
+                }
+            }
+            let _ = audio.send(block); // dropped: broadcast fails only when no caption lanes are listening
         };
-        let file = matches!(source, Source::File(_));
         let (ended, said) = (ended_tx, self.said.clone());
         let notice = move |notice| match notice {
             Notice::Ended => end_once(&ended, if file { "done" } else { "audio.closed" }),
@@ -1167,7 +1190,62 @@ impl Task {
             (self.config.hear)(source, Box::new(sink), Box::new(notice), &self.stats)
                 .map_err(code)?,
         );
-        let (mut draft, mut n) = (self.shelf.open(&self.id, LINE).map_err(fail)?, 0);
+
+        let tape_dir = self.tape();
+        let reels = self.config.reels.clone();
+        let tape_blocks = recording.stats().counter("tape.blocks");
+        let tape_padded = recording.stats().counter("tape.padded_blocks");
+        let tape_batch_ms = recording.stats().spread("tape.batch_ms");
+        let mut tape_done = Some(keep::start(
+            &recording,
+            "tape",
+            "tape.batch",
+            tape_rx,
+            tape_batch_ms,
+            Restarts::default(),
+            move || (reels)(&tape_dir, &key).map_err(|_| "tape"),
+            move |writer, batch: &[Arc<Block>]| {
+                for block in batch {
+                    let res = writer.append(block);
+                    let padded = writer.take_padded();
+                    if padded > 0 {
+                        tape_padded.add(padded);
+                    }
+                    res.map_err(|_| "tape")?;
+                }
+                tape_blocks.add(batch.len() as u64);
+                Ok(())
+            },
+            |writer| writer.sync().map_err(|_| "tape"),
+        ));
+
+        let (draft_tx, draft_rx) =
+            queue::bounded(recording.stats(), "draft", DRAFT_QUEUE_LINES, Full::Drop);
+        let draft_shelf = self.shelf.clone();
+        let draft_id = self.id.clone();
+        let drafts = self.config.drafts.clone();
+        let draft_lines = recording.stats().counter("draft.lines");
+        let draft_lost = recording.stats().counter("draft.lost_lines");
+        let draft_batch_ms = recording.stats().spread("draft.batch_ms");
+        let draft_done = keep::start(
+            &recording,
+            "draft",
+            "draft.batch",
+            draft_rx,
+            draft_batch_ms,
+            Restarts::default(),
+            move || (drafts)(&draft_shelf, &draft_id).map_err(fail),
+            move |writer, batch: &[(String, Said, i64)]| {
+                for (key, said, at) in batch {
+                    writer.put(key, said, *at).map_err(fail)?;
+                }
+                draft_lines.add(batch.len() as u64);
+                Ok(())
+            },
+            |writer| writer.sync().map_err(fail),
+        );
+
+        let (mut draft_gap, mut n) = (DraftGap::new(), 0usize);
         let mut open = !streams.is_empty();
         let (mut composer, mut frame_tick) = (Composer::new(&about.shown, streams), tick());
         let (frame_made, frame_cut, frame_bound) = (
@@ -1178,6 +1256,7 @@ impl Task {
         let mut last_fit = Fit::Whole;
         let mut told = quiet.is_empty().then_some(Status::Connecting);
         let mut outcome = ListenEnd::StoppedByHub;
+        let mut tape_failed = false;
         while capture.is_some() || open {
             tokio::select! {
                 changed = mode.changed(), if capture.is_some() => {
@@ -1190,7 +1269,7 @@ impl Task {
                             }
                         }
                         (Mode::Recording, Some(capture)) => capture.resume(),
-                        _ => capture = None, // the last blocks are delivered, the tape closed
+                        _ => capture = None, // the last blocks are delivered, the sink dropped
                     }
                     composer.pause(now == Mode::Paused);
                 }
@@ -1205,13 +1284,56 @@ impl Task {
                         }
                     }
                 }
+                end = async {
+                    tape_done.as_mut().expect("guarded by is_some").await
+                }, if tape_done.is_some() => {
+                    tape_done = None;
+                    if let Some(End::Fatal(_)) = end {
+                        tape_failed = true;
+                        if capture.is_some() {
+                            outcome = ListenEnd::EndedByCapture("tape");
+                            capture = None;
+                            if self.is_active() {
+                                self.level.set(SoundLevel::default());
+                            }
+                        }
+                    }
+                }
                 event = heard.recv(), if open => match event {
                     None => open = false,
                     Some(event) => {
                         for said in drafted(&event) {
-                            draft.put(&format!("{}.0.{n:05}", self.id), Some(&said), now())
-                                .map_err(fail)?;
-                            n += 1;
+                            let (t0_ms, t1_ms) = (said.line.t0, said.line.t1);
+                            if let DraftStep::GapFirst(span) = draft_gap.next() {
+                                let gap_said = said_line(DraftGap::gap_line(span));
+                                let key = format!("{}.0.{n:05}", self.id);
+                                if draft_tx.offer((key, gap_said, now())).is_ok() {
+                                    n += 1;
+                                    if let Some(sent) = draft_gap.gap_sent() {
+                                        warn!(
+                                            "draft.gap",
+                                            t0_ms = sent.t0_ms,
+                                            t1_ms = sent.t1_ms,
+                                            lines = sent.lines,
+                                        );
+                                    }
+                                } else {
+                                    draft_lost.add(1);
+                                    if draft_gap.missed(t0_ms, t1_ms).first {
+                                        self.said.say("draft.behind");
+                                    }
+                                    continue;
+                                }
+                            }
+                            let key = format!("{}.0.{n:05}", self.id);
+                            if draft_tx.offer((key, said, now())).is_ok() {
+                                n += 1;
+                            } else {
+                                draft_lost.add(1);
+                                if draft_gap.missed(t0_ms, t1_ms).first {
+                                    self.said.say("draft.behind");
+                                }
+                            }
                         }
                         composer.take(event);
                     }
@@ -1243,7 +1365,33 @@ impl Task {
                 }
             }
         }
-        draft.sync().map_err(fail)?;
+        // Flush any trailing gap before closing the draft queue so dropped lines at stop are marked.
+        if let Some(span) = draft_gap.pending() {
+            let gap_said = said_line(DraftGap::gap_line(span));
+            let key = format!("{}.0.{n:05}", self.id);
+            if draft_tx.send((key, gap_said, now())).await.is_ok()
+                && let Some(sent) = draft_gap.gap_sent()
+            {
+                warn!("draft.gap", t0_ms = sent.t0_ms, t1_ms = sent.t1_ms, lines = sent.lines);
+            }
+        }
+        drop(draft_tx);
+        let _ = draft_done.await; // dropped: draft write errors do not end or invalidate the audio recording
+
+        let tape_ended = matches!(outcome, ListenEnd::EndedByCapture("tape")) || tape_failed;
+        if tape_ended {
+            // Do not wait on a stuck tape writer that already overflowed or gave up.
+            recording.cancel();
+            recording.wait().await;
+            return Err("tape");
+        }
+        if let Some(done) = tape_done.take()
+            && matches!(done.await, Some(End::Fatal(_)))
+        {
+            recording.wait().await;
+            return Err("tape");
+        }
+        recording.wait().await;
         match outcome {
             ListenEnd::EndedByCapture(why) if why != "done" => Err(why),
             other => Ok(other),
@@ -1346,17 +1494,20 @@ fn tick() -> tokio::time::Interval {
     tick
 }
 
+fn said_line(line: Line) -> Said {
+    let via = line.translations.keys().map(String::as_str).chain(["text"]);
+    Said { via: via.map(|piece| (piece.into(), REALTIME.into())).collect(), line }
+}
+
 /// The draft's lines from the first stream, with where their words came from. A stretch the
 /// captions missed is a line of its own.
 fn drafted(event: &lane::Event) -> Vec<Said> {
-    let said = |line: Line| {
-        let via = line.translations.keys().map(String::as_str).chain(["text"]);
-        Said { via: via.map(|piece| (piece.into(), REALTIME.into())).collect(), line }
-    };
     match event {
-        lane::Event::Lines { stream: 0, lines } => lines.iter().cloned().map(said).collect(),
+        lane::Event::Lines { stream: 0, lines } => lines.iter().cloned().map(said_line).collect(),
         &lane::Event::Gap { stream: 0, t0, t1, .. } => {
-            vec![said(Line { t0, t1, text: "…".into(), incomplete: true, ..Line::default() })]
+            vec![said_line(Line {
+                t0, t1, text: "…".into(), incomplete: true, ..Line::default()
+            })]
         }
         _ => Vec::new(),
     }

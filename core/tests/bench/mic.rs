@@ -141,10 +141,10 @@ impl Mic {
             let driver_sink = shared_sink.clone();
             let driver_tell = shared_tell.clone();
 
-            tokio::spawn(async move {
+            tokio::spawn(zutalk_log::carry(async move {
                 run_mic(driver_state, driver_stopped, driver_stop_wake, driver_sink, driver_tell)
                     .await;
-            });
+            }));
 
             Ok(Box::new(FakeHearing {
                 state: state.clone(),

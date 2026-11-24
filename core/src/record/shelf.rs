@@ -122,6 +122,112 @@ impl Writer {
     }
 }
 
+/// A draft pack being written, line by line.
+pub trait Draft: Send {
+    fn put(&mut self, key: &str, said: &Said, now: i64) -> Result<(), Error>;
+    fn sync(&mut self) -> Result<(), Error>;
+}
+
+impl Draft for Writer {
+    fn put(&mut self, key: &str, said: &Said, now: i64) -> Result<(), Error> {
+        Writer::put(self, key, Some(said), now)
+    }
+
+    fn sync(&mut self) -> Result<(), Error> {
+        Writer::sync(self)
+    }
+}
+
+/// Opens a recording's live draft for writing.
+pub type Drafts = Arc<dyn Fn(&Shelf, &str) -> Result<Box<dyn Draft>, Error> + Send + Sync>;
+
+/// The real draft port: writes `talk/line` records directly onto the shelf.
+pub fn drafts() -> Drafts {
+    Arc::new(|shelf, id| Ok(Box::new(shelf.open(id, LINE)?) as Box<dyn Draft>))
+}
+
+/// The range and count of consecutive draft lines dropped while the draft queue was full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapSpan {
+    pub t0_ms: u32,
+    pub t1_ms: u32,
+    pub lines: u64,
+}
+
+/// What the caller should try to enqueue next when a finalized draft line arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftStep {
+    /// No pending gap: offer the incoming line directly.
+    Line,
+    /// A drop streak is open: offer a gap line covering `GapSpan` before the incoming line.
+    GapFirst(GapSpan),
+}
+
+/// Outcome of recording a dropped draft line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missed {
+    /// `true` on the first dropped line of a new streak (caller notifies `draft.behind` once).
+    pub first: bool,
+}
+
+/// Pure value type tracking consecutive draft lines dropped on a full queue and collapsing them
+/// into one incomplete gap line (`…`) once the queue accepts again (`P1.md` §3.7).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DraftGap {
+    span: Option<GapSpan>,
+}
+
+impl DraftGap {
+    pub fn new() -> Self {
+        Self { span: None }
+    }
+
+    /// Pending gap span, if a drop streak is open.
+    pub fn pending(&self) -> Option<GapSpan> {
+        self.span
+    }
+
+    /// Decides whether a gap line must be offered before the incoming line.
+    pub fn next(&self) -> DraftStep {
+        match self.span {
+            Some(span) => DraftStep::GapFirst(span),
+            None => DraftStep::Line,
+        }
+    }
+
+    /// Clears and returns the pending gap once its gap line has been accepted by the queue.
+    pub fn gap_sent(&mut self) -> Option<GapSpan> {
+        self.span.take()
+    }
+
+    /// Records a line (`t0_ms..t1_ms`) that could not enter the draft queue.
+    pub fn missed(&mut self, t0_ms: u32, t1_ms: u32) -> Missed {
+        match &mut self.span {
+            None => {
+                self.span = Some(GapSpan { t0_ms, t1_ms, lines: 1 });
+                Missed { first: true }
+            }
+            Some(span) => {
+                span.t0_ms = span.t0_ms.min(t0_ms);
+                span.t1_ms = span.t1_ms.max(t1_ms);
+                span.lines += 1;
+                Missed { first: false }
+            }
+        }
+    }
+
+    /// Builds the incomplete gap line (`…`) representing `span`.
+    pub fn gap_line(span: GapSpan) -> Line {
+        Line {
+            t0: span.t0_ms,
+            t1: span.t1_ms,
+            text: "…".into(),
+            incomplete: true,
+            ..Line::default()
+        }
+    }
+}
+
 /// A pack that is not there holds nothing.
 fn held(path: PathBuf) -> Result<Held, Error> {
     match Pack::read(path) {

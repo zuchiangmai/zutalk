@@ -19,15 +19,16 @@ use serde_json::Value;
 use service::{Delays, Fault, Service};
 use speech::Speech;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
-use tape::{CountingTape, GatedTape};
+use tape::{CountingTape, GATE_TIMEOUT_MS, GatedTape};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use zutalk_core::app::hub::{Config, Core, Outlet};
 use zutalk_core::app::proto::{Column, Command, Frame, Session, Setup, State, Status};
 use zutalk_core::id::keys;
-use zutalk_core::record::shelf::Shelf;
+use zutalk_core::record::shelf::{Draft, Drafts, LINE, Said, Shelf, Writer as ShelfWriter};
 use zutalk_core::rt::stats::{PeakRow, QueueRow, Tally};
 use zutalk_log::{Level, Seen};
 
@@ -244,6 +245,105 @@ fn scan_word_ids(text: &str, at: Instant, seen: &mut [Option<Instant>]) {
     }
 }
 
+struct DraftGateInner {
+    closed: AtomicBool,
+    gate: Mutex<DraftGateState>,
+    changed: Condvar,
+}
+
+struct DraftGateState {
+    closed: bool,
+    waiters: usize,
+}
+
+/// Real `shelf::Writer` behind a controllable blocking gate for testing draft backpressure.
+#[derive(Clone)]
+pub struct GatedDraft {
+    inner: Arc<DraftGateInner>,
+}
+
+impl Default for GatedDraft {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GatedDraft {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(DraftGateInner {
+                closed: AtomicBool::new(false),
+                gate: Mutex::new(DraftGateState { closed: false, waiters: 0 }),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    pub fn close_gate(&self) -> DraftGateGuard {
+        let mut state = self.inner.gate.lock().expect("draft gate lock");
+        state.closed = true;
+        self.inner.closed.store(true, Ordering::Release);
+        DraftGateGuard { inner: self.inner.clone() }
+    }
+
+    pub fn has_waiter(&self) -> bool {
+        self.inner.gate.lock().expect("draft gate lock").waiters > 0
+    }
+
+    pub fn drafts(&self) -> Drafts {
+        let inner = self.inner.clone();
+        Arc::new(move |shelf: &Shelf, id: &str| {
+            let writer = shelf.open(id, LINE)?;
+            Ok(Box::new(GatedDraftWriter { writer, inner: inner.clone() }) as Box<dyn Draft>)
+        })
+    }
+}
+
+/// Releases the draft gate on drop so test failures cannot deadlock.
+pub struct DraftGateGuard {
+    inner: Arc<DraftGateInner>,
+}
+
+impl Drop for DraftGateGuard {
+    fn drop(&mut self) {
+        let mut state = self.inner.gate.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = false;
+        self.inner.closed.store(false, Ordering::Release);
+        self.inner.changed.notify_all();
+    }
+}
+
+struct GatedDraftWriter {
+    writer: ShelfWriter,
+    inner: Arc<DraftGateInner>,
+}
+
+impl Draft for GatedDraftWriter {
+    fn put(&mut self, key: &str, said: &Said, now: i64) -> Result<(), zu::Error> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            let mut state = self.inner.gate.lock().expect("draft gate lock");
+            if state.closed {
+                state.waiters += 1;
+                let (mut state, timed_out) = self
+                    .inner
+                    .changed
+                    .wait_timeout_while(state, Duration::from_millis(GATE_TIMEOUT_MS), |s| s.closed)
+                    .expect("draft gate condvar");
+                state.waiters = state.waiters.saturating_sub(1);
+                if timed_out.timed_out() && state.closed {
+                    drop(state);
+                    panic!("bench: draft gate stayed closed past {GATE_TIMEOUT_MS} ms");
+                }
+            }
+        }
+        self.writer.put(key, Some(said), now)
+    }
+
+    fn sync(&mut self) -> Result<(), zu::Error> {
+        self.writer.sync()
+    }
+}
+
 /// One running simulation bench holding `Core`, `Outlet`, fake ports, probe, and log capture.
 pub struct Bench {
     _tempdir: Option<tempfile::TempDir>,
@@ -254,6 +354,7 @@ pub struct Bench {
     pub service: Service,
     pub counting_tape: CountingTape,
     pub gated_tape: GatedTape,
+    pub gated_draft: GatedDraft,
     core: Core,
     outlet: Outlet,
     probe: Arc<Mutex<ProbeState>>,
@@ -292,6 +393,7 @@ impl Bench {
         let service = Service::new(speech.clone(), opts.delays, opts.fault);
         let counting_tape = CountingTape::new();
         let gated_tape = GatedTape::new();
+        let gated_draft = GatedDraft::new();
         let reels = match opts.tape {
             TapeMode::Counting => counting_tape.reels(),
             TapeMode::Gated => gated_tape.reels(),
@@ -306,6 +408,7 @@ impl Bench {
             hear: mic.hear(),
             dial: service.dial(),
             reels,
+            drafts: gated_draft.drafts(),
             ..Config::new(data.clone(), NOWHERE)
         };
 
@@ -402,6 +505,7 @@ impl Bench {
             service,
             counting_tape,
             gated_tape,
+            gated_draft,
             core,
             outlet,
             probe,

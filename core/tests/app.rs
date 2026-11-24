@@ -1527,3 +1527,101 @@ async fn progress_that_finds_the_mailbox_full_is_let_go() {
     assert_eq!(clear[0].u64("lost"), Some(1));
     assert_eq!(seen.refused(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_long_file_waits_for_its_tape() {
+    use std::sync::{Condvar, Mutex};
+    use zutalk_core::capture::clock::Block;
+    use zutalk_core::capture::tape::{Reel, Reels, Writer};
+
+    struct Gate {
+        lock: Mutex<(bool, usize)>,
+        cv: Condvar,
+    }
+
+    struct GatedFileReel {
+        writer: Writer,
+        gate: Arc<Gate>,
+    }
+
+    impl Reel for GatedFileReel {
+        fn append(&mut self, block: &Block) -> std::io::Result<()> {
+            {
+                let mut guard = self.gate.lock.lock().expect("gate lock");
+                if guard.0 {
+                    guard.1 += 1;
+                    let (mut guard, timed_out) = self
+                        .gate
+                        .cv
+                        .wait_timeout_while(guard, Duration::from_secs(10), |s| s.0)
+                        .expect("gate cv");
+                    guard.1 = guard.1.saturating_sub(1);
+                    assert!(!timed_out.timed_out() || !guard.0, "tape gate stayed closed");
+                }
+            }
+            self.writer.append(block)
+        }
+
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.writer.sync()
+        }
+    }
+
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let file = dir.path().join("Two minutes.wav");
+    // 120 seconds = 1,200 blocks (double the 600-block tape queue capacity).
+    wav(&file, 120_000);
+
+    let gate = Arc::new(Gate { lock: Mutex::new((true, 0)), cv: Condvar::new() });
+    let gate_cb = gate.clone();
+    let reels: Reels = Arc::new(move |dir, key| {
+        let writer = Writer::create(dir, key)?;
+        Ok(Box::new(GatedFileReel { writer, gate: gate_cb.clone() }) as Box<dyn Reel>)
+    });
+
+    let mut app = App::with(Config { reels, ..config(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
+
+    app.send(Command::Import { path: file.to_string_lossy().into() });
+
+    // Wait until the tape writer is blocked on the gate and the file reader has filled the queue
+    // and waited for room (`Full::Wait`).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let waiting = gate.lock.lock().expect("gate lock").1 > 0;
+        let q = app.core.stats().tally().queues.into_iter().find(|r| r.name == "tape");
+        if waiting && q.as_ref().is_some_and(|r| r.full > 0) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "file reader did not block on full tape queue"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // No `tape` error notice or `queue.full` event while waiting.
+    assert!(!app.outlet.said.now().1.codes.iter().any(|c| c == "tape"));
+    assert!(app.seen.of("queue.full").iter().all(|l| l.text("queue") != Some("tape")));
+
+    // Release the tape gate: the file import finishes cleanly with all 120,000 ms intact.
+    {
+        let mut guard = gate.lock.lock().expect("gate lock");
+        guard.0 = false;
+        gate.cv.notify_all();
+    }
+
+    let state =
+        app.until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)).await;
+    assert_eq!(state.library.len(), 1);
+    assert_eq!(state.library[0].length_ms, 120_000);
+    assert!(!app.outlet.said.now().1.codes.iter().any(|c| c == "tape"));
+    assert!(
+        app.seen.of("recording.end").iter().any(|l| l.text("code") == Some("done")),
+        "{:?}",
+        app.seen.of("recording.end")
+    );
+    assert_eq!(app.seen.refused(), 0);
+}

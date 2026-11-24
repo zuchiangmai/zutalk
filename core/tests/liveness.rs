@@ -26,7 +26,11 @@ use zutalk_core::capture::tape::{self, Pass};
 use zutalk_core::id::keys;
 use zutalk_core::live::lane::{self, Setup as LaneSetup, Stream};
 use zutalk_core::live::lines::Line;
-use zutalk_core::record::shelf::{About, LINE, RECORDING, Said, Shelf};
+use zutalk_core::live::wire::{Dial, Wire};
+use zutalk_core::record::shelf::{
+    About, DraftGap, DraftStep, GapSpan, LINE, Missed, RECORDING, Said, Shelf,
+};
+use zutalk_core::rt::supervise::End;
 use zutalk_log::{Level, Limits};
 
 /// 8 virtual hours in milliseconds for I1.
@@ -778,7 +782,6 @@ async fn a_recording_says_when_it_starts_how_it_goes_and_when_it_ends() {
 // ---- 3. I2: slow/blocked paths never stall captions or commands ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "P1-15：写 tape 独立队列"]
 async fn i2_a_tape_that_stands_still_holds_no_caption_back() {
     let _store = STORE.lock().await;
     let speech = Speech::build(SpeechSpec::standard(60_000));
@@ -853,6 +856,19 @@ async fn i2_a_tape_that_stands_still_holds_no_caption_back() {
     }
 
     assert!(bench.shelf().read(&rec2).expect("read shelf").is_some(), "draft must remain on shelf");
+    assert!(
+        bench.notices().iter().any(|c| c == "tape"),
+        "notices must include `tape`, got {:?}",
+        bench.notices()
+    );
+    // Wait for `Task::finish` to emit `recording.end(code = "tape")` after `session` cleared.
+    let end_deadline = Instant::now() + Duration::from_secs(4);
+    while bench.seen().of("recording.end").iter().filter(|l| l.text("code") == Some("tape")).count()
+        == 0
+    {
+        assert!(Instant::now() < end_deadline, "expected recording.end(code = tape)");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     // Observability (P1.md §2).
     assert_eq!(
         bench
@@ -1228,7 +1244,6 @@ async fn i6_a_lane_that_dies_comes_back_and_marks_what_it_missed() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "P1-15：写 tape 的部件自愈并补静音"]
 async fn i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence() {
     let _store = STORE.lock().await;
     let panic_at_ms: u32 = 20_000;
@@ -1270,31 +1285,354 @@ async fn i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence() {
     assert!(!before.pcm.iter().all(|&s| s == 0), "block before hole must retain recorded audio");
     assert!(!after.pcm.iter().all(|&s| s == 0), "block after hole must retain recorded audio");
 
-    // Observability (P1.md §2).
-    assert!(
+    // Observability (P1.md §2, P1-15-writers.md #11).
+    assert_eq!(
         bench
             .seen()
             .of("part.state")
             .iter()
-            .any(|l| l.text("part") == Some("tape") && l.text("why") == Some("panic")),
-        "expected part.state(tape, panic)"
+            .filter(|l| {
+                l.text("part") == Some("tape")
+                    && l.text("to") == Some("Waiting")
+                    && l.text("why") == Some("panic")
+            })
+            .count(),
+        1,
+        "expected one part.state(tape, Waiting, panic)"
     );
-    assert!(
-        bench.seen().of("keep.lost").iter().any(|l| l.text("part") == Some("tape")),
-        "expected keep.lost(tape)"
-    );
-    assert!(!bench.seen().of("tape.pad").is_empty(), "expected tape.pad event");
+    let lost: Vec<_> = bench
+        .seen()
+        .of("keep.lost")
+        .into_iter()
+        .filter(|l| l.text("part") == Some("tape"))
+        .collect();
+    assert_eq!(lost.len(), 1, "expected one keep.lost(tape), got {lost:?}");
+    let lost_n = lost[0].u64("n").expect("keep.lost n");
+    assert!(lost_n >= 1);
+
+    let pads = bench.seen().of("tape.pad");
+    assert_eq!(pads.len(), 1, "expected one tape.pad event, got {pads:?}");
+    assert_eq!(pads[0].u64("blocks"), Some(lost_n), "padded blocks must equal lost batch size");
+    assert_eq!(bench.count("tape.padded_blocks"), lost_n);
     assert_eq!(bench.count("keep.lost_batches"), 1);
-    assert!(
-        !bench
-            .seen()
-            .of("recording.end")
-            .iter()
-            .any(|l| !matches!(l.text("code"), Some("ok" | "done"))),
-        "recording.end must not carry a failure code"
-    );
+
+    let ends = bench.seen().of("recording.end");
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0].text("code"), Some("done"));
 
     bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_draft_is_whole_after_a_stop() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(60_000));
+    // Pick sentence 2 to interrupt mid-sentence while a non-final guess token is open
+    // (after GUESS_DELAY_MS, before FINAL_DELAY_MS) so `lane::seam` saves it as `incomplete`.
+    let target = speech.sentences[2].clone();
+    assert!(target.word_count >= 3, "sentence 2 must have multiple words");
+    let mid_word = &speech.words[target.first_word + target.word_count / 2];
+    let stop_at_ms = u64::from(mid_word.end_ms) + GUESS_DELAY_MS + 100;
+    assert!(
+        stop_at_ms < u64::from(mid_word.end_ms) + FINAL_DELAY_MS,
+        "stop must land while mid_word is still an unsettled guess"
+    );
+
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::SilentOnFinish;
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(stop_at_ms)).await;
+    bench.stop_recording().await;
+
+    // Wait for `recording.end` (listen drained and synced draft, seal completed).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while bench.seen().of("recording.end").is_empty() {
+        assert!(Instant::now() < deadline, "recording.end did not arrive after stop");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let recorded = bench.shelf().read(&rec_id).expect("read shelf").expect("recording on shelf");
+    assert!(
+        recorded.lines.len() >= 3,
+        "expected sentences 0, 1, and incomplete 2, got {:?}",
+        recorded.lines
+    );
+
+    let draft_text: String =
+        recorded.lines.iter().map(|(_, s)| s.line.text.as_str()).collect::<Vec<_>>().join(" ");
+    for s_idx in 0..2 {
+        let s = &bench.speech.sentences[s_idx];
+        let first = &bench.speech.words[s.first_word];
+        assert!(
+            draft_text.contains(&first.needle),
+            "finished sentence {s_idx} ({}) missing from draft",
+            first.needle
+        );
+    }
+
+    let (_, last) = recorded.lines.last().expect("last draft line");
+    assert!(
+        last.line.incomplete,
+        "last line stopped mid-sentence must be marked incomplete: {last:?}"
+    );
+    let first_of_target = &bench.speech.words[target.first_word];
+    assert!(
+        last.line.text.contains(&first_of_target.needle),
+        "last incomplete line must hold words of sentence 2 ({}), got {:?}",
+        first_of_target.needle,
+        last.line.text
+    );
+    assert!(bench.count("draft.lines") >= recorded.lines.len() as u64);
+    bench.finish();
+}
+
+#[test]
+fn draft_gap_table_covers_streaks_and_recovery() {
+    let mut gap = DraftGap::new();
+    assert_eq!(gap.next(), DraftStep::Line);
+    assert_eq!(gap.pending(), None);
+
+    // First dropped line opens a streak (`first = true`).
+    assert_eq!(gap.missed(1_000, 1_500), Missed { first: true });
+    let span1 = GapSpan { t0_ms: 1_000, t1_ms: 1_500, lines: 1 };
+    assert_eq!(gap.next(), DraftStep::GapFirst(span1));
+
+    // Subsequent drops merge into the same streak (`first = false`) and widen [t0, t1].
+    assert_eq!(gap.missed(1_600, 2_300), Missed { first: false });
+    assert_eq!(gap.missed(2_400, 4_000), Missed { first: false });
+    let span3 = GapSpan { t0_ms: 1_000, t1_ms: 4_000, lines: 3 };
+    assert_eq!(gap.next(), DraftStep::GapFirst(span3));
+
+    let line = DraftGap::gap_line(span3);
+    assert_eq!((line.t0, line.t1, line.text.as_str(), line.incomplete), (1_000, 4_000, "…", true));
+
+    // Once the gap line is accepted, the tracker returns to normal (`Line`).
+    assert_eq!(gap.gap_sent(), Some(span3));
+    assert_eq!(gap.next(), DraftStep::Line);
+    assert_eq!(gap.gap_sent(), None);
+
+    // A later drop starts a fresh streak (`first = true`).
+    assert_eq!(gap.missed(9_000, 9_500), Missed { first: true });
+    assert_eq!(gap.pending(), Some(GapSpan { t0_ms: 9_000, t1_ms: 9_500, lines: 1 }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lines_the_draft_could_not_take_become_one_gap_line() {
+    use bench::GatedDraft;
+    use tokio::io::duplex;
+    use tokio_tungstenite::{accept_async, client_async};
+    use zutalk_core::app::hub::{Config, DRAFT_QUEUE_LINES};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("draft gap tempdir");
+    let gated_draft = GatedDraft::new();
+    let gate_for_dial = gated_draft.clone();
+    let release_after_burst = Arc::new(tokio::sync::Notify::new());
+    let release_for_dial = release_after_burst.clone();
+    let burst_done = Arc::new(tokio::sync::Notify::new());
+    let burst_done_for_dial = burst_done.clone();
+
+    // Fast in-memory Soniox service over duplex: sends 1 line to park the gated draft writer,
+    // then floods > DRAFT_QUEUE_LINES finalized sentences, waits for gate release, then sends
+    // 2 recovery sentences.
+    let dial: Dial = Arc::new(move |_url: &str| {
+        let gated_draft = gate_for_dial.clone();
+        let release_after_burst = release_for_dial.clone();
+        let burst_done = burst_done_for_dial.clone();
+        Box::pin(async move {
+            let (client_io, server_io) = duplex(128 * 1024);
+            let server = tokio::spawn(async move {
+                let mut ws = accept_async(server_io).await.expect("accept duplex ws");
+                // Read hello config.
+                let _ = ws.next().await;
+
+                let send_sentence = |idx: u32| {
+                    let t0 = idx * 100;
+                    let t1 = t0 + 80;
+                    let body = serde_json::json!({
+                        "tokens": [
+                            {
+                                "text": format!(" line{idx:04}."),
+                                "start_ms": t0,
+                                "end_ms": t1,
+                                "is_final": true,
+                                "language": "en",
+                                "speaker": "1"
+                            },
+                            { "text": "<end>", "is_final": true }
+                        ],
+                        "final_audio_proc_ms": t1,
+                        "total_audio_proc_ms": t1
+                    });
+                    Message::text(body.to_string())
+                };
+
+                // Line 0 enters the gated draft writer and parks it on the closed gate.
+                ws.send(send_sentence(0)).await.expect("send line 0");
+                let wait_until = Instant::now() + Duration::from_secs(4);
+                while !gated_draft.has_waiter() && Instant::now() < wait_until {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(gated_draft.has_waiter(), "draft writer never hit the closed gate");
+
+                // Flood DRAFT_QUEUE_LINES + 15 finalized lines while the draft writer is blocked.
+                let total_burst = (DRAFT_QUEUE_LINES + 15) as u32;
+                for i in 1..=total_burst {
+                    ws.send(send_sentence(i)).await.expect("send burst line");
+                }
+                burst_done.notify_one();
+
+                // Wait until test observes queue.full + draft.behind and opens the gate.
+                release_after_burst.notified().await;
+
+                // Send 2 more lines so DraftGap emits its single gap line followed by recovery lines.
+                ws.send(send_sentence(total_burst + 1)).await.expect("send recovery line 1");
+                ws.send(send_sentence(total_burst + 2)).await.expect("send recovery line 2");
+
+                // Drain until client closes cleanly on Stop.
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let Message::Text(t) = msg
+                        && t.is_empty()
+                    {
+                        let _ = ws.send(Message::text(r#"{"tokens":[],"finished":true}"#)).await;
+                        break;
+                    }
+                }
+            });
+            let (ws, _) = client_async("ws://bench.local/draft-gap", client_io)
+                .await
+                .map_err(|_| End::Retry("connect"))?;
+            drop(server);
+            Ok(Box::new(ws) as Wire)
+        })
+    });
+
+    let config = Config {
+        realtime: "ws://bench.local/draft-gap".into(),
+        dial,
+        drafts: gated_draft.drafts(),
+        ..hub::config(dir.path())
+    };
+    let mut app = hub::App::with(config);
+    app.until(|_| true).await;
+    app.send(Command::Setup {
+        setup: zutalk_core::app::proto::Setup {
+            spoken: vec!["en".into()],
+            shown: vec!["en".into()],
+            ..Default::default()
+        },
+    });
+    app.until(|s| s.setup.shown == ["en"]).await;
+
+    let gate = gated_draft.close_gate();
+    app.send(Command::Start);
+    let rec_id = app.session(|s| s.is_some()).await.expect("session").id;
+
+    burst_done.notified().await;
+    app.notice("draft.behind").await;
+
+    // Release draft gate and wait for queued lines to drain so room opens before recovery lines.
+    drop(gate);
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let depth = app
+            .core
+            .stats()
+            .tally()
+            .queues
+            .into_iter()
+            .find(|r| r.name == "draft")
+            .map_or(0, |r| r.depth);
+        if depth == 0 {
+            break;
+        }
+        assert!(Instant::now() < drain_deadline, "draft queue did not drain after gate opened");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release_after_burst.notify_one();
+
+    // Wait for `draft.gap` to be emitted once recovery lines are offered, and for at least one
+    // audio block on tape so `seal()` keeps the recording on the shelf.
+    let gap_deadline = Instant::now() + Duration::from_secs(5);
+    while app.seen.of("draft.gap").is_empty()
+        || app
+            .core
+            .stats()
+            .tally()
+            .counts
+            .iter()
+            .find(|r| r.name == "tape.blocks")
+            .map_or(0, |r| r.n)
+            == 0
+    {
+        assert!(Instant::now() < gap_deadline, "expected draft.gap event and tape audio block");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+    let end_deadline = Instant::now() + Duration::from_secs(5);
+    while app.seen.of("recording.end").is_empty() {
+        assert!(Instant::now() < end_deadline, "expected recording.end after stop");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Observability assertions (P1-15-writers.md #13).
+    assert_eq!(
+        app.seen
+            .of("queue.full")
+            .iter()
+            .filter(|l| l.text("queue") == Some("draft") && l.text("policy") == Some("drop"))
+            .count(),
+        1,
+        "expected exactly one queue.full(draft, drop)"
+    );
+    assert_eq!(
+        app.seen
+            .of("notice.said")
+            .iter()
+            .filter(|l| l.text("code") == Some("draft.behind"))
+            .count(),
+        1,
+        "expected draft.behind notice exactly once"
+    );
+
+    let gaps = app.seen.of("draft.gap");
+    assert_eq!(gaps.len(), 1, "expected one draft.gap event, got {gaps:?}");
+    let gap_t0 = gaps[0].u64("t0_ms").expect("draft.gap t0_ms") as u32;
+    let gap_t1 = gaps[0].u64("t1_ms").expect("draft.gap t1_ms") as u32;
+    let gap_lines = gaps[0].u64("lines").expect("draft.gap lines");
+    let lost_count = app
+        .core
+        .stats()
+        .tally()
+        .counts
+        .iter()
+        .find(|r| r.name == "draft.lost_lines")
+        .map_or(0, |r| r.n);
+    assert!(gap_lines > 0 && gap_lines == lost_count, "gap_lines={gap_lines} vs lost={lost_count}");
+
+    // Verify the persisted draft on disk contains the single gap line matching [t0_ms, t1_ms]
+    // and continuous line numbering.
+    let recorded = hub::local_shelf(dir.path())
+        .read(&rec_id)
+        .expect("read shelf")
+        .expect("recording on shelf");
+    let gap_entries: Vec<_> =
+        recorded.lines.iter().filter(|(_, s)| s.line.text == "…" && s.line.incomplete).collect();
+    assert_eq!(gap_entries.len(), 1, "expected one gap line in draft, got {gap_entries:?}");
+    assert_eq!(gap_entries[0].1.line.t0, gap_t0);
+    assert_eq!(gap_entries[0].1.line.t1, gap_t1);
+
+    for (idx, (key, _)) in recorded.lines.iter().enumerate() {
+        assert_eq!(key, &format!("{rec_id}.0.{idx:05}"), "draft line keys must stay continuous");
+    }
+    assert_eq!(app.seen.refused(), 0);
 }
 
 // ---- 5. I7: stalls are seen and acted on ----

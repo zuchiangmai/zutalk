@@ -172,4 +172,12 @@ impl Reel for GatedReel {
         self.inner.blocks.fetch_add(1, Ordering::Release);
         Ok(())
     }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.writer.sync()
+    }
+
+    fn take_padded(&mut self) -> u64 {
+        self.writer.take_padded()
+    }
 }

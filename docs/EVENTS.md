@@ -109,3 +109,6 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `capture.end` | error | 时钟的策略结束了采集（如合盖睡眠） | `why`（`asleep`） |
 | `capture.pause` | info | 暂停或继续到了泵 | `paused` |
 | `capture.ring.lost` | warn | 泵这一圈发现某个声源的环丢过样本 | `source` `samples` |
+| `keep.lost` | warn | 写盘的部件丢了一批（写出错或 panic） | `part` `n`（这一批几个） `why`（错误的代码或 `panic`） |
+| `tape.pad` | warn | tape 上的洞补成了静音 | `from_ms` `blocks` |
+| `draft.gap` | warn | 草稿补了一行空缺 | `t0_ms` `t1_ms` `lines`（丢了几行） |

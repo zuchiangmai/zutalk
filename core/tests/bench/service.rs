@@ -74,6 +74,8 @@ pub enum Fault {
     ErrorAt { at_ms: u32, code: u16, error_type: &'static str, fired: Arc<AtomicBool> },
     /// Adds extra virtual delay to every response.
     Slow { extra_ms: u64 },
+    /// Ignores the empty end-of-stream frame so `lane::seam` freezes unsettled guesses as incomplete.
+    SilentOnFinish,
 }
 
 impl Fault {
@@ -327,7 +329,7 @@ async fn serve_conn(
     };
 
     let fault_snapshot = inner.fault.lock().expect("service fault lock").clone();
-    let silent_conn =
+    let mut silent_conn =
         matches!(fault_snapshot, Fault::Silent { connections } if conn_num <= connections);
     let extra_ms = match fault_snapshot {
         Fault::Slow { extra_ms } => extra_ms,
@@ -435,6 +437,14 @@ async fn serve_conn(
                 }
                 Some(Ok(Message::Text(text))) => {
                     if text.is_empty() {
+                        if matches!(*inner.fault.lock().expect("fault lock"), Fault::SilentOnFinish) {
+                            // Go silent on end-of-stream so `lane` hits TAIL_MS and flushes its
+                            // open guess tail as `incomplete: true`.
+                            silent_conn = true;
+                            pending.clear();
+                            pending_end = None;
+                            continue;
+                        }
                         if !silent_conn {
                             let mut tokens = Vec::new();
                             let had_open = !pending.is_empty() || pending_end.is_some();
