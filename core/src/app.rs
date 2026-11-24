@@ -4,3 +4,4 @@
 
 pub mod hub;
 pub mod proto;
+pub mod recording;

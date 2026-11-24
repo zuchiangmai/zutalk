@@ -22,7 +22,6 @@ done
 
 # Debt: file, count, who pays it.
 debt='
-core/src/app/hub.rs 2 P1-16
 core/src/ai/write.rs 1 P1-21
 core/src/out/city.rs 1 P1-21
 '

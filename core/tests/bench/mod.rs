@@ -29,7 +29,7 @@ use zutalk_core::app::hub::{Config, Core, Outlet};
 use zutalk_core::app::proto::{Column, Command, Frame, Session, Setup, State, Status};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::{Draft, Drafts, LINE, Said, Shelf, Writer as ShelfWriter};
-use zutalk_core::rt::stats::{PeakRow, QueueRow, Tally};
+use zutalk_core::rt::stats::{PeakRow, QueueRow, SpreadRow, Tally};
 use zutalk_log::{Level, Seen};
 
 /// Maximum JSON size of one live caption frame (`P1.md` §3.4).
@@ -71,8 +71,10 @@ pub struct BenchOptions {
     pub signed_in: bool,
     /// When `true`, preserves the mock key store already configured by the caller before `start`.
     pub keep_store: bool,
-    /// Default `true` (`zutalk_log::capture(Level::Info)`). Set `false` when entering `zutalk_log::files`.
+    /// Default `true` (`zutalk_log::capture(capture_level)`). Set `false` when entering `zutalk_log::files`.
     pub capture_log: bool,
+    /// Log level for in-memory capture (`Level::Info` by default).
+    pub capture_level: Level,
     /// Optional whole-session Soniox endpoint override (default: unreachable `NOWHERE`).
     pub soniox: Option<String>,
     /// Optional 0.8 app data folder for migration testing.
@@ -92,6 +94,7 @@ impl BenchOptions {
             signed_in: false,
             keep_store: false,
             capture_log: true,
+            capture_level: Level::Info,
             soniox: None,
             old: None,
             data: None,
@@ -412,7 +415,7 @@ impl Bench {
             ..Config::new(data.clone(), NOWHERE)
         };
 
-        let seen = opts.capture_log.then(|| zutalk_log::capture(Level::Info));
+        let seen = opts.capture_log.then(|| zutalk_log::capture(opts.capture_level));
         let (core, outlet) = Core::start(config).expect("core starts");
 
         let probe = Arc::new(Mutex::new(ProbeState::new(speech.words.len())));
@@ -556,6 +559,10 @@ impl Bench {
 
     pub fn queue(&self, name: &str) -> Option<QueueRow> {
         self.tally().queues.into_iter().find(|r| r.name == name)
+    }
+
+    pub fn spread(&self, name: &str) -> Option<SpreadRow> {
+        self.tally().spreads.into_iter().find(|r| r.name == name)
     }
 
     /// Configures `spoken` and `shown` languages and waits for `Core` to acknowledge them.

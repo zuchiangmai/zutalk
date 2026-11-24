@@ -9,52 +9,43 @@ use crate::app::proto::{
     Change, Command, From, Level as SoundLevel, Open, Room, Row, Session, Sound, State, Status,
     Writing,
 };
-use crate::capture::audio::{self, Capture, Hear, Hearing, Notice, Source};
-use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
+use crate::app::recording;
+pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
+use crate::capture::audio::{self, Capture, Hear, Hearing, Source};
+use crate::capture::clock::{wall_clock_policy, wall_ms};
 use crate::capture::tape::{self, Reels};
 use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
-use crate::live::frame::{Composer, Fit, Frame, MAX_COLUMNS, status, status_reason};
-use crate::live::lane::{self, Mode, Stream};
+use crate::live::frame::{Frame, MAX_COLUMNS};
+use crate::live::lane::{self, Mode};
 use crate::live::lines::Line;
 use crate::live::wire::{self, Dial};
 use crate::out::city::{self, Calendar, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
 use crate::record::shelf::{
-    self, About, DraftGap, DraftStep, Drafts, FILING, LINE, NOTE, RECORDING, Recording, SHARE,
-    SPEAKER, Said, Share,
+    self, About, Drafts, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf,
+    Words,
 };
-use crate::record::shelf::{Shelf, Words};
 use crate::record::{migrate, retain};
-use crate::rt::keep;
 use crate::rt::queue::{self, Back, Full, Rx, Tx};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::{self, Counter, Spread, Stats, Tally};
-use crate::rt::supervise::{End, Restarts, Tree, again};
-use crate::rt::water::Water;
+use crate::rt::supervise::{End, Tree, again};
+use crate::rt::water::{Gauge, Water};
 use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
-use zutalk_log::{Id, Level, error, info, warn};
+use zutalk_log::{Level, info, warn};
 
-const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
-/// Captions are drawn at most this often: once a 100 ms block, as new words come no faster.
-const FRAME_MS: u64 = 100;
 /// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
 const SLOT_MS: u64 = 250;
 /// The hub's mail. 256: a burst of clicks is a few dozen; the hub answers each in under a millisecond.
 pub const HUB_MAIL_MSGS: usize = 256;
 /// One turn of the hub (PLAN.md §4.1): a command should take under a millisecond.
 pub const HUB_TURN_BUDGET_US: u64 = 1_000;
-/// Audio blocks buffered for the tape writer: 600 × 100 ms = 60 s; longer means disk is stuck
-/// (`P1.md` §3.7, provisional `P1.md` §4 item 3).
-pub const TAPE_QUEUE_BLOCKS: usize = 600;
-/// Live draft lines buffered for the draft writer: 256 lines covers minutes of speech before
-/// collapsing dropped lines into one gap (`P1.md` §3.7, provisional `P1.md` §4 item 3).
-pub const DRAFT_QUEUE_LINES: usize = 256;
 
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
@@ -146,7 +137,7 @@ impl Config {
     }
 }
 
-enum Msg {
+pub(crate) enum Msg {
     Do(Command),
     Ended(String),
     Writing(Writing),
@@ -230,6 +221,8 @@ pub struct Core {
     results: Tx<Msg>,
     commands_refused: Counter,
     stats: Stats,
+    shell: Arc<Gauge>,
+    screen: Arc<Gauge>,
 }
 
 impl Core {
@@ -249,6 +242,8 @@ impl Core {
         let level_reg = Register::new(SoundLevel::default());
         let water_reg = Register::new(Water::default());
         let stats_reg = Register::new(Tally::default());
+        let shell = Arc::new(Gauge::new());
+        let screen = Arc::new(Gauge::new());
         let (said, said_reading) = Voice::new(&stats);
         let outlet = Outlet {
             state: state_reg.read(),
@@ -281,7 +276,9 @@ impl Core {
             frame_reg,
             session_reg,
             level_reg,
-            _water_reg: water_reg,
+            water_reg,
+            shell: shell.clone(),
+            screen: screen.clone(),
             said,
             http,
             who: Who::Nobody("starting"),
@@ -299,7 +296,7 @@ impl Core {
         };
         root.spawn("hub", hub.run(mail));
         root.spawn("stats", stats::publish(stats.clone(), stats_reg));
-        Ok((Core { commands, results, commands_refused, stats }, outlet))
+        Ok((Core { commands, results, commands_refused, stats, shell, screen }, outlet))
     }
 
     pub fn send(&self, command: Command) -> Result<(), &'static str> {
@@ -318,6 +315,16 @@ impl Core {
     /// ready to install, or what kept it from being had.
     pub async fn looked(&self, found: Result<String, &'static str>) {
         let _ = self.results.send(Msg::Looked(found)).await; // dropped: the hub has ended
+    }
+
+    /// Reports the latest frame sequence pushed by the shell (`P1.md` §3.3, §3.5).
+    pub fn pushed(&self, seq: u64) {
+        self.shell.set(seq);
+    }
+
+    /// Reports the latest frame sequence drawn by the interface (`P1.md` §3.3, §3.5).
+    pub fn drawn(&self, seq: u64) {
+        self.screen.set(seq);
     }
 
     /// Live statistics for this core: counters, peaks, spreads, and queues.
@@ -362,7 +369,9 @@ struct Hub {
     frame_reg: Register<Frame>,
     session_reg: Register<Option<Session>>,
     level_reg: Register<SoundLevel>,
-    _water_reg: Register<Water>,
+    water_reg: Register<Water>,
+    shell: Arc<Gauge>,
+    screen: Arc<Gauge>,
     said: Voice,
     http: reqwest::Client,
     who: Who,
@@ -667,11 +676,7 @@ impl Hub {
             config: self.config.clone(),
             results: self.results.clone(),
             progress: self.progress.clone(),
-            frame: self.frame_reg.clone(),
-            session: self.session_reg.clone(),
-            level: self.level_reg.clone(),
             said: self.said.clone(),
-            stats: self.tree.stats().clone(),
             tree: self.tree.clone(),
             terms: self.state.terms.clone(),
         }
@@ -704,9 +709,31 @@ impl Hub {
         shelf.put(&id, RECORDING, &[(id.clone(), Some(about.clone()))], started).map_err(fail)?;
         self.session_reg.set(Some(Session { id: id.clone(), started, status: initial }));
         let (mode, watching) = watch::channel(Mode::Recording);
-        tokio::spawn(zutalk_log::carry(
-            self.task(&id, &shelf).record(source, about, captions, watching),
-        ));
+        let rec_start = recording::Start {
+            id: id.clone(),
+            about,
+            source,
+            captions,
+            mode: watching,
+            shelf: shelf.clone(),
+            keys: self.keys.clone(),
+            config: self.config.clone(),
+            terms: self.state.terms.clone(),
+            frame: self.frame_reg.clone(),
+            session: self.session_reg.clone(),
+            level: self.level_reg.clone(),
+            water: self.water_reg.clone(),
+            said: self.said.clone(),
+            shell: self.shell.clone(),
+            screen: self.screen.clone(),
+            root: self.tree.clone(),
+            results: self.results.clone(),
+        };
+        let post = self.task(&id, &shelf);
+        self.tree.spawn("recording", async move {
+            let done = recording::run(rec_start).await;
+            post.after_seal(done.sealed).await;
+        });
         self.recording = Some((id, mode));
         Ok(())
     }
@@ -722,6 +749,7 @@ impl Hub {
             self.session_reg.set(None);
             self.frame_reg.set(Frame::default());
             self.level_reg.set(SoundLevel::default());
+            self.water_reg.change(|current| (*current != Water::default()).then(Water::default));
             self.state.writing.push(writing(&id, "closing"));
         }
     }
@@ -1019,22 +1047,7 @@ fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<(), &'static str> {
     done.map_err(fail)
 }
 
-enum ListenEnd {
-    StoppedByHub,
-    EndedByCapture(&'static str),
-}
-
-fn end_once(ended: &watch::Sender<Option<&'static str>>, why: &'static str) {
-    ended.send_if_modified(|current| {
-        let first = current.is_none();
-        if first {
-            *current = Some(why);
-        }
-        first
-    });
-}
-
-/// One recording, from its first block to its written transcript.
+/// Whole-recording transcription task run after a recording seals its tape (`P1-19` moves this to `work.rs`).
 struct Task {
     id: String,
     shelf: Arc<Shelf>,
@@ -1042,11 +1055,7 @@ struct Task {
     config: Arc<Config>,
     results: Tx<Msg>,
     progress: Tx<Msg>,
-    frame: Register<Frame>,
-    session: Register<Option<Session>>,
-    level: Register<SoundLevel>,
     said: Voice,
-    stats: Stats,
     tree: Tree,
     terms: Vec<Term>, // the glossary as it was when the task began
 }
@@ -1056,369 +1065,15 @@ impl Task {
         self.config.tapes().join(&self.id)
     }
 
-    fn is_active(&self) -> bool {
-        (*self.session.read().now().1).as_ref().is_some_and(|s| s.id == self.id)
-    }
-
-    fn report_status(&self, told: &mut Option<Status>, next: Status, why: &'static str) {
-        if told.as_ref() == Some(&next) {
-            return;
-        }
-        let mut active = false;
-        self.session.change(|current| {
-            let session = current.as_ref().filter(|s| s.id == self.id)?;
-            active = true;
-            (session.status != next)
-                .then(|| Some(Session { status: next.clone(), ..session.clone() }))
-        });
-        if !active {
-            return;
-        }
-        let from = told.as_ref().map_or("", Status::code);
-        *told = Some(next.clone());
-        info!("session.status", rec = Id(&self.id), from = from, to = next.code(), why = why);
-    }
-
-    async fn record(
-        self,
-        source: Source,
-        about: About,
-        captions: Result<Vec<Stream>, &'static str>,
-        mode: watch::Receiver<Mode>,
-    ) {
-        let started_at = tokio::time::Instant::now();
-        let source_code = source.code();
-        let (lanes, columns, captions_code) = match &captions {
-            Ok(streams) => (streams.len(), about.shown.len().min(MAX_COLUMNS), "live"),
-            Err(why) => (0, 0, *why),
-        };
-        info!(
-            "recording.start",
-            rec = Id(&self.id),
-            source = source_code,
-            lanes = lanes,
-            columns = columns,
-            captions = captions_code,
-        );
-        let end_code = match self.listen(source, &about, captions, mode).await {
-            Ok(ListenEnd::StoppedByHub) => "done",
-            Ok(ListenEnd::EndedByCapture(_)) => {
-                let _ = self.results.send(Msg::Ended(self.id.clone())).await; // dropped: the hub has ended
-                "done"
-            }
-            Err(code) => {
-                // Whatever ends the listening ends the recording; what was kept is kept.
-                self.said.say(code);
-                let _ = self.results.send(Msg::Ended(self.id.clone())).await; // dropped: the hub has ended
-                code
-            }
-        };
-        self.finish(Some((started_at, end_code))).await;
-    }
-
     async fn finish_recovered(self) {
-        self.finish(None).await;
+        let sealed = recording::seal(&self.tree, &self.shelf, self.tape(), &self.id).await;
+        if let Err(code) = sealed {
+            self.said.say(code);
+        }
+        self.after_seal(sealed).await;
     }
 
-    /// Hears until the recording stops: the tape, the captions, and the live draft, which is
-    /// the recording's text until its transcript is written. The draft is kept line by line,
-    /// so a crash keeps what was said before it.
-    async fn listen(
-        &self,
-        source: Source,
-        about: &About,
-        captions: Result<Vec<Stream>, &'static str>,
-        mut mode: watch::Receiver<Mode>,
-    ) -> Result<ListenEnd, &'static str> {
-        let key = keys::derive("tape", &self.id).map_err(code)?;
-        let recording = self.tree.child("recording");
-        let (tape_tx, tape_rx) =
-            queue::bounded(recording.stats(), "tape", TAPE_QUEUE_BLOCKS, Full::End);
-        let (streams, quiet) = match captions {
-            Ok(streams) => (streams, ""),
-            Err(why) => (Vec::new(), why),
-        };
-        let ((audio, _), (lanes, mut heard)) = (broadcast::channel(64), mpsc::channel(64));
-        let (endpoint, model, spoken) =
-            (self.config.realtime.clone(), REALTIME.into(), about.spoken.clone());
-        let setup = lane::Setup { endpoint, model, spoken, ..lane::Setup::default() };
-        for (n, stream) in streams.iter().cloned().enumerate() {
-            let setup = glossary::live(&self.terms, &stream, setup.clone());
-            let (keys, dial, stats, lanes, audio, mode) = (
-                self.keys.clone(),
-                self.config.dial.clone(),
-                self.stats.clone(),
-                lanes.clone(),
-                audio.subscribe(),
-                mode.clone(),
-            );
-            tokio::spawn(zutalk_log::carry(async move {
-                lane::run(n, stream, &setup, keys, dial, stats, audio, mode, lanes).await
-            }));
-        }
-        drop(lanes);
-        let file = matches!(source, Source::File(_));
-        let (ended_tx, mut ended_rx) = watch::channel(None);
-        let tape_wait = file.then(|| tape_tx.with(Full::Wait));
-        let (ended, level, mode_rx, mut kept) =
-            (ended_tx.clone(), self.level.clone(), mode.clone(), true);
-        let sink = move |block: Block| {
-            let block = Arc::new(block);
-            if *mode_rx.borrow() == Mode::Recording {
-                level.set(SoundLevel::of(&block.pcm));
-            }
-            // Without the tape there is no recording: record why and end it.
-            if kept {
-                let ok = match &tape_wait {
-                    Some(tx) => tx.send_blocking(block.clone()).is_ok(),
-                    None => tape_tx.offer(block.clone()).is_ok(),
-                };
-                if !ok {
-                    kept = false;
-                    end_once(&ended, "tape");
-                }
-            }
-            let _ = audio.send(block); // dropped: broadcast fails only when no caption lanes are listening
-        };
-        let (ended, said) = (ended_tx, self.said.clone());
-        let notice = move |notice| match notice {
-            Notice::Ended => end_once(&ended, if file { "done" } else { "audio.closed" }),
-            Notice::Fatal(code) if file => end_once(&ended, code),
-            Notice::Restarted(code) | Notice::Fatal(code) => said.say(code),
-        };
-        let mut capture = Some(
-            (self.config.hear)(source, Box::new(sink), Box::new(notice), &self.stats)
-                .map_err(code)?,
-        );
-
-        let tape_dir = self.tape();
-        let reels = self.config.reels.clone();
-        let tape_blocks = recording.stats().counter("tape.blocks");
-        let tape_padded = recording.stats().counter("tape.padded_blocks");
-        let tape_batch_ms = recording.stats().spread("tape.batch_ms");
-        let mut tape_done = Some(keep::start(
-            &recording,
-            "tape",
-            "tape.batch",
-            tape_rx,
-            tape_batch_ms,
-            Restarts::default(),
-            move || (reels)(&tape_dir, &key).map_err(|_| "tape"),
-            move |writer, batch: &[Arc<Block>]| {
-                for block in batch {
-                    let res = writer.append(block);
-                    let padded = writer.take_padded();
-                    if padded > 0 {
-                        tape_padded.add(padded);
-                    }
-                    res.map_err(|_| "tape")?;
-                }
-                tape_blocks.add(batch.len() as u64);
-                Ok(())
-            },
-            |writer| writer.sync().map_err(|_| "tape"),
-        ));
-
-        let (draft_tx, draft_rx) =
-            queue::bounded(recording.stats(), "draft", DRAFT_QUEUE_LINES, Full::Drop);
-        let draft_shelf = self.shelf.clone();
-        let draft_id = self.id.clone();
-        let drafts = self.config.drafts.clone();
-        let draft_lines = recording.stats().counter("draft.lines");
-        let draft_lost = recording.stats().counter("draft.lost_lines");
-        let draft_batch_ms = recording.stats().spread("draft.batch_ms");
-        let draft_done = keep::start(
-            &recording,
-            "draft",
-            "draft.batch",
-            draft_rx,
-            draft_batch_ms,
-            Restarts::default(),
-            move || (drafts)(&draft_shelf, &draft_id).map_err(fail),
-            move |writer, batch: &[(String, Said, i64)]| {
-                for (key, said, at) in batch {
-                    writer.put(key, said, *at).map_err(fail)?;
-                }
-                draft_lines.add(batch.len() as u64);
-                Ok(())
-            },
-            |writer| writer.sync().map_err(fail),
-        );
-
-        let (mut draft_gap, mut n) = (DraftGap::new(), 0usize);
-        let mut open = !streams.is_empty();
-        let (mut composer, mut frame_tick) = (Composer::new(&about.shown, streams), tick());
-        let (frame_made, frame_cut, frame_bound) = (
-            self.stats.counter("frame.made"),
-            self.stats.counter("frame.cut"),
-            self.stats.peak("frame.bound_bytes"),
-        );
-        let mut last_fit = Fit::Whole;
-        let mut told = quiet.is_empty().then_some(Status::Connecting);
-        let mut outcome = ListenEnd::StoppedByHub;
-        let mut tape_failed = false;
-        while capture.is_some() || open {
-            tokio::select! {
-                changed = mode.changed(), if capture.is_some() => {
-                    let now = changed.map_or(Mode::Stopped, |()| *mode.borrow_and_update());
-                    match (now, &capture) {
-                        (Mode::Paused, Some(capture)) => {
-                            capture.pause();
-                            if self.is_active() {
-                                self.level.set(SoundLevel::default());
-                            }
-                        }
-                        (Mode::Recording, Some(capture)) => capture.resume(),
-                        _ => capture = None, // the last blocks are delivered, the sink dropped
-                    }
-                    composer.pause(now == Mode::Paused);
-                }
-                changed = ended_rx.changed(), if capture.is_some() => {
-                    if changed.is_ok()
-                        && let Some(why) = *ended_rx.borrow_and_update()
-                    {
-                        outcome = ListenEnd::EndedByCapture(why);
-                        capture = None;
-                        if self.is_active() {
-                            self.level.set(SoundLevel::default());
-                        }
-                    }
-                }
-                end = async {
-                    tape_done.as_mut().expect("guarded by is_some").await
-                }, if tape_done.is_some() => {
-                    tape_done = None;
-                    if let Some(End::Fatal(_)) = end {
-                        tape_failed = true;
-                        if capture.is_some() {
-                            outcome = ListenEnd::EndedByCapture("tape");
-                            capture = None;
-                            if self.is_active() {
-                                self.level.set(SoundLevel::default());
-                            }
-                        }
-                    }
-                }
-                event = heard.recv(), if open => match event {
-                    None => open = false,
-                    Some(event) => {
-                        for said in drafted(&event) {
-                            let (t0_ms, t1_ms) = (said.line.t0, said.line.t1);
-                            if let DraftStep::GapFirst(span) = draft_gap.next() {
-                                let gap_said = said_line(DraftGap::gap_line(span));
-                                let key = format!("{}.0.{n:05}", self.id);
-                                if draft_tx.offer((key, gap_said, now())).is_ok() {
-                                    n += 1;
-                                    if let Some(sent) = draft_gap.gap_sent() {
-                                        warn!(
-                                            "draft.gap",
-                                            t0_ms = sent.t0_ms,
-                                            t1_ms = sent.t1_ms,
-                                            lines = sent.lines,
-                                        );
-                                    }
-                                } else {
-                                    draft_lost.add(1);
-                                    if draft_gap.missed(t0_ms, t1_ms).first {
-                                        self.said.say("draft.behind");
-                                    }
-                                    continue;
-                                }
-                            }
-                            let key = format!("{}.0.{n:05}", self.id);
-                            if draft_tx.offer((key, said, now())).is_ok() {
-                                n += 1;
-                            } else {
-                                draft_lost.add(1);
-                                if draft_gap.missed(t0_ms, t1_ms).first {
-                                    self.said.say("draft.behind");
-                                }
-                            }
-                        }
-                        composer.take(event);
-                    }
-                },
-                _ = frame_tick.tick(), if composer.dirty() => {
-                    if let Some((frame, fit)) = composer.frame() {
-                        frame_made.add(1);
-                        frame_bound.set(composer.bound_bytes() as u64);
-                        if fit != Fit::Whole {
-                            frame_cut.add(1);
-                        }
-                        if fit != last_fit {
-                            let bytes = serde_json::to_vec(&frame).map_or(0, |v| v.len());
-                            info!(
-                                "frame.fit",
-                                from = last_fit.code(),
-                                to = fit.code(),
-                                bytes = bytes,
-                            );
-                            last_fit = fit;
-                        }
-                        if *mode.borrow() != Mode::Stopped && self.is_active() {
-                            self.frame.set(frame);
-                        }
-                        let next = status(composer.paused(), composer.links(), quiet);
-                        let why = status_reason(composer.paused(), composer.links(), quiet);
-                        self.report_status(&mut told, next, why);
-                    }
-                }
-            }
-        }
-        // Flush any trailing gap before closing the draft queue so dropped lines at stop are marked.
-        if let Some(span) = draft_gap.pending() {
-            let gap_said = said_line(DraftGap::gap_line(span));
-            let key = format!("{}.0.{n:05}", self.id);
-            if draft_tx.send((key, gap_said, now())).await.is_ok()
-                && let Some(sent) = draft_gap.gap_sent()
-            {
-                warn!("draft.gap", t0_ms = sent.t0_ms, t1_ms = sent.t1_ms, lines = sent.lines);
-            }
-        }
-        drop(draft_tx);
-        let _ = draft_done.await; // dropped: draft write errors do not end or invalidate the audio recording
-
-        let tape_ended = matches!(outcome, ListenEnd::EndedByCapture("tape")) || tape_failed;
-        if tape_ended {
-            // Do not wait on a stuck tape writer that already overflowed or gave up.
-            recording.cancel();
-            recording.wait().await;
-            return Err("tape");
-        }
-        if let Some(done) = tape_done.take()
-            && matches!(done.await, Some(End::Fatal(_)))
-        {
-            recording.wait().await;
-            return Err("tape");
-        }
-        recording.wait().await;
-        match outcome {
-            ListenEnd::EndedByCapture(why) if why != "done" => Err(why),
-            other => Ok(other),
-        }
-    }
-
-    /// The tape is closed: a torn tail is cut off, its length goes on the record, and its
-    /// transcript is written. A recording that kept no sound is nothing, and is removed.
-    async fn finish(self, recorded: Option<(tokio::time::Instant, &'static str)>) {
-        let sealed = self.seal().await;
-        match (&sealed, recorded) {
-            (Err(code), Some((started_at, "done"))) => {
-                self.said.say(code);
-                let ms = started_at.elapsed().as_millis() as u64;
-                error!("recording.end", rec = Id(&self.id), code = *code, ms = ms);
-            }
-            (_, Some((started_at, end_code))) => {
-                let ms = started_at.elapsed().as_millis() as u64;
-                if end_code == "done" {
-                    info!("recording.end", rec = Id(&self.id), code = end_code, ms = ms);
-                } else {
-                    error!("recording.end", rec = Id(&self.id), code = end_code, ms = ms);
-                }
-            }
-            (Err(code), None) => self.said.say(code),
-            (Ok(_), None) => {}
-        }
+    async fn after_seal(self, sealed: Result<Option<About>, &'static str>) {
         match sealed {
             Ok(Some(about)) if about.length_ms == 0 => drop(fs::remove_dir_all(self.tape())),
             Ok(Some(about)) => {
@@ -1434,21 +1089,6 @@ impl Task {
             Err(_) => {}
         }
         let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
-    }
-
-    async fn seal(&self) -> Result<Option<About>, &'static str> {
-        let (dir, key) = (self.tape(), keys::derive("tape", &self.id).map_err(code)?);
-        let length = tokio::task::spawn_blocking(move || tape::recover(&dir, &key)).await;
-        let length_ms = length.map_err(|_| "tape")?.map_err(|_| "tape")?;
-        let Some(recording) = self.shelf.about(&self.id).map_err(fail)? else { return Ok(None) };
-        let updated = About { length_ms, ..recording.about };
-        if length_ms == 0 || recording.about.length_ms != length_ms {
-            let about = (length_ms > 0).then_some(updated.clone());
-            self.shelf
-                .put(&self.id, RECORDING, &[(self.id.clone(), about)], now())
-                .map_err(fail)?;
-        }
-        Ok(Some(updated))
     }
 
     async fn write(&self) {
@@ -1485,30 +1125,5 @@ impl Task {
         if let Err(end) = written.await {
             self.said.say(code(end));
         }
-    }
-}
-
-fn tick() -> tokio::time::Interval {
-    let mut tick = tokio::time::interval(Duration::from_millis(FRAME_MS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick
-}
-
-fn said_line(line: Line) -> Said {
-    let via = line.translations.keys().map(String::as_str).chain(["text"]);
-    Said { via: via.map(|piece| (piece.into(), REALTIME.into())).collect(), line }
-}
-
-/// The draft's lines from the first stream, with where their words came from. A stretch the
-/// captions missed is a line of its own.
-fn drafted(event: &lane::Event) -> Vec<Said> {
-    match event {
-        lane::Event::Lines { stream: 0, lines } => lines.iter().cloned().map(said_line).collect(),
-        &lane::Event::Gap { stream: 0, t0, t1, .. } => {
-            vec![said_line(Line {
-                t0, t1, text: "…".into(), incomplete: true, ..Line::default()
-            })]
-        }
-        _ => Vec::new(),
     }
 }

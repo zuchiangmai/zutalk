@@ -60,6 +60,11 @@ impl<T> Register<T> {
     pub fn read(&self) -> Reading<T> {
         Reading(self.0.subscribe())
     }
+
+    /// Current monotonic sequence number of this register.
+    pub fn seq(&self) -> u64 {
+        self.0.borrow().0
+    }
 }
 
 impl<T> Reading<T> {

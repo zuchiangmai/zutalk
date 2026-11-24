@@ -320,6 +320,20 @@ pub async fn supervise<P: Part>(
     supervise_with(part, open, broke, restarts, None).await
 }
 
+/// Like [`supervise`], and records restarts and give-ups into `stats` (`part.restarts`,
+/// `part.gave_up`).
+pub async fn supervise_counted<P: Part>(
+    part: &'static str,
+    open: impl AsyncFnMut() -> Result<P, End>,
+    broke: impl FnMut(&'static str),
+    restarts: Restarts,
+    stats: &Stats,
+) -> End {
+    let reopened = stats.counter("part.restarts");
+    let gave_up = stats.counter("part.gave_up");
+    supervise_with(part, open, broke, restarts, Some((&reopened, &gave_up))).await
+}
+
 /// A transcript that could not be written, for a reason that may pass, is tried again: first
 /// after a minute (long enough for a network to come back), then ever more patiently.
 pub const AGAIN_MS: u64 = 60_000;

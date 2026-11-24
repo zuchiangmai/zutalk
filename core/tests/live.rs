@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -16,11 +16,12 @@ use tokio_tungstenite::{WebSocketStream, accept_async, client_async, connect_asy
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::id::keys::{Keys, Lease, Secret, Service};
 use zutalk_core::live::lane::{
-    Event, Link, Mode, Reply, Setup, Stream, captions, config, failure, hand_over, overlong, plan,
-    quiet, reply, run,
+    Event, Gauges, Link, Mode, Reply, Setup, Stream, captions, config, failure, hand_over,
+    overlong, plan, quiet, reply, run,
 };
 use zutalk_core::live::lines::{Line, Token};
 use zutalk_core::live::wire::{Dial, Wire, dial};
+use zutalk_core::rt::queue::{self, Fanout, Full, Rx};
 use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::End;
 
@@ -429,9 +430,10 @@ fn end() -> Value {
 }
 
 struct Lane {
-    audio: broadcast::Sender<Arc<Block>>,
+    audio: Fanout<Arc<Block>>,
     mode: watch::Sender<Mode>,
-    events: mpsc::Receiver<Event>,
+    events: Rx<Event>,
+    gauges: Gauges,
     task: JoinHandle<End>,
     keys: Arc<TestKeys>,
     t_ms: u32, // the capture clock
@@ -442,16 +444,19 @@ fn start(endpoint: &str, kind: Stream, keys: TestKeys) -> Lane {
 }
 
 fn start_with(endpoint: &str, kind: Stream, keys: TestKeys, dial: Dial, stats: Stats) -> Lane {
-    let (audio, heard) = broadcast::channel(64);
+    let audio = queue::fanout(&stats, "audio", 64);
+    let heard = audio.subscribe();
     let (mode, mode_rx) = watch::channel(Mode::Recording);
-    let (out, events) = mpsc::channel(1024);
+    let (out, events) = queue::bounded(&stats, "lane.events", 1024, Full::Wait);
+    let gauges = Gauges::default();
+    let lane_gauges = gauges.clone();
     let (keys, setup) = (Arc::new(keys), setup(endpoint));
     let lane_keys = keys.clone();
     // Spawned: the lane has to be `Send` to run beside the rest of the app.
     let task = tokio::spawn(zutalk_log::carry(async move {
-        run(0, kind, &setup, lane_keys, dial, stats, heard, mode_rx, out).await
+        run(0, kind, &setup, lane_keys, dial, stats, lane_gauges, heard, mode_rx, out).await
     }));
-    Lane { audio, mode, events, task, keys, t_ms: 0 }
+    Lane { audio, mode, events, gauges, task, keys, t_ms: 0 }
 }
 
 impl Lane {
@@ -1143,6 +1148,62 @@ async fn a_gap_is_an_event_with_its_edges_and_its_reason() {
     assert_eq!(seen.refused(), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_lane_reports_what_it_sent_what_was_heard_and_what_is_final() {
+    for start_ms in [0u32, 5_000u32] {
+        let seen = zutalk_log::capture(zutalk_log::Level::Info);
+        let stats = Stats::new();
+        let (dial, mut conns) = duplex_dial();
+        let mut lane =
+            start_with("ws://duplex.local", Stream::Transcribe, TestKeys::default(), dial, stats);
+        lane.t_ms = start_ms;
+
+        let (mut ws, _) = duplex_accept(&mut conns).await;
+        assert_eq!(lane.event().await, link_event(Link::Connecting));
+
+        // Send 10 blocks (1000 ms), service hears 600 ms and finalizes a line ending at 480 ms.
+        for _ in 0..10 {
+            lane.record(loud());
+            assert_eq!(duplex_sent(&mut ws).await, Sent::Audio(BLOCK * 2));
+        }
+        lane.until(is_live).await;
+        assert_eq!(lane.gauges.sent.read(), (u64::from(start_ms) + 1_000, "", None));
+
+        duplex_say(
+            &mut ws,
+            json!({"tokens": [word("Hello", 120, 480), end()], "total_audio_proc_ms": 600}),
+        )
+        .await;
+        lane.until(is_lines).await;
+        assert_eq!(lane.gauges.sent.read().0, u64::from(start_ms) + 1_000);
+        assert_eq!(lane.gauges.heard.read().0, u64::from(start_ms) + 600);
+        assert_eq!(lane.gauges.final_at.read().0, u64::from(start_ms) + 480);
+
+        // Drop connection: while reconnecting, `because` reflects the break reason ("closed").
+        drop(ws);
+        lane.until(|e| *e == link_event(Link::Connecting)).await;
+        assert_eq!(lane.gauges.sent.read().1, "closed");
+        assert_eq!(lane.gauges.sent.read().2, None);
+
+        // Accept fresh connection, send 1 block to go Live again, then stop cleanly.
+        let (mut ws2, _) = duplex_accept(&mut conns).await;
+        lane.record(loud());
+        assert_eq!(duplex_sent(&mut ws2).await, Sent::Audio(BLOCK * 2));
+        lane.until(is_live).await;
+        assert_eq!(lane.gauges.sent.read().1, "");
+
+        lane.mode.send(Mode::Stopped).unwrap();
+        assert_eq!(duplex_sent(&mut ws2).await, Sent::Finish);
+        duplex_say(&mut ws2, json!({"tokens": [], "finished": true, "total_audio_proc_ms": 100}))
+            .await;
+        let sent_gauge = lane.gauges.sent.clone();
+        let (end, _) = lane.ended().await;
+        assert_eq!(end, End::Done);
+        assert_eq!(sent_gauge.read().2, Some("done"));
+        assert_eq!(seen.refused(), 0);
+    }
+}
+
 // ---- the real service ----
 
 /// The person's own key, every time.
@@ -1252,12 +1313,26 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
         REAL.into()
     };
 
-    let (audio, heard) = broadcast::channel(64);
+    let stats = Stats::new();
+    let audio = queue::fanout(&stats, "audio", 64);
+    let heard = audio.subscribe();
     let (mode, mode_rx) = watch::channel(Mode::Recording);
-    let (out, mut events) = mpsc::channel(64);
+    let (out, mut events) = queue::bounded(&stats, "lane.events", 64, Full::Wait);
     let (setup, keys) = (Setup { terms: strings(&["ZuTalk"]), ..setup(&endpoint) }, OneKey(key));
     let lane = tokio::spawn(async move {
-        run(0, two_way(), &setup, Arc::new(keys), dial(), Stats::new(), heard, mode_rx, out).await
+        run(
+            0,
+            two_way(),
+            &setup,
+            Arc::new(keys),
+            dial(),
+            stats,
+            Gauges::default(),
+            heard,
+            mode_rx,
+            out,
+        )
+        .await
     });
     // Everything the lane says, with when it said it.
     let started = Instant::now();
@@ -1287,7 +1362,7 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
         } else if t_ms > 300 && pauses.contains(&(t_ms - 300)) {
             mode.send(Mode::Recording).unwrap();
         }
-        audio.send(Arc::new(Block { t_ms, pcm: block.to_vec() })).unwrap();
+        let _ = audio.send(Arc::new(Block { t_ms, pcm: block.to_vec() }));
     }
     let recorded_ms = (pcm.len() / BLOCK) as u32 * 100;
     mode.send(Mode::Stopped).unwrap();

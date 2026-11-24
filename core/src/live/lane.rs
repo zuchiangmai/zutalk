@@ -8,15 +8,16 @@ use crate::id::keys::{Keys, Service};
 use crate::live::frame::MAX_COLUMNS;
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::live::wire::{Dial, Wire};
+use crate::rt::queue::{FanoutRx, RecvError, Tx};
 use crate::rt::stats::{Counter, Stats};
-use crate::rt::supervise::{End, Part, Restarts, supervise};
+use crate::rt::supervise::{End, Part, Restarts, supervise_counted};
+use crate::rt::water::Gauge;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::{Receiver, error::RecvError};
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::{Error, Message};
 use zutalk_log::{info, warn};
@@ -33,9 +34,10 @@ const KEEPALIVE_MS: u64 = 10_000;
 /// How long the last words may take to come once the audio has ended. 0.8's drain time.
 const TAIL_MS: u64 = 5_000;
 /// Kept up over minutes, the service takes audio in at the speed of speech and no faster, so
-/// what is late stays late. More blocks than this waiting, or a service this far behind what
-/// it was sent, is not live any more. 15 s is the most 0.8 would catch up (LESSONS.md, Soniox).
-const BACKLOG: usize = 20;
+/// what is late stays late. More blocks than this waiting (20 × 100 ms = 2 s), or a service
+/// this far behind what it was sent, is not live any more. 15 s is the most 0.8 would catch up
+/// (LESSONS.md, Soniox).
+const BACKLOG_BLOCKS: usize = 20;
 /// See above: 0.8's 15 s window to catch up in (LESSONS.md, Soniox).
 const BEHIND_MS: u32 = 15_000;
 /// A connection near its key's cap gives way at a pause in its last minute. 0.8's handover lead.
@@ -273,6 +275,14 @@ impl Feed {
     }
 }
 
+/// Watermark gauges reported by one caption lane (`P1.md` §3.5).
+#[derive(Clone, Default)]
+pub struct Gauges {
+    pub sent: Arc<Gauge>,
+    pub heard: Arc<Gauge>,
+    pub final_at: Arc<Gauge>,
+}
+
 /// One stream, across its connections. A connection holds it for as long as it lives.
 struct Lane<K> {
     stream: usize,
@@ -281,8 +291,9 @@ struct Lane<K> {
     keys: Arc<K>,
     dial: Dial,
     gaps: Counter,
-    out: mpsc::Sender<Event>,
-    audio: Receiver<Arc<Block>>,
+    gauges: Gauges,
+    out: Tx<Event>,
+    audio: FanoutRx<Arc<Block>>,
     mode: watch::Receiver<Mode>,
     lines: Assembler,
     tail: Vec<Line>,   // the open lines, as last told
@@ -302,14 +313,17 @@ pub async fn run<K: Keys>(
     keys: Arc<K>,
     dial: Dial,
     stats: Stats,
-    audio: Receiver<Arc<Block>>,
+    gauges: Gauges,
+    audio: FanoutRx<Arc<Block>>,
     mode: watch::Receiver<Mode>,
-    out: mpsc::Sender<Event>,
+    out: Tx<Event>,
 ) -> End {
     let spoken: Vec<&str> = setup.spoken.iter().map(String::as_str).collect();
     let (lines, tail, mut stop) = (Assembler::new(&spoken), Vec::new(), mode.clone());
     let (setup, edge, why, paused) = (setup.clone(), 0, "start", *mode.borrow() == Mode::Paused);
+    gauges.sent.because(why);
     let gaps = stats.counter("lane.gaps");
+    let broke_sent = gauges.sent.clone();
     let lane = Lane {
         stream,
         kind,
@@ -317,6 +331,7 @@ pub async fn run<K: Keys>(
         keys,
         dial,
         gaps,
+        gauges,
         out,
         audio,
         mode,
@@ -339,6 +354,7 @@ pub async fn run<K: Keys>(
     let name = LANE_NAMES[stream];
     let (opener, broken) = (lane.clone(), lane.clone());
     let broke = move |why| {
+        broke_sent.because(why);
         if let Ok(mut lane) = broken.try_lock() {
             lane.why = why;
             if why == "panic" {
@@ -350,17 +366,19 @@ pub async fn run<K: Keys>(
     };
     let end = tokio::select! {
         biased;
-        end = supervise(
+        end = supervise_counted(
             name,
             async move || open(opener.clone().lock_owned().await).await,
             broke,
             Restarts::default(),
+            &stats,
         ) => end,
         () = stopped => End::Done,
     };
     let mut lane = lane.lock().await;
     lane.seam().await;
     let code = if let End::Retry(code) | End::Fatal(code) = end { code } else { "done" };
+    lane.gauges.sent.ended(code);
     lane.say(Link::Stopped(code)).await;
     end
 }
@@ -416,6 +434,9 @@ impl<K: Keys> Lane<K> {
     /// Tells the lines that finished, and the open ones when they changed.
     async fn show(&mut self, lines: Vec<Line>) {
         if !lines.is_empty() {
+            if let Some(last) = lines.last() {
+                self.gauges.final_at.set(u64::from(last.t1));
+            }
             self.tell(Event::Lines { stream: self.stream, lines }).await;
         }
         let tail = self.lines.tail();
@@ -540,6 +561,8 @@ impl<K: Keys> Conn<K> {
                 (feed.capture(token.start_ms), feed.capture(token.end_ms));
         }
         feed.heard = feed.heard.max(reply.clock_ms);
+        let heard_cap = feed.capture(feed.heard);
+        self.lane.gauges.heard.set(u64::from(heard_cap));
         let boundary = if reply.ended { Boundary::Provider } else { Boundary::None };
         let lines = self.lane.lines.push(&reply.tokens, boundary);
         self.lane.show(lines).await;
@@ -555,11 +578,12 @@ impl<K: Keys> Conn<K> {
     async fn take(&mut self, block: Result<Arc<Block>, RecvError>) -> Result<(), End> {
         let (lane, feed) = (&mut *self.lane, &mut self.feed);
         let block = match block {
-            Ok(block) if lane.audio.len() <= BACKLOG => block,
+            Ok(block) if lane.audio.len() <= BACKLOG_BLOCKS => block,
             Err(RecvError::Closed) => return self.finish(End::Done).await,
             // Behind, not dead: what waits is skipped, and it carries on from the live edge.
             _ => {
                 (lane.audio, lane.why) = (lane.audio.resubscribe(), "behind");
+                lane.gauges.sent.because("behind");
                 lane.say(Link::Behind).await;
                 return Ok(());
             }
@@ -572,6 +596,7 @@ impl<K: Keys> Conn<K> {
                 lane.tell(Event::Gap { stream, t0, t1, why }).await;
             }
             lane.why = "";
+            lane.gauges.sent.because("");
             lane.say(Link::Live).await;
         }
         lane.edge = block.t_ms + BLOCK_MS;
@@ -587,6 +612,7 @@ impl<K: Keys> Conn<K> {
         // As it comes, never faster.
         let pcm: Vec<u8> = block.pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
         self.send(Message::binary(pcm)).await?;
+        self.lane.gauges.sent.set(u64::from(self.lane.edge));
         if behind {
             return Err(End::Retry("behind"));
         }

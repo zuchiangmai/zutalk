@@ -76,6 +76,11 @@ impl Gauge {
         self.ended.store(encoded, Ordering::Release);
     }
 
+    /// Clears a prior `ended` marker when a stopped part is started again (e.g., `Reconnect`).
+    pub fn clear_ended(&self) {
+        self.ended.store(0, Ordering::Release);
+    }
+
     /// Reads `(at, why, ended)` as one row for [`sample`].
     pub fn read(&self) -> (u64, &'static str, Option<&'static str>) {
         let at = self.at.load(Ordering::Relaxed);
@@ -380,9 +385,15 @@ pub fn sample(
     let marks = at
         .iter()
         .map(|&(stage, pos, why, ended)| {
-            let moved_ms = match before.marks.iter().find(|m| m.stage == stage) {
-                Some(prev) if prev.at == pos => prev.moved_ms,
-                _ => now_ms,
+            // Resuming from a pause gives each stage a fresh clock so paused duration is never
+            // counted as idle time.
+            let moved_ms = if before.paused && !paused {
+                now_ms
+            } else {
+                match before.marks.iter().find(|m| m.stage == stage) {
+                    Some(prev) if prev.at == pos => prev.moved_ms,
+                    _ => now_ms,
+                }
             };
             Mark { stage, at: pos, moved_ms, why, ended }
         })

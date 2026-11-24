@@ -112,3 +112,5 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `keep.lost` | warn | 写盘的部件丢了一批（写出错或 panic） | `part` `n`（这一批几个） `why`（错误的代码或 `panic`） |
 | `tape.pad` | warn | tape 上的洞补成了静音 | `from_ms` `blocks` |
 | `draft.gap` | warn | 草稿补了一行空缺 | `t0_ms` `t1_ms` `lines`（丢了几行） |
+| `recording.phase` | info；到 `Ended` 带失败代码时 error | 录音的状态机转换 | `rec` `from` `to`（`Opening` / `Recording` / `Paused` / `Closing.Capture` / `Closing.Tape` / `Closing.Lanes` / `Closing.Frame` / `Closing.Draft` / `Sealing` / `Ended`） `why` `ms`（上一个状态待了多久） |
+| `water.mark` | debug；在快照里是 warn | 看守每秒采样时每格一行（`snap = 0`）；停滞快照里每格一行（`snap > 0`） | `snap` `stage` `lane`（无 lane 的格为 `-1`） `at` `moved_ms` `why` `ended` |
