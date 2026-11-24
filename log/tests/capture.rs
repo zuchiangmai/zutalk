@@ -48,3 +48,17 @@ fn a_capture_that_is_dropped_hears_no_more_and_the_one_before_is_back() {
     info!("test.outer");
     assert_eq!(outer.all().iter().map(|line| line.code).collect::<Vec<_>>(), ["test.outer"]);
 }
+
+#[test]
+fn a_callsite_first_touched_without_a_capture_is_still_heard_by_a_capture() {
+    fn say(by: u8) {
+        info!("test.first_elsewhere", by = by);
+    }
+
+    let seen = capture(Level::Info);
+    // Another thread with no subscriber hits this callsite first while our capture is live.
+    thread::spawn(|| say(1)).join().unwrap();
+    say(2);
+    assert_eq!(seen.of("test.first_elsewhere").len(), 1);
+    assert_eq!(seen.of("test.first_elsewhere")[0].u64("by"), Some(2));
+}

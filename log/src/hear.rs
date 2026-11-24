@@ -23,7 +23,7 @@ pub(crate) struct Hear {
 }
 
 /// The code of an event our macros made; `None` for anything else.
-fn ours(meta: &Metadata<'static>) -> Option<&'static str> {
+pub(crate) fn ours(meta: &Metadata<'static>) -> Option<&'static str> {
     let name: &'static str = meta.name();
     name.strip_prefix(BRAND).filter(|code| meta.is_event() && is_code(code))
 }

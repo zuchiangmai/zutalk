@@ -3,13 +3,15 @@
 //! Two tests side by side each hear only their own.
 
 use crate::Level;
-use crate::hear::{Hear, Out};
+use crate::hear::{Hear, Out, ours};
 use crate::line::Line;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use tracing::Dispatch;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use tracing::dispatcher::{self, DefaultGuard};
 use tracing::instrument::WithSubscriber;
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::Interest;
+use tracing::{Dispatch, Event, Metadata, Subscriber};
 
 /// The most events a capture keeps; past it the oldest go, counted. A test that says more than
 /// this has a loop that says too much; 64 Ki lines of about 200 bytes is some 13 MB at most.
@@ -59,8 +61,47 @@ pub struct Seen {
     _entered: DefaultGuard,
 }
 
+/// Keeps `tracing_core` out of its single-dispatcher (`JustOne`) fast path while any capture
+/// lives: otherwise a callsite first touched on a thread with no subscriber caches
+/// `Interest::never()` from `NoSubscriber` and hides events from a capturing thread.
+struct Open;
+
+impl Subscriber for Open {
+    fn register_callsite(&self, meta: &'static Metadata<'static>) -> Interest {
+        if ours(meta).is_some() { Interest::sometimes() } else { Interest::never() }
+    }
+
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+    fn event(&self, _: &Event<'_>) {}
+
+    fn enter(&self, _: &Id) {}
+
+    fn exit(&self, _: &Id) {}
+}
+
+fn keep_callsites_open() {
+    static ANCHOR: OnceLock<Dispatch> = OnceLock::new();
+    ANCHOR.get_or_init(|| {
+        let dispatch = Dispatch::new(Open);
+        drop(dispatcher::set_default(&dispatch));
+        dispatch
+    });
+}
+
 /// A capture, this thread's receiver until the `Seen` is dropped.
 pub fn capture(level: Level) -> Seen {
+    keep_callsites_open();
     let book = Arc::new(Book::new(CAPTURE_KEEP_EVENTS));
     let dispatch = Dispatch::new(Hear { level, out: Out::Memory(book.clone()) });
     Seen { book, _entered: dispatcher::set_default(&dispatch) }
