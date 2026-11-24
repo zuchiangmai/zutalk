@@ -126,3 +126,27 @@ async fn nothing_is_leased_without_a_grant_or_a_service() {
     assert!(bench.soniox.minted.lock().unwrap().is_empty());
     assert_eq!(left(&bench, 1), 10_000_000);
 }
+
+#[tokio::test]
+async fn a_request_signed_by_a_devices_own_identity_is_refused() {
+    let bench = bench();
+    let before = ledger(&bench);
+    let key = secret(1);
+    let local = zu::did::local(&key.public());
+    let body = map(&[
+        ("service", zu::Value::Str("soniox".into())),
+        ("aud", zu::Value::Str(ORIGIN.into())),
+    ]);
+    let cid = zu::Cid::of(zu::Codec::Drisl, &body.encode());
+    let path = zu::Path::new(&local, "talk/lease", "r-local-1").unwrap();
+    let record = zu::Record::sign(&key, path, Some(cid), [], now(), None).unwrap();
+
+    let (status, answer) = post(&bench.app, "/lease", delivery(&record, Some(&body))).await;
+    assert!(status.is_client_error(), "expected 4xx, got {status} ({answer})");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(answer, serde_json::json!({ "error": "signer" }));
+    assert_eq!(ledger(&bench), before);
+    assert!(bench.soniox.minted.lock().unwrap().is_empty());
+    // And in production (`Resolver`), `zu::did::url` refuses the `did:key` before any HTTP call.
+    assert_eq!(zu::did::url(&local, false), Err(zu::Error::Method));
+}

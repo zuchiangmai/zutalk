@@ -53,6 +53,7 @@ impl Query {
         let ty = self.ty.as_deref().map_or("a/a".into(), star);
         let by = self.by.as_deref().unwrap_or("did:zu:a");
         Path::new(by, &ty, self.key.as_deref().unwrap_or("a"))?;
+        rule(is_did(by), Error::Path)?;
         rule(self.to.as_deref().is_none_or(is_did), Error::Path)?;
         // What a query string does not take as it is, is percent-encoded.
         let plain = |b: u8| b.is_ascii_alphanumeric() || b"-._~:/*".contains(&b);

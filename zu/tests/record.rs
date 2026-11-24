@@ -474,3 +474,43 @@ fn following_goes_through_records_of_other_paths() {
     .unwrap();
     assert_eq!(resolve(&[a.clone(), other_type, other_did], &path("k")), Some(&a));
 }
+
+#[test]
+fn a_record_by_a_devices_own_identity_is_held_and_checked_by_its_key_alone() {
+    let key_at = |by: &str, key: &PublicKey, _: i64| zu::did::local_key(by) == Some(*key);
+    let local = zu::did::local(&secret(1).public());
+    let body = map([("title", text("local note"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("about.jsonl");
+
+    let (mut pack, _) = zu::Pack::open(&file).unwrap();
+    let body_cid = pack.keep(&body).unwrap();
+    let path_local = zu::Path::new(&local, "talk/recording", "k1").unwrap();
+    let signed = Record::sign(&secret(1), path_local, Some(body_cid), [], AT, None).unwrap();
+    pack.append(&signed).unwrap();
+    pack.sync().unwrap();
+
+    let held = zu::Pack::read(&file).unwrap();
+    assert_eq!(held.records, vec![signed.clone()]);
+    assert_eq!(held.bodies.get(&body_cid), Some(&body));
+    assert_eq!(held.records[0].verify(key_at, nothing_held), Ok(()));
+
+    // A record naming another key's local identity, signed by secret(1), fails `key_at`.
+    let other_local = zu::did::local(&secret(2).public());
+    let mismatched = Record::sign(
+        &secret(1),
+        zu::Path::new(&other_local, "talk/recording", "k1").unwrap(),
+        Some(body_cid),
+        [],
+        AT,
+        None,
+    )
+    .unwrap();
+    assert_eq!(mismatched.verify(key_at, nothing_held), Err(Error::Signer));
+
+    // `to` still accepts only `is_did` (`zu` and `web`), never a local `did:key`.
+    assert_eq!(
+        Record::sign(&secret(1), path("k"), None, [], AT, Some(&local)),
+        Err(Error::Field("to"))
+    );
+}

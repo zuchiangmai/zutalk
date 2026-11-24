@@ -1,6 +1,10 @@
 //! path.md: the address of a record, individual > type > key, and its `zu://` URI.
 
-use crate::{Error, did::is_did, rule};
+use crate::{
+    Error,
+    did::{is_did, local_key},
+    rule,
+};
 use std::{fmt, str::FromStr};
 
 /// The path of one record: the DID of the individual, the type such as `ev/event`, the key.
@@ -18,12 +22,14 @@ fn word(text: &str, max: usize, upper: bool, more: &[u8]) -> bool {
 }
 
 impl Path {
-    /// `by` is a DID of a method Zu accepts; § Type Syntax; § Key Syntax.
+    /// `by` is a DID of a method Zu accepts, or a device's own `did:key` (opened for on-device
+    /// packs; see `docs/build/DECISIONS.md` row 10); § Type Syntax; § Key Syntax.
     pub fn new(by: &str, ty: &str, key: &str) -> Result<Path, Error> {
         let (class, kind) = ty.split_once('/').unwrap_or_default();
         let typed = word(class, 32, false, b"-") && word(kind, 32, false, b"-");
         let keyed = word(key, 512, true, b".-_:~") && key != "." && key != "..";
-        rule(is_did(by) && typed && class.starts_with(char::is_lowercase) && keyed, Error::Path)?;
+        let author = is_did(by) || local_key(by).is_some();
+        rule(author && typed && class.starts_with(char::is_lowercase) && keyed, Error::Path)?;
         Ok(Path { by: by.into(), ty: ty.into(), key: key.into() })
     }
 }

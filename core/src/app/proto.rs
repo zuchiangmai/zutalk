@@ -220,3 +220,36 @@ pub enum Command {
     City { address: String },
     File { id: String, event: String, audio: bool },
 }
+
+impl Command {
+    /// What only a person signed in may ask (`docs/PLAN.md` §2.7). Every variant answers here
+    /// explicitly so any future command must state whether it requires a signed-in person.
+    pub fn needs_person(&self) -> bool {
+        match self {
+            Command::Share { .. } | Command::Unshare { .. } | Command::File { .. } => true,
+            Command::Start
+            | Command::Import { .. }
+            | Command::Pause
+            | Command::Resume
+            | Command::Stop
+            | Command::Setup { .. }
+            | Command::Open { .. }
+            | Command::Close
+            | Command::Change { .. }
+            | Command::Remove { .. }
+            | Command::Restore { .. }
+            | Command::Search { .. }
+            | Command::Export { .. }
+            | Command::SignIn
+            | Command::SignOut
+            | Command::RotationSaved
+            | Command::CopyRotation
+            | Command::Update
+            | Command::OwnKey { .. }
+            | Command::Captions { .. }
+            | Command::DestroyAudio { .. }
+            | Command::Term { .. }
+            | Command::City { .. } => false,
+        }
+    }
+}

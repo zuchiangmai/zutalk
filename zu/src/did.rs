@@ -81,6 +81,20 @@ pub fn is_did(did: &str) -> bool {
     matches!(parts(did), Some(("zu" | "web", _)))
 }
 
+/// A device's own identity: the `did:key` of an Ed25519 Zu signing key. It names no host and
+/// is in no directory, so no host takes a record by it (§ Accepted DID Methods): such a record
+/// stays on the device that signed it.
+pub fn local(key: &PublicKey) -> String {
+    format!("did:key:{key}")
+}
+
+/// The key such a DID names; `None` for any other DID, and for a `did:key` of another curve.
+pub fn local_key(did: &str) -> Option<PublicKey> {
+    did.strip_prefix("did:key:")
+        .and_then(|key| key.parse::<PublicKey>().ok())
+        .filter(|key| local(key) == did)
+}
+
 /// `len` characters of base32, in lowercase.
 fn base32(text: &str, len: usize) -> bool {
     text.len() == len && text.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))

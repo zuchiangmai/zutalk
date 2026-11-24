@@ -1124,3 +1124,32 @@ fn a_rotation_key_is_written_out_as_a_p256_private_multikey() {
     let bytes = multibase::Base::Base58Btc.decode(&written[1..]).unwrap();
     assert_eq!((&written[..1], &bytes[..2], &bytes[2..]), ("z", &[0x86, 0x26][..], &secret[..]));
 }
+
+#[test]
+fn a_devices_own_identity_is_the_did_key_of_its_signing_key() {
+    let key = key(1);
+    let local = zu::did::local(&key);
+    assert_eq!(local, format!("did:key:{key}"));
+    assert_eq!(zu::did::local_key(&local), Some(key));
+
+    let p256 = zu::did::Rotation::from_bytes(&[7; 32]).unwrap().did_key();
+    let upper = local.replacen("did:", "DID:", 1);
+    let extra = format!("{local}a");
+    let refused = [
+        DID,
+        WEB,
+        "did:key:zQ3shZc2QzApp2oymGvQbzP8eKheVshBHbU4ZYjeXqwSKEn6N",
+        &p256,
+        "did:key:z6Mk",
+        &upper,
+        &extra,
+    ];
+    for did in refused {
+        assert_eq!(zu::did::local_key(did), None, "{did}");
+    }
+
+    assert!(!is_did(&local));
+    assert_eq!(url(&local, false), Err(Error::Method));
+    assert_eq!(url(&local, true), Err(Error::Method));
+    assert_eq!(resolve(&local, b"{}"), Err(Error::Method));
+}

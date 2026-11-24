@@ -137,3 +137,52 @@ async fn an_identity_is_made_here_once_the_directory_takes_it() {
         !keys::unsaved() && keys::get("rotation").expect("it reads").is_some_and(|k| k.len() == 32)
     );
 }
+
+#[test]
+fn who_signs_is_the_person_else_the_device_else_nobody() {
+    use std::sync::Arc;
+    use zu::SecretKey;
+    use zutalk_core::id::keys::{Me, Who};
+
+    let person_did = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
+    let person = || Me { did: person_did.into(), key: Arc::new(SecretKey::from_seed(&[5; 32])) };
+    let local_key = SecretKey::from_seed(&[7; 32]);
+    let local_did = zu::did::local(&local_key.public());
+    let local = || Me { did: local_did.clone(), key: Arc::new(SecretKey::from_seed(&[7; 32])) };
+
+    type Case<'a> =
+        (Option<Me>, Result<Me, End>, &'a str, Result<&'a str, &'a str>, Option<&'a str>);
+    let cases: [Case<'_>; 4] = [
+        (Some(person()), Ok(local()), "person", Ok(person_did), Some(person_did)),
+        (Some(person()), Err(End::Fatal("keys.store")), "person", Ok(person_did), Some(person_did)),
+        (None, Ok(local()), "local", Ok(local_did.as_str()), None),
+        (None, Err(End::Fatal("keys.store")), "nobody", Err("keys.store"), None),
+    ];
+
+    for (kept, dev, expected_code, expected_me, expected_person) in cases {
+        let who = Who::of(kept, dev);
+        assert_eq!(who.code(), expected_code);
+        assert_eq!(who.me().map(|m| m.did.as_str()), expected_me);
+        assert_eq!(who.person().map(|m| m.did.as_str()), expected_person);
+    }
+}
+
+#[test]
+fn the_devices_identity_is_made_once_and_is_the_same_ever_after() {
+    let _one = STORE.blocking_lock();
+    let dir = tempfile::tempdir().expect("a folder");
+    store(dir.path());
+
+    let (first, made_first) = keys::local().expect("first local identity");
+    let (second, made_second) = keys::local().expect("second local identity");
+    assert!(made_first);
+    assert!(!made_second);
+    assert!(first.did.starts_with("did:key:z6Mk"), "{}", first.did);
+    assert_eq!(first.did, second.did);
+    assert_eq!(first.key.public(), second.key.public());
+
+    let path = zu::Path::new(&first.did, "talk/recording", "rec1").expect("a local path");
+    let record =
+        zu::Record::sign(&first.key, path, None, [], 1_800_000_000_000, None).expect("signed");
+    assert_eq!(record.verify(|by, key, _| zu::did::local_key(by) == Some(*key), |_| None), Ok(()));
+}

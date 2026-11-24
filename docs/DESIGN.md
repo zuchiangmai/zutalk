@@ -32,6 +32,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 行 | 一个声音用一种语言说的一句。现场和散场用同一套断句规则 | `lines`、`lang` |
 | 记录 | 一条签名的 Zu 记录。改动是同一路径上多一条；草稿、转写、房间清单、词表、交城的去向都是记录 | `shelf` |
 | 请求 | 对我们服务器的每个请求都是一条本人签名的记录，在 `zu::auth::WINDOW` 之内。一个端口 `keys::Ours::ask` | `keys`、`server` |
+| 本机身份 | 没有人登录时签记录的 `did:key`（Ed25519 签名钥匙）；不联网、不登记，记录只留在本机书架 | `id/keys.rs`、`zu::did::local` |
 | 钥匙 | 各服务的钥匙：本人自带的，或用授予的额度换来的短命钥匙；录音和房间的密钥由本机一个秘密派生。秘密只放一处：系统钥匙库，macOS 上是一个只有本人账户读得了的文件 | `keys` |
 | 房间 | 只追加的密文日志，加一个只放最新一帧的槽。钥匙只在链接 `#` 后面 | `room`、`server/src/room.rs` |
 | 导出器 | `EXPORTERS` 表里的一行 | `export` |
@@ -60,7 +61,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `export` | `out/export.rs` | 导出器表：Markdown、SRT、VTT |
 | `room` | `out/room.rs` | 封帧、开帧、链接、把一条录音分页、写房间 |
 | `city` | `out/city.rs` | 交到城的档案馆：读城的日历、把录音作为本人的记录交给城的主机、音频分段上传 |
-| `keys` | `id/keys.rs` | 身份（收到的或本机造的）、秘密的存放、各服务钥匙、派生密钥、随机键（`fresh`）、对服务器的签名请求、旧版邀请的认领 |
+| `keys` | `id/keys.rs` | 身份（收到的或本机造的，含没登录时签记录的本机身份与 `Who`）、秘密的存放、各服务钥匙、派生密钥、随机键（`fresh`）、对服务器的签名请求、旧版邀请的认领 |
 | `migrate` | `record/migrate.rs` | 旧版录音搬过来：读 0.8 交接的文件，签成本人的记录，音频解开后重新封进 tape |
 | `app` | `lib.rs`、`app/hub.rs`、`app/proto.rs` | 枢纽：命令、状态、录音任务、房间任务、交城任务、搬运；什么时候装更新；与界面之间的协议 |
 | `shell` | `app/src` | Tauri 外壳：两个窗口、对话框插件；应用自己的更新：看、下、装、重启 |
@@ -124,7 +125,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 - **同一个应用。** Tauri 的 `identifier` 是旧版的 bundle id `xyz.voice.zutalk`：新版作为旧版的更新装上，系统授权不用重来。
 - **秘密。** `keys::get`/`set` 不变。macOS 上发布仍是 ad-hoc 签名，每次更新签名都变，钥匙串就会要密码；所以那里的秘密放在数据目录 `Secrets/secrets.json` 一个文件里（文件夹 0700，文件 0600，整份写好再改名替换）。Windows 与 Linux 仍用系统钥匙库。
-- **旧令牌。** 外壳只在 macOS 上把旧版的数据目录 `~/Library/Application Support/ZuTalk` 交给核心（`Config.old`，§5.12 的搬运也从这里读）；邀请只读其中 `Secrets/community-invite.json` 这一个文件，不改不删。没有它就什么都不变，录音照样先要登录。
+- **旧令牌。** 外壳只在 macOS 上把旧版的数据目录 `~/Library/Application Support/ZuTalk` 交给核心（`Config.old`，§5.12 的搬运也从这里读）；邀请只读其中 `Secrets/community-invite.json` 这一个文件，不改不删。没有邀请就不造 `did:zu`，记录照常由本机身份签。
 - **造身份。** 有令牌、本机没有身份时，核心造一个 `did:zu`：内核的 `zu::did::create` 是纯函数，用一把新的 P-256 轮换钥匙签创世操作，本人的 Zu 签名钥匙挂在 `zu-` 加由这把钥匙算出的八个字符下，没有 handle、没有服务。核心把它 POST 到 `Config.directory`，目录收下才存身份和轮换钥匙。did.md 要求先存好轮换钥匙再往下走，负责人选了以后再提醒：`State.rotation_unsaved` 让界面不挡路地提醒，`Command::RotationSaved` 说已经存好（钥匙仍留在本机）。读不出的身份不会被新造的顶替。
 - **认领。** 本人签一条 `talk/claim` 记录 `{ token, aud }`，走 `keys::Ours::ask`，和别的请求同一种认证。成功或被明确拒绝（`invite.claimed`、`invite.unknown`）后，本机记下令牌的 SHA-256，不再发；会过去的失败按 `AGAIN` 起越等越久地再试，和整场转写、交城共用一个 `again`。
 - **服务器。** `POST /claim` 照常核对记录，再用运营者配置的管理令牌请旧服务 `POST /v1/retire`。旧服务在一个事务里答出剩余秒数（配额 − 已用 − 预留，不小于 0）并停用邀请，再问只答「已退役」和 0；所以同一个令牌第二次认领得到稳定的 `claimed`。账本记下认领（不带正文，令牌不落盘），旁边是服务器自己的一句 `{ claim, to, seconds }`。折算时按实时价 `Upstream::per_second` 把秒换成 µ$，和取钥一样按现价算，所以剩下的仍是实时字幕的小时数。这笔额度不过期，排在所有会到期的授予之后用。

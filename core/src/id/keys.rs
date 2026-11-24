@@ -205,6 +205,75 @@ fn keep(seed: &[u8; 32], did: String) -> Result<Me, End> {
     Ok(Me { did, key: Arc::new(SecretKey::from_seed(seed)) })
 }
 
+/// The device's own identity, made the first time it is asked for and kept with the secrets
+/// as `identity.local` (a 32-byte seed). No network. `true`: it was made just now.
+pub fn local() -> Result<(Me, bool), End> {
+    let (seed, made) = match get("identity.local")? {
+        Some(kept) => {
+            let seed: [u8; 32] =
+                kept.as_slice().try_into().map_err(|_| End::Fatal("keys.store"))?;
+            (Zeroizing::new(seed), false)
+        }
+        None => {
+            let seed = Zeroizing::new(random::<32>()?);
+            set("identity.local", Some(seed.as_slice()))?;
+            (seed, true)
+        }
+    };
+    let key = Arc::new(SecretKey::from_seed(&seed));
+    let did = did::local(&key.public());
+    Ok((Me { did, key }, made))
+}
+
+/// Who signs on this device now. A recording is signed to its end by whoever signed its start.
+pub enum Who {
+    /// The secrets cannot be read or kept: nothing can be signed; the code says why.
+    Nobody(&'static str),
+    /// Nobody is signed in: the device's own identity.
+    Local(Me),
+    /// The person signed in: their Zu DID.
+    Person(Me),
+}
+
+impl Who {
+    /// Pure transition: the signed-in person, else the device's own identity, else nobody.
+    pub fn of(kept: Option<Me>, local: Result<Me, End>) -> Who {
+        if let Some(me) = kept {
+            return Who::Person(me);
+        }
+        match local {
+            Ok(me) => Who::Local(me),
+            Err(End::Retry(code) | End::Fatal(code)) => Who::Nobody(code),
+            Err(End::Done) => Who::Nobody("keys.store"),
+        }
+    }
+
+    /// The state as the log says it: never a DID.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Who::Nobody(_) => "nobody",
+            Who::Local(_) => "local",
+            Who::Person(_) => "person",
+        }
+    }
+
+    /// Who signs records, and whose shelf is open.
+    pub fn me(&self) -> Result<&Me, &'static str> {
+        match self {
+            Who::Nobody(code) => Err(*code),
+            Who::Local(me) | Who::Person(me) => Ok(me),
+        }
+    }
+
+    /// Who may ask our server, host a room, or file to a city.
+    pub fn person(&self) -> Option<&Me> {
+        match self {
+            Who::Person(me) => Some(me),
+            Who::Nobody(_) | Who::Local(_) => None,
+        }
+    }
+}
+
 /// The rotation key of an identity made here, kept until the person says they saved it
 /// elsewhere. did.md asks for that before going on; the owner chose to remind them later.
 const UNSAVED: &str = "rotation.unsaved";

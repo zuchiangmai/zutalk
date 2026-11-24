@@ -23,6 +23,7 @@ use zutalk_core::record::shelf::Shelf;
 use zutalk_core::rt::supervise::End;
 
 pub const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
+pub const LOCAL_SEED: [u8; 32] = [7; 32];
 /// Nothing listens here: every service is out of reach.
 pub const NOWHERE: &str = "https://127.0.0.1:9";
 
@@ -37,10 +38,29 @@ pub fn signed_in() {
     keys::set("soniox", Some(b"sk-own-test-key")).expect("the key is kept");
 }
 
+/// An empty key store with only the device's own identity seed and an own Soniox key.
+pub fn nobody() {
+    keyring_core::set_default_store(keyring_core::mock::Store::new().expect("a mock store"));
+    keys::set("identity.local", Some(&LOCAL_SEED)).expect("the local identity is kept");
+    keys::set("soniox", Some(b"sk-own-test-key")).expect("the key is kept");
+}
+
+/// The device's own identity for [`nobody`].
+pub fn local_did() -> String {
+    zu::did::local(&SecretKey::from_seed(&LOCAL_SEED).public())
+}
+
 /// The shelf the hub keeps this person's records on, under `data`.
 pub fn shelf(data: &Path) -> Shelf {
     let root = data.join("records").join(ME.replace(':', "-"));
     Shelf::new(root, ME, Arc::new(SecretKey::from_seed(&[5; 32])))
+}
+
+/// The shelf the hub keeps the device's own records on, under `data`, for [`nobody`].
+pub fn local_shelf(data: &Path) -> Shelf {
+    let did = local_did();
+    let root = data.join("records").join(did.replace(':', "-"));
+    Shelf::new(root, &did, Arc::new(SecretKey::from_seed(&LOCAL_SEED)))
 }
 
 /// A tape of `seconds`, sealed with the key the hub would seal it with.

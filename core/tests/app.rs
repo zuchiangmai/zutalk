@@ -3,8 +3,9 @@ mod common;
 use common::{Plc, Viewer, old_library, serve, serve_with};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -133,23 +134,432 @@ fn the_status_line_says_what_most_needs_saying() {
     assert_eq!(status(false, &[Live, Stopped("key")], ""), Status::Recording);
 }
 
+/// Names of identity directories under `data/records`, sorted.
+fn record_dirs(data: &Path) -> Vec<String> {
+    let mut dirs: Vec<String> = fs::read_dir(data.join("records"))
+        .expect("records dir")
+        .filter_map(|e| {
+            let e = e.ok()?;
+            e.file_type().ok()?.is_dir().then(|| e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Every file under `root` as relative path -> exact bytes.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, into: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).expect("a folder") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                walk(base, &path, into);
+            } else {
+                let rel = path.strip_prefix(base).expect("relative").to_path_buf();
+                into.insert(rel, fs::read(&path).expect("bytes"));
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    walk(root, root, &mut files);
+    files
+}
+
+/// Waits for a `State` matching `holds`, failing if `"sign_in.first"` is noticed along the way.
+async fn until_no_sign_in_first(app: &mut App, holds: impl Fn(&State) -> bool) -> State {
+    app.next(|event| match event {
+        Event::Notice(code) if code == "sign_in.first" => panic!("unexpected sign_in.first"),
+        Event::State(state) if holds(&state) => Some(*state),
+        _ => None,
+    })
+    .await
+}
+
+#[test]
+fn commands_that_need_a_person_are_listed_in_one_table() {
+    let cases = [
+        (Command::Start, false),
+        (Command::Import { path: "a.wav".into() }, false),
+        (Command::Pause, false),
+        (Command::Resume, false),
+        (Command::Stop, false),
+        (Command::Setup { setup: Setup::default() }, false),
+        (Command::Open { id: "id".into() }, false),
+        (Command::Close, false),
+        (Command::Change { id: "id".into(), change: Change::Title { text: "t".into() } }, false),
+        (Command::Remove { id: "id".into() }, false),
+        (Command::Restore { id: "id".into() }, false),
+        (Command::Search { query: "q".into() }, false),
+        (
+            Command::Export {
+                id: "id".into(),
+                exporter: "markdown".into(),
+                languages: vec![],
+                to: "out.md".into(),
+            },
+            false,
+        ),
+        (Command::Share { recording: None }, true),
+        (Command::Share { recording: Some("id".into()) }, true),
+        (Command::Unshare { room: "r1".into() }, true),
+        (Command::SignIn, false),
+        (Command::SignOut, false),
+        (Command::RotationSaved, false),
+        (Command::CopyRotation, false),
+        (Command::Update, false),
+        (Command::OwnKey { service: "soniox".into(), key: None }, false),
+        (Command::Captions { show: true }, false),
+        (Command::DestroyAudio { id: "id".into() }, false),
+        (Command::Term { said: "ZuTalk".into(), written: None }, false),
+        (Command::City { address: "pol.example".into() }, false),
+        (Command::File { id: "id".into(), event: "e1".into(), audio: true }, true),
+    ];
+    for (command, expected) in cases {
+        assert_eq!(command.needs_person(), expected, "{command:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn nothing_is_recorded_before_someone_signs_in() {
+async fn a_recording_needs_nobody_signed_in() {
+    let _store = STORE.lock().await;
+    store(false);
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    let state = until_no_sign_in_first(&mut app, |_| true).await;
+    assert!(state.me.is_none() && state.library.is_empty());
+    assert_eq!(state.languages.len(), 8);
+    assert_eq!(state.exporters, ["markdown", "srt", "vtt"]);
+
+    app.send(Command::Start);
+    until_no_sign_in_first(&mut app, |s| s.session.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+    let state = until_no_sign_in_first(&mut app, |s| {
+        s.session.is_none() && s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
+    })
+    .await;
+    assert_eq!(state.library.len(), 1);
+    let id = state.library[0].id.clone();
+
+    // Exactly one directory under `records/`, named for the device's `did:key`.
+    let dirs = record_dirs(dir.path());
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    assert!(dirs[0].starts_with("did-key-z6Mk"), "{dirs:?}");
+    let about_path = dir.path().join("records").join(&dirs[0]).join(&id).join("about.jsonl");
+    let held = zu::Pack::read(&about_path).expect("about pack reads");
+    assert!(!held.records.is_empty());
+    let local_did = held.records[0].path.by.clone();
+    assert!(local_did.starts_with("did:key:z6Mk"), "{local_did}");
+    for record in &held.records {
+        assert_eq!(record.path.by, local_did);
+        assert_eq!(
+            record.verify(|by, key, _| zu::did::local_key(by) == Some(*key), |_| None),
+            Ok(())
+        );
+    }
+
+    // Rename, search, export, remove and restore all work without signing in.
+    app.send(Command::Change {
+        id: id.clone(),
+        change: Change::Title { text: "Local note".into() },
+    });
+    until_no_sign_in_first(&mut app, |s| s.library.iter().any(|r| r.title == "Local note")).await;
+    app.send(Command::Search { query: "note".into() });
+    let out = dir.path().join("exported");
+    app.send(Command::Export {
+        id: id.clone(),
+        exporter: "markdown".into(),
+        languages: vec![],
+        to: out.to_string_lossy().into(),
+    });
+    app.send(Command::Remove { id: id.clone() });
+    until_no_sign_in_first(&mut app, |s| s.library.is_empty()).await;
+    app.send(Command::Restore { id: id.clone() });
+    until_no_sign_in_first(&mut app, |s| s.library.len() == 1).await;
+    let exported = fs::read_to_string(dir.path().join("exported.md")).expect("exported");
+    assert!(exported.starts_with("# Local note"), "{exported}");
+
+    // Observable: one `identity.who` event, and no `did:key` anywhere in the captured log.
+    let who = seen.of("identity.who");
+    assert_eq!(who.len(), 1, "{who:?}");
+    assert_eq!(who[0].level, zutalk_log::Level::Info);
+    assert_eq!(who[0].text("from"), Some("nobody"));
+    assert_eq!(who[0].text("to"), Some("local"));
+    assert_eq!(who[0].text("why"), Some("boot"));
+    assert_eq!(who[0].bool("made"), Some(true));
+    let multikey = local_did.strip_prefix("did:key:").expect("did:key prefix");
+    for line in seen.all() {
+        for (_, value) in &line.fields {
+            if let zutalk_log::Value::Text(text) = value {
+                assert!(
+                    !text.contains(&local_did)
+                        && !text.contains(multikey)
+                        && !text.contains("did:key"),
+                    "local DID leaked into log: {line:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_shows_its_code_and_says_when_the_relay_is_out_of_reach() {
     let _store = STORE.lock().await;
     store(false);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
-    let state = app.until(|_| true).await;
-    assert!(state.me.is_none() && state.library.is_empty());
-    assert_eq!(state.languages.len(), 8);
-    assert_eq!(state.exporters, ["markdown", "srt", "vtt"]);
-    app.send(Command::Start);
-    app.notice("sign_in.first").await;
-    // A sign-in shows its code, and says so when the relay cannot be reached.
+    app.until(|_| true).await;
     app.send(Command::SignIn);
     app.until(|state| state.login.is_some()).await;
     app.notice("offline").await;
     app.until(|state| state.login.is_none()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_device_is_the_same_identity_the_next_time() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+    app.send(Command::Start);
+    app.until(|s| s.session.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+    let id = app
+        .until(|s| {
+            s.session.is_none() && s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
+        })
+        .await
+        .library[0]
+        .id
+        .clone();
+    drop(app);
+
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let mut again = App::start(dir.path());
+    let state = again.until(|s| s.library.len() == 1).await;
+    assert_eq!(state.library[0].id, id);
+    assert_eq!(record_dirs(dir.path()).len(), 1);
+
+    let who = seen.of("identity.who");
+    assert_eq!(who.len(), 1, "{who:?}");
+    assert_eq!(who[0].text("from"), Some("nobody"));
+    assert_eq!(who[0].text("to"), Some("local"));
+    assert_eq!(who[0].text("why"), Some("boot"));
+    assert_eq!(who[0].bool("made"), Some(false));
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+    app.send(Command::Start);
+    app.until(|s| s.session.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+    let id = app
+        .until(|s| {
+            s.session.is_none() && s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
+        })
+        .await
+        .library[0]
+        .id
+        .clone();
+    drop(app);
+
+    let local_dirs = record_dirs(dir.path());
+    assert_eq!(local_dirs.len(), 1);
+    let local_dir = dir.path().join("records").join(&local_dirs[0]);
+    let before = snapshot(&local_dir);
+    assert!(!before.is_empty());
+
+    // Add a signed-in identity into the same key store so the device identity seed stays intact.
+    let kept = [&[5; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept)).expect("the identity is kept");
+
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let mut app = App::start(dir.path());
+    let signed = app.until(|s| s.me.as_deref() == Some(ME)).await;
+    assert!(signed.library.is_empty());
+
+    app.send(Command::SignOut);
+    let back = app.until(|s| s.me.is_none() && s.library.len() == 1 && s.writing.is_empty()).await;
+    assert_eq!(back.library[0].id, id);
+    assert_eq!(snapshot(&local_dir), before, "local shelf changed across sign-in and sign-out");
+
+    let sign_out: Vec<_> = seen
+        .of("identity.who")
+        .into_iter()
+        .filter(|line| line.text("why") == Some("sign_out"))
+        .collect();
+    assert_eq!(sign_out.len(), 1, "{:?}", seen.of("identity.who"));
+    assert_eq!(sign_out[0].text("from"), Some("person"));
+    assert_eq!(sign_out[0].text("to"), Some("local"));
+    assert_eq!(sign_out[0].bool("made"), Some(false));
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_needs_a_person_says_so_and_writes_nothing() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+    app.send(Command::Start);
+    app.until(|s| s.session.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+    let id = app
+        .until(|s| {
+            s.session.is_none() && s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
+        })
+        .await
+        .library[0]
+        .id
+        .clone();
+
+    for cmd in [
+        Command::Share { recording: None },
+        Command::Share { recording: Some(id.clone()) },
+        Command::Unshare { room: "r1".into() },
+        Command::File { id: id.clone(), event: "e1".into(), audio: true },
+    ] {
+        app.send(cmd);
+        app.notice("sign_in.first").await;
+    }
+
+    let dirs = record_dirs(dir.path());
+    assert_eq!(dirs.len(), 1);
+    let local_dir = dir.path().join("records").join(&dirs[0]);
+    assert!(!local_dir.join("shares.jsonl").exists());
+    assert!(!local_dir.join("filings.jsonl").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_is_signed_to_its_end_by_whoever_signed_its_start() {
+    let _store = STORE.lock().await;
+    store(true);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+
+    app.send(Command::Start);
+    let id = app.until(|s| s.session.is_some()).await.session.expect("session").id;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    app.send(Command::SignOut);
+    app.until(|s| s.me.is_none()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    app.send(Command::Stop);
+    // The task started under the person's shelf and keys: once `writing` reports "offline",
+    // `seal()` has already written the sealed length record to that shelf.
+    let state = app
+        .until(|s| {
+            s.session.is_none() && s.writing.iter().any(|w| w.id == id && w.step == "offline")
+        })
+        .await;
+    assert!(state.library.is_empty(), "the local shelf must not hold the person's recording");
+
+    let person_dir = dir.path().join("records").join(ME.replace(':', "-"));
+    let held = zu::Pack::read(person_dir.join(&id).join("about.jsonl")).expect("person's about");
+    assert_eq!(held.records.len(), 2, "start and sealed length records");
+    let person_pub = zu::SecretKey::from_seed(&[5; 32]).public();
+    for record in &held.records {
+        assert_eq!(record.path.by, ME);
+        assert_eq!(record.verify(|by, key, _| by == ME && *key == person_pub, |_| None), Ok(()));
+    }
+    let person_shelf = zutalk_core::record::shelf::Shelf::new(
+        &person_dir,
+        ME,
+        Arc::new(zu::SecretKey::from_seed(&[5; 32])),
+    );
+    let about = person_shelf.about(&id).expect("reads").expect("exists").about;
+    assert!(about.length_ms > 0, "sealed length must be on the person's shelf");
+
+    let local_dirs: Vec<_> =
+        record_dirs(dir.path()).into_iter().filter(|d| d.starts_with("did-key-")).collect();
+    for local in local_dirs {
+        assert!(!dir.path().join("records").join(local).join(&id).exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nobody_signed_in_nothing_is_asked_of_our_server() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _store = STORE.lock().await;
+    store(false);
+    let server = MockServer::start().await;
+    Mock::given(any()).respond_with(ResponseTemplate::new(500)).expect(0).mount(&server).await;
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::with(config(dir.path(), &server.uri()));
+    assert!(app.until(|_| true).await.me.is_none());
+
+    app.send(Command::Setup { setup: Setup { spoken: vec!["en".into()], ..Setup::default() } });
+    app.send(Command::Start);
+    app.until(|s| s.session.is_some()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    app.send(Command::Stop);
+    let id = app
+        .until(|s| {
+            s.session.is_none() && s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
+        })
+        .await
+        .library[0]
+        .id
+        .clone();
+
+    app.send(Command::Change { id: id.clone(), change: Change::Title { text: "Quiet".into() } });
+    app.until(|s| s.library.iter().any(|r| r.title == "Quiet")).await;
+    app.send(Command::Search { query: "Quiet".into() });
+    let out = dir.path().join("quiet.md");
+    app.send(Command::Export {
+        id,
+        exporter: "markdown".into(),
+        languages: vec![],
+        to: out.to_string_lossy().into(),
+    });
+    app.send(Command::Share { recording: None });
+    app.notice("sign_in.first").await;
+    assert!(out.exists());
+
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn secrets_that_cannot_be_read_mean_nobody_signs_and_it_is_said() {
+    let _store = STORE.lock().await;
+    store(false);
+    let entry = keyring_core::Entry::new("ZuTalk", "identity.local").expect("mock entry");
+    let mock: &keyring_core::mock::Cred = entry.as_any().downcast_ref().expect("mock cred");
+    mock.set_error(keyring_core::Error::Invalid("mock".into(), "unreadable".into()));
+
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.notice("keys.store").await;
+    let state = app.until(|_| true).await;
+    assert!(state.me.is_none() && state.library.is_empty());
+
+    app.send(Command::Start);
+    app.notice("keys.store").await;
+
+    let who = seen.of("identity.who");
+    assert_eq!(who.len(), 1, "{who:?}");
+    assert_eq!(who[0].level, zutalk_log::Level::Warn);
+    assert_eq!(who[0].text("from"), Some("nobody"));
+    assert_eq!(who[0].text("to"), Some("nobody"));
+    assert_eq!(who[0].text("why"), Some("boot"));
+    assert_eq!(who[0].bool("made"), Some(false));
+    assert_eq!(seen.refused(), 0);
 }
 
 /// Someone who had a community invite in the 0.8 app starts the new one and is, with nothing
@@ -186,8 +596,7 @@ async fn an_invite_the_old_app_left_becomes_an_identity_with_the_hours_it_had_le
     };
     let mut app = start();
     assert!(app.until(|_| true).await.me.is_none());
-    app.send(Command::Start);
-    app.notice("sign_in.first").await;
+    assert!(directory.received_requests().await.expect("recorded").is_empty());
     drop(app);
     let json = br#"{"version":1,"accessToken":"zl-token"}"#;
     fs::create_dir_all(old.path().join("Secrets")).expect("the old app made it");

@@ -9,7 +9,7 @@ use crate::app::proto::{Sound, State, Status, Writing};
 use crate::capture::audio::{self, Capture, Notice, Source};
 use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
 use crate::capture::tape;
-use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn};
+use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
 use crate::live::lane::{self, Health, Mode, Stream};
 use crate::live::lang::profile;
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
-use zutalk_log::Level;
+use zutalk_log::{Level, info, warn};
 
 const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
@@ -163,6 +163,7 @@ impl Core {
             tree: root.clone(),
             out,
             http,
+            who: Who::Nobody("starting"),
             keys,
             ours,
             state,
@@ -225,6 +226,7 @@ struct Hub {
     tree: Tree,
     out: Box<dyn Fn(Event) + Send>,
     http: reqwest::Client,
+    who: Who,
     keys: Arc<Chain>,
     ours: Option<Ours>,
     state: State,
@@ -261,7 +263,12 @@ impl Hub {
             (self.out)(Event::Notice(code(end).into()));
             None
         });
-        self.sign(kept);
+        // Always read or make the device's own identity at boot so SignOut can return to it.
+        let (local, made) = match keys::local() {
+            Ok((me, made)) => (Ok(me), made),
+            Err(end) => (Err(end), false),
+        };
+        self.sign(Who::of(kept, local), "boot", made);
         self.publish();
         while let Some(msg) = mail.recv().await {
             if let Err(code) = self.take(msg) {
@@ -303,7 +310,7 @@ impl Hub {
             }
             Msg::SignedIn(me) => {
                 self.state.login = None;
-                self.sign(Some(me.map_err(code)?));
+                self.sign(Who::Person(me.map_err(code)?), "sign_in", false);
             }
             Msg::Shared(done) => self.rooms().and(done)?,
             Msg::Looked(found) => self.state.update = Some(found?),
@@ -332,10 +339,16 @@ impl Hub {
     }
 
     fn shelf(&self) -> Result<Arc<Shelf>, &'static str> {
-        self.shelf.clone().ok_or("sign_in.first")
+        match &self.shelf {
+            Some(shelf) => Ok(shelf.clone()),
+            None => Err(self.who.me().err().unwrap_or("keys.store")),
+        }
     }
 
     fn command(&mut self, command: Command) -> Result<(), &'static str> {
+        if command.needs_person() && self.who.person().is_none() {
+            return Err("sign_in.first");
+        }
         match command {
             Command::Start => {
                 let device = self.state.setup.device.clone();
@@ -406,7 +419,8 @@ impl Hub {
                     signing.abort();
                 }
                 self.state.login = None;
-                self.sign(None);
+                let local = keys::local().map(|(me, _)| me);
+                self.sign(Who::of(None, local), "sign_out", false);
             }
             Command::CopyRotation => {
                 let key = keys::rotation().map_err(code)?.ok_or("rotation.none")?;
@@ -523,18 +537,27 @@ impl Hub {
         }
     }
 
-    /// Who is signed in decides whose records these are, and where keys come from. Each
-    /// person has a shelf of their own on a shared device.
-    fn sign(&mut self, me: Option<Me>) {
+    /// Who signs decides whose records these are, and where keys come from. Each identity has a
+    /// shelf of its own on a shared device; only a signed-in person reaches our server or `State.me`.
+    fn sign(&mut self, who: Who, why: &'static str, made: bool) {
+        let (from, to) = (self.who.code(), who.code());
+        if let Who::Nobody(code) = &who {
+            warn!("identity.who", from = from, to = to, why = why, made = made);
+            (self.out)(Event::Notice((*code).into()));
+        } else {
+            info!("identity.who", from = from, to = to, why = why, made = made);
+        }
+        self.who = who;
         let records = self.config.data.join("records");
         let shelf = |me: &Me| {
             Arc::new(Shelf::new(records.join(me.did.replace(':', "-")), &me.did, me.key.clone()))
         };
-        self.shelf = me.as_ref().map(shelf);
+        self.shelf = self.who.me().ok().map(shelf);
         let (server, http) = (self.config.server.clone(), self.http.clone());
-        self.ours = me.clone().map(|me| Ours { server, me, http });
+        self.ours = self.who.person().cloned().map(|me| Ours { server, me, http });
         self.keys = Arc::new(Chain::new(self.ours.clone()));
-        (self.state.me, self.opened) = (me.map(|me| me.did), None);
+        // Never expose the device's `did:key` in `State.me`: it is only for a signed-in person.
+        (self.state.me, self.opened) = (self.who.person().map(|me| me.did.clone()), None);
         self.state.rotation_unsaved = keys::unsaved();
         // An invite not carried over yet goes to whoever is signed in now.
         if let (Some(_), Some(token)) = (&self.ours, self.invite.clone()) {
@@ -570,7 +593,8 @@ impl Hub {
 
     /// A community invite the 0.8 app left here is carried over once, and nothing is asked of
     /// its holder: to the identity kept here, or, with `make`, to one made for them now. Its
-    /// token is read where the old app kept it and copied nowhere.
+    /// token is read where the old app kept it and copied nowhere. Kept as-is rather than moving
+    /// invites to the device's local identity (`docs/build/phases/P1.md` §3.14.8).
     fn carry(&mut self, make: bool) -> Result<(), &'static str> {
         let path = self.config.old.as_ref().map(|old| old.join("Secrets/community-invite.json"));
         self.invite = path.as_deref().map(keys::invite).transpose().map_err(code)?.flatten();
@@ -587,6 +611,8 @@ impl Hub {
     }
 
     /// The library the 0.8 app left here comes to whoever is signed in: once, on its own.
+    /// Never moved to the device's local identity because `moved.json` records one recipient
+    /// once (`docs/build/phases/P1.md` §3.14.8).
     fn migrate(&mut self) {
         let (Some(shelf), Some(old), Some(me)) =
             (self.shelf.clone(), self.config.old.clone(), self.state.me.clone())
@@ -917,8 +943,12 @@ impl Task {
         let length = tokio::task::spawn_blocking(move || tape::recover(&dir, &key)).await;
         let length_ms = length.map_err(|_| "tape")?.map_err(|_| "tape")?;
         let Some(recording) = self.shelf.about(&self.id).map_err(fail)? else { return Ok(None) };
-        let about = (length_ms > 0).then_some(About { length_ms, ..recording.about });
-        self.shelf.put(&self.id, RECORDING, &[(self.id.clone(), about)], now()).map_err(fail)?;
+        if length_ms == 0 || recording.about.length_ms != length_ms {
+            let about = (length_ms > 0).then_some(About { length_ms, ..recording.about });
+            self.shelf
+                .put(&self.id, RECORDING, &[(self.id.clone(), about)], now())
+                .map_err(fail)?;
+        }
         Ok(Some(length_ms))
     }
 

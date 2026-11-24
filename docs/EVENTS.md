@@ -88,3 +88,4 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `stat.peak` | info | 汇总和快照里的高水位行 | `snap` `name` `now` `most` |
 | `stat.spread` | info | 汇总和快照里的分布行 | `snap` `name` `n` `p50` `p99` `most` |
 | `stat.queue` | info | 汇总和快照里的队列行 | `snap` `name` `capacity` `depth` `deepest` `sent` `full` `lost` |
+| `identity.who` | info；`to = "nobody"` 时 warn | 启动、登录、登出换了签记录的身份。`made` 为真而这不是第一次启动，说明秘密丢过，旧的本机书架还在盘上（`P1.md` §3.14.8 第 5 条） | `from` `to`（`nobody` / `local` / `person`） `why`（`boot` / `sign_in` / `sign_out`） `made` |

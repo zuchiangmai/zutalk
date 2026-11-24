@@ -440,3 +440,10 @@ proptest! {
         let _ = query.url(HOST);
     }
 }
+
+#[test]
+fn a_query_for_a_devices_own_identity_is_refused() {
+    let local = zu::did::local(&secret(1).public());
+    assert_eq!(Query::of(&local, "talk/line").url(HOST), Err(Error::Path));
+    assert_eq!(Query::across("talk/line", Some(&local)).url(HOST), Err(Error::Path));
+}
