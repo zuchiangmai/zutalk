@@ -152,7 +152,7 @@ impl App {
     }
 
     pub fn send(&self, command: Command) {
-        self.core.send(command);
+        self.core.send(command).expect("the hub's mailbox accepts the command");
     }
 
     pub async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {

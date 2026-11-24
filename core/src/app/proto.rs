@@ -248,6 +248,39 @@ pub enum Command {
 }
 
 impl Command {
+    /// Variant name for structured logs (`command.done`, `command.refused`, `hub.turn.slow`).
+    /// Never carries any argument of the command.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Command::Start => "Start",
+            Command::Import { .. } => "Import",
+            Command::Pause => "Pause",
+            Command::Resume => "Resume",
+            Command::Stop => "Stop",
+            Command::Setup { .. } => "Setup",
+            Command::Open { .. } => "Open",
+            Command::Close => "Close",
+            Command::Change { .. } => "Change",
+            Command::Remove { .. } => "Remove",
+            Command::Restore { .. } => "Restore",
+            Command::Search { .. } => "Search",
+            Command::Export { .. } => "Export",
+            Command::Share { .. } => "Share",
+            Command::Unshare { .. } => "Unshare",
+            Command::SignIn => "SignIn",
+            Command::SignOut => "SignOut",
+            Command::RotationSaved => "RotationSaved",
+            Command::CopyRotation => "CopyRotation",
+            Command::Update => "Update",
+            Command::OwnKey { .. } => "OwnKey",
+            Command::Captions { .. } => "Captions",
+            Command::DestroyAudio { .. } => "DestroyAudio",
+            Command::Term { .. } => "Term",
+            Command::City { .. } => "City",
+            Command::File { .. } => "File",
+        }
+    }
+
     /// What only a person signed in may ask (`docs/PLAN.md` §2.7). Every variant answers here
     /// explicitly so any future command must state whether it requires a signed-in person.
     pub fn needs_person(&self) -> bool {

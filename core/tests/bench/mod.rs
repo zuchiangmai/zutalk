@@ -431,7 +431,7 @@ impl Bench {
     }
 
     pub fn send(&self, command: Command) {
-        self.core.send(command);
+        self.core.send(command).expect("the hub's mailbox accepts the command");
     }
 
     pub fn seen(&self) -> &Seen {

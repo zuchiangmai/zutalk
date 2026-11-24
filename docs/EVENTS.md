@@ -99,3 +99,6 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `recording.start` | info | 一场录音开始 | `rec` `source`（`mic` / `system` / `both` / `file`） `lanes` `columns` `captions`（`live` / `file` / `captions.off` / `captions.no_key`） |
 | `recording.end` | info；带失败的代码时 error | 一场录音结束（到封好 tape 为止） | `rec` `code`（`done` 或结束它的失败代码） `ms` |
 | `session.status` | info | 录音的状态句变了 | `rec` `from` `to`（`Recording` / `Paused` / `AudioOnly` / `Connecting` / `Behind`） `why` |
+| `command.done` | info；被拒绝时 warn | hub 处理完一条命令 | `kind` `code`（`ok`：收下了；或拒绝它的代码） `took_us` |
+| `command.refused` | warn | 命令没进邮箱 | `kind` `code`（`busy`） |
+| `hub.turn.slow` | warn | hub 处理一条消息超过预算（`HUB_TURN_BUDGET_US`） | `kind` `took_us` |

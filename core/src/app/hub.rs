@@ -26,8 +26,9 @@ use crate::record::shelf::{
 };
 use crate::record::shelf::{Shelf, Words};
 use crate::record::{migrate, retain};
+use crate::rt::queue::{self, Back, Full, Rx, Tx};
 use crate::rt::signal::{Reading, Register};
-use crate::rt::stats::{self, Counter, Stats, Tally};
+use crate::rt::stats::{self, Counter, Spread, Stats, Tally};
 use crate::rt::supervise::{End, Tree, again};
 use crate::rt::water::Water;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,10 @@ const WHOLE: &str = "stt-async-v6";
 const FRAME_MS: u64 = 100;
 /// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
 const SLOT_MS: u64 = 250;
+/// The hub's mail. 256: a burst of clicks is a few dozen; the hub answers each in under a millisecond.
+pub const HUB_MAIL_MSGS: usize = 256;
+/// One turn of the hub (PLAN.md §4.1): a command should take under a millisecond.
+pub const HUB_TURN_BUDGET_US: u64 = 1_000;
 
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
@@ -146,6 +151,26 @@ enum Msg {
     Moved(Result<Vec<(String, String)>, &'static str>),
 }
 
+impl Msg {
+    fn kind(&self) -> &'static str {
+        match self {
+            Msg::Do(command) => command.kind(),
+            Msg::Ended(_) => "Ended",
+            Msg::Writing(_) => "Writing",
+            Msg::Wrote(_) => "Wrote",
+            Msg::SignedIn(_) => "SignedIn",
+            Msg::Claimed(_) => "Claimed",
+            Msg::Shared(_) => "Shared",
+            Msg::Looked(_) => "Looked",
+            Msg::City(_) => "City",
+            Msg::Filing(_) => "Filing",
+            Msg::Filed(_, _) => "Filed",
+            Msg::Moving(_) => "Moving",
+            Msg::Moved(_) => "Moved",
+        }
+    }
+}
+
 /// Everything the core says outward: latest-value registers readable at once or on change,
 /// cloneable across the shell's pump, a live room's slot, and tests (`P1.md` §3.3).
 #[derive(Clone, Debug)]
@@ -190,7 +215,9 @@ impl Voice {
 
 /// The core, running. Commands go in; latest values are read from [`Outlet`].
 pub struct Core {
-    tx: mpsc::UnboundedSender<Msg>,
+    commands: Tx<Msg>,
+    results: Tx<Msg>,
+    commands_refused: Counter,
     stats: Stats,
 }
 
@@ -199,8 +226,10 @@ impl Core {
     pub fn start(config: Config) -> Result<(Core, Outlet), End> {
         let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
         let http = reqwest::Client::builder().build().map_err(|_| End::Fatal("tls"))?;
-        let (tx, mail) = mpsc::unbounded_channel();
         let stats = Stats::new();
+        let (commands, mail) = queue::bounded(&stats, "hub.mail", HUB_MAIL_MSGS, Full::Reject); // the interface: never waits, is told `busy`
+        let results = commands.with(Full::Wait); // work that is done: must arrive; whoever did it can wait
+        let progress = commands.with(Full::Drop); // how far a job has got: only the latest matters
         let root = Tree::root("core", stats.clone());
         let (config, keys) = (Arc::new(config), Arc::new(Chain::new(None)));
         let state_reg = Register::new(State::default());
@@ -220,14 +249,24 @@ impl Core {
             said: said_reading,
         };
         let state_sent = stats.counter("state.sent");
+        let commands_refused = stats.counter("commands.refused");
+        let commands_done = stats.counter("commands.done");
+        let hub_turns = stats.counter("hub.turns");
+        let hub_turns_slow = stats.counter("hub.turns.slow");
+        let hub_turn_us = stats.spread("hub.turn_us");
         let (state, sent, ours, shelf, recording, opened, signing, slot, invite, moving) =
             Default::default();
         let hub = Hub {
             config,
-            tx: tx.clone(),
+            results: results.clone(),
+            progress,
             tree: root.clone(),
             state_reg,
             state_sent,
+            commands_done,
+            hub_turns,
+            hub_turns_slow,
+            hub_turn_us,
             frame_reg,
             session_reg,
             level_reg,
@@ -249,17 +288,25 @@ impl Core {
         };
         root.spawn("hub", hub.run(mail));
         root.spawn("stats", stats::publish(stats.clone(), stats_reg));
-        Ok((Core { tx, stats }, outlet))
+        Ok((Core { commands, results, commands_refused, stats }, outlet))
     }
 
-    pub fn send(&self, command: Command) {
-        let _ = self.tx.send(Msg::Do(command)); // dropped: unbounded mailbox; fails only after the hub has stopped
+    pub fn send(&self, command: Command) -> Result<(), &'static str> {
+        let kind = command.kind();
+        match self.commands.offer(Msg::Do(command)) {
+            Ok(()) => Ok(()),
+            Err(Back::Full(_) | Back::Closed(_)) => {
+                warn!("command.refused", kind = kind, code = "busy");
+                self.commands_refused.add(1);
+                Err("busy")
+            }
+        }
     }
 
     /// The shell's report from looking for a newer version of the app: one downloaded and
     /// ready to install, or what kept it from being had.
-    pub fn looked(&self, found: Result<String, &'static str>) {
-        let _ = self.tx.send(Msg::Looked(found)); // dropped: unbounded mailbox; fails only after the hub has stopped
+    pub async fn looked(&self, found: Result<String, &'static str>) {
+        let _ = self.results.send(Msg::Looked(found)).await; // dropped: the hub has ended
     }
 
     /// Live statistics for this core: counters, peaks, spreads, and queues.
@@ -292,10 +339,15 @@ fn row(recording: &Recording, tapes: &Path) -> Row {
 
 struct Hub {
     config: Arc<Config>,
-    tx: Sender,
+    results: Tx<Msg>,
+    progress: Tx<Msg>,
     tree: Tree,
     state_reg: Register<State>,
     state_sent: Counter,
+    commands_done: Counter,
+    hub_turns: Counter,
+    hub_turns_slow: Counter,
+    hub_turn_us: Spread,
     frame_reg: Register<Frame>,
     session_reg: Register<Option<Session>>,
     level_reg: Register<SoundLevel>,
@@ -317,7 +369,7 @@ struct Hub {
 }
 
 impl Hub {
-    async fn run(mut self, mut mail: mpsc::UnboundedReceiver<Msg>) {
+    async fn run(mut self, mut mail: Rx<Msg>) {
         // None kept yet is the default; one that does not read is said, then replaced.
         if let Ok(json) = fs::read(self.config.data.join("settings.json")) {
             match serde_json::from_slice(&json) {
@@ -346,7 +398,25 @@ impl Hub {
         self.sign(Who::of(kept, local), "boot", made);
         self.publish();
         while let Some(msg) = mail.recv().await {
-            if let Err(code) = self.take(msg) {
+            let is_command = matches!(&msg, Msg::Do(_));
+            let kind = msg.kind();
+            let started = std::time::Instant::now();
+            let result = self.take(msg);
+            let took_us = started.elapsed().as_micros() as u64;
+            self.hub_turn_us.note(took_us);
+            self.hub_turns.add(1);
+            if is_command {
+                match result {
+                    Ok(()) => info!("command.done", kind = kind, code = "ok", took_us = took_us),
+                    Err(code) => warn!("command.done", kind = kind, code = code, took_us = took_us),
+                }
+                self.commands_done.add(1);
+            }
+            if took_us > HUB_TURN_BUDGET_US {
+                warn!("hub.turn.slow", kind = kind, took_us = took_us);
+                self.hub_turns_slow.add(1);
+            }
+            if let Err(code) = result {
                 self.said.say(code);
             }
             self.publish();
@@ -474,9 +544,9 @@ impl Hub {
             Command::SignIn => {
                 let sign_in = SignIn::begin(&self.config.server).map_err(code)?;
                 self.state.login = Some(sign_in.code().into());
-                let (tx, http) = (self.tx.clone(), self.http.clone());
+                let (results, http) = (self.results.clone(), self.http.clone());
                 let task = tokio::spawn(async move {
-                    let _ = tx.send(Msg::SignedIn(sign_in.finish(&http).await)); // dropped: unbounded mailbox; fails only after the hub has stopped
+                    let _ = results.send(Msg::SignedIn(sign_in.finish(&http).await)).await; // dropped: the hub has ended
                 });
                 if let Some(earlier) = self.signing.replace(task.abort_handle()) {
                     earlier.abort();
@@ -526,9 +596,9 @@ impl Hub {
                 return Err("update.install"); // it returned: it could not
             }
             Command::City { address } => {
-                let (http, tx) = (self.http.clone(), self.tx.clone());
+                let (http, results) = (self.http.clone(), self.results.clone());
                 tokio::spawn(async move {
-                    let _ = tx.send(Msg::City(city::calendar(&http, &address).await)); // dropped: unbounded mailbox; fails only after the hub has stopped
+                    let _ = results.send(Msg::City(city::calendar(&http, &address).await)).await; // dropped: the hub has ended
                 });
             }
             // What is still being written is filed once it is written.
@@ -549,11 +619,15 @@ impl Hub {
         }
         let me = self.ours.as_ref().ok_or("sign_in.first")?.me.clone();
         let (http, shelf, tapes) = (self.http.clone(), self.shelf()?, self.config.tapes());
-        let (filer, tx) = (Filer { http, me, shelf, tapes }, self.tx.clone());
+        let (filer, results, progress) =
+            (Filer { http, me, shelf, tapes }, self.results.clone(), self.progress.clone());
         self.state.filing.push(writing(&id, "filing"));
         tokio::spawn(async move {
-            let said = city::file(&filer, &id, filing, |w| drop(tx.send(Msg::Filing(w)))).await; // dropped: unbounded mailbox; fails only after the hub has stopped
-            let _ = tx.send(Msg::Filed(id, said)); // dropped: unbounded mailbox; fails only after the hub has stopped
+            let said = city::file(&filer, &id, filing, |w| {
+                let _ = progress.offer(Msg::Filing(w)); // dropped: the next one replaces it
+            })
+            .await;
+            let _ = results.send(Msg::Filed(id, said)).await; // dropped: the hub has ended
         });
         Ok(())
     }
@@ -580,7 +654,8 @@ impl Hub {
             shelf: shelf.clone(),
             keys: self.keys.clone(),
             config: self.config.clone(),
-            tx: self.tx.clone(),
+            results: self.results.clone(),
+            progress: self.progress.clone(),
             frame: self.frame_reg.clone(),
             session: self.session_reg.clone(),
             level: self.level_reg.clone(),
@@ -663,11 +738,12 @@ impl Hub {
         self.state.rotation_unsaved = keys::unsaved();
         // An invite not carried over yet goes to whoever is signed in now.
         if let (Some(_), Some(token)) = (&self.ours, self.invite.clone()) {
-            let (chain, tx) = (self.keys.clone(), self.tx.clone());
+            let (chain, results) = (self.keys.clone(), self.results.clone());
             let claim = tokio::spawn(async move {
                 let claimed = again(|| chain.claim(&token)).await;
                 // Gone over, or refused for good: either way it is not sent again.
-                let _ = tx.send(Msg::Claimed(keys::carried(&token).and(claimed).map_err(code))); // dropped: unbounded mailbox; fails only after the hub has stopped
+                let done = keys::carried(&token).and(claimed).map_err(code);
+                let _ = results.send(Msg::Claimed(done)).await; // dropped: the hub has ended
             });
             if let Some(earlier) = self.signing.replace(claim.abort_handle()) {
                 earlier.abort();
@@ -702,10 +778,10 @@ impl Hub {
         self.invite = path.as_deref().map(keys::invite).transpose().map_err(code)?.flatten();
         if make && self.invite.is_some() {
             let (http, directory) = (self.http.clone(), self.config.directory.clone());
-            let tx = self.tx.clone();
+            let results = self.results.clone();
             let made = tokio::spawn(async move {
                 let me = again(|| keys::create(&http, &directory)).await;
-                let _ = tx.send(Msg::SignedIn(me)); // dropped: unbounded mailbox; fails only after the hub has stopped
+                let _ = results.send(Msg::SignedIn(me)).await; // dropped: the hub has ended
             });
             self.signing = Some(made.abort_handle());
         }
@@ -722,11 +798,14 @@ impl Hub {
             return;
         };
         if !std::mem::replace(&mut self.moving, true) {
-            let (data, tx) = (self.config.data.clone(), self.tx.clone());
+            let (data, results, progress) =
+                (self.config.data.clone(), self.results.clone(), self.progress.clone());
             tokio::task::spawn_blocking(move || {
-                let progress = |writing| drop(tx.send(Msg::Moving(writing))); // dropped: unbounded mailbox; fails only after the hub has stopped
+                let progress = |writing| {
+                    let _ = progress.offer(Msg::Moving(writing)); // dropped: the next one replaces it
+                };
                 let moved = migrate::run((&old, &data), &shelf, &me, now, progress);
-                let _ = tx.send(Msg::Moved(moved)); // dropped: unbounded mailbox; fails only after the hub has stopped
+                let _ = results.send_blocking(Msg::Moved(moved)); // dropped: the hub has ended
             });
         }
     }
@@ -766,7 +845,7 @@ impl Hub {
         let opened = opened.map(|read| read.ok_or("recording.gone")).transpose()?;
         let tapes = self.config.tapes();
         let pages = opened.map(|recording| room::pages(&open(recording, &tapes))).transpose();
-        let (pages, tx) = (pages.map_err(code)?.unwrap_or_default(), self.tx.clone());
+        let (pages, results) = (pages.map_err(code)?.unwrap_or_default(), self.results.clone());
         let id = keys::fresh().map_err(code)?;
         let key = keys::derive("room", &id).map_err(code)?;
         tokio::spawn(async move {
@@ -779,7 +858,7 @@ impl Hub {
                 }
                 Ok(())
             };
-            let _ = tx.send(Msg::Shared(shared.await)); // dropped: unbounded mailbox; fails only after the hub has stopped
+            let _ = results.send(Msg::Shared(shared.await)).await; // dropped: the hub has ended
         });
         Ok(())
     }
@@ -791,7 +870,7 @@ impl Hub {
         let room = self.state.rooms.iter().find(|room| room.id == id).ok_or("room.gone")?;
         let (share, key) = (Share { recording: room.recording.clone() }, keys::derive("room", &id));
         shelf.put::<Share>("", SHARE, &[(id.clone(), None)], now()).map_err(fail)?;
-        let (key, tx) = (key.map_err(code)?, self.tx.clone());
+        let (key, results) = (key.map_err(code)?, self.results.clone());
         tokio::spawn(async move {
             let gone = match room::write(&ours, &id, &key, Write::Gone).await {
                 Ok(()) | Err(End::Fatal("room.gone")) => Ok(()),
@@ -800,7 +879,7 @@ impl Hub {
                     back.and(Err(code(end)))
                 }
             };
-            let _ = tx.send(Msg::Shared(gone)); // dropped: unbounded mailbox; fails only after the hub has stopped
+            let _ = results.send(Msg::Shared(gone)).await; // dropped: the hub has ended
         });
         self.rooms()
     }
@@ -928,8 +1007,6 @@ fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<(), &'static str> {
     done.map_err(fail)
 }
 
-type Sender = mpsc::UnboundedSender<Msg>;
-
 enum ListenEnd {
     StoppedByHub,
     EndedByCapture(&'static str),
@@ -951,7 +1028,8 @@ struct Task {
     shelf: Arc<Shelf>,
     keys: Arc<Chain>,
     config: Arc<Config>,
-    tx: Sender,
+    results: Tx<Msg>,
+    progress: Tx<Msg>,
     frame: Register<Frame>,
     session: Register<Option<Session>>,
     level: Register<SoundLevel>,
@@ -961,10 +1039,6 @@ struct Task {
 }
 
 impl Task {
-    fn tell(&self, msg: Msg) {
-        let _ = self.tx.send(msg); // dropped: unbounded mailbox; fails only after the hub has stopped
-    }
-
     fn tape(&self) -> PathBuf {
         self.config.tapes().join(&self.id)
     }
@@ -1016,13 +1090,13 @@ impl Task {
         let end_code = match self.listen(source, &about, captions, mode).await {
             Ok(ListenEnd::StoppedByHub) => "done",
             Ok(ListenEnd::EndedByCapture(_)) => {
-                self.tell(Msg::Ended(self.id.clone()));
+                let _ = self.results.send(Msg::Ended(self.id.clone())).await; // dropped: the hub has ended
                 "done"
             }
             Err(code) => {
                 // Whatever ends the listening ends the recording; what was kept is kept.
                 self.said.say(code);
-                self.tell(Msg::Ended(self.id.clone()));
+                let _ = self.results.send(Msg::Ended(self.id.clone())).await; // dropped: the hub has ended
                 code
             }
         };
@@ -1209,7 +1283,7 @@ impl Task {
             Ok(None) => {} // removed meanwhile: the tape stays for a restore
             Err(_) => {}
         }
-        self.tell(Msg::Wrote(self.id.clone()));
+        let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
     }
 
     async fn seal(&self) -> Result<Option<About>, &'static str> {
@@ -1243,7 +1317,8 @@ impl Task {
             let plan = write::Plan { id, spoken, into, terms, topic, model, soniox, openrouter };
             let progress = |step: &str, done: usize, of: usize| {
                 let (done, of) = (done as u32, of as u32);
-                self.tell(Msg::Writing(Writing { done, of, ..writing(&self.id, step) }))
+                let msg = Msg::Writing(Writing { done, of, ..writing(&self.id, step) });
+                let _ = self.progress.offer(msg); // dropped: the next one replaces it
             };
             let tape = (self.tape(), key);
             match write::write(&self.shelf, (&tape.0, &tape.1), &plan, &*self.keys, now, progress)
@@ -1251,7 +1326,7 @@ impl Task {
             {
                 End::Done => Ok(()),
                 End::Retry(code) => {
-                    self.tell(Msg::Writing(writing(&self.id, code)));
+                    let _ = self.progress.offer(Msg::Writing(writing(&self.id, code))); // dropped: the next one replaces it
                     Err(End::Retry(code))
                 }
                 end => Err(end),

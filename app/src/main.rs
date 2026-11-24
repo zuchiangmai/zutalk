@@ -24,8 +24,10 @@ type Ready = Arc<Mutex<Option<(Update, Vec<u8>)>>>;
 const LOOK_MS: u64 = 6 * 60 * 60 * 1_000;
 
 #[tauri::command]
-fn dispatch(command: Command, core: State<Core>) {
-    core.send(command);
+fn dispatch(command: Command, app: AppHandle, core: State<Core>, windows: State<Windows>) {
+    if let Err(code) = core.send(command) {
+        fan(&app, &windows, Event::Notice(code.into()));
+    }
 }
 
 #[tauri::command]
@@ -171,13 +173,14 @@ async fn look(app: AppHandle, ready: Ready) {
                 if let Ok(mut ready) = ready.lock() {
                     *ready = Some((update, bytes));
                 }
-                return app.state::<Core>().looked(Ok(version));
+                app.state::<Core>().looked(Ok(version)).await;
+                return;
             }
             Ok(None) => told = false,
             Err(_) if told => {}
             Err(_) => {
                 told = true;
-                app.state::<Core>().looked(Err("update"));
+                app.state::<Core>().looked(Err("update")).await;
             }
         }
         tokio::time::sleep(Duration::from_millis(LOOK_MS)).await;

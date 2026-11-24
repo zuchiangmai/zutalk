@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use zutalk_core::app::hub::{Clip, Config, Install, Notices};
+use zutalk_core::app::hub::{Clip, Config, HUB_MAIL_MSGS, Install, Notices};
 use zutalk_core::app::proto::{Change, Command, Session, Setup, State, Status};
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::id::keys;
+use zutalk_core::rt::queue::{self, Back, Full};
+use zutalk_core::rt::stats::Stats;
 use zutalk_server::Invites;
 
 /// Names of identity directories under `data/records`, sorted.
@@ -971,9 +973,9 @@ async fn an_update_is_installed_only_while_nothing_is_recording() {
     let counted = installs.clone();
     let install: Install = Arc::new(move || _ = counted.fetch_add(1, SeqCst));
     let mut app = App::with(Config { install, ..config(dir.path(), NOWHERE) });
-    app.core.looked(Err("update"));
+    app.core.looked(Err("update")).await;
     app.notice("update").await;
-    app.core.looked(Ok("0.9.1".into()));
+    app.core.looked(Ok("0.9.1".into())).await;
     app.until(|state| state.update.as_deref() == Some("0.9.1")).await;
     app.send(Command::Start);
     app.session(|s| s.is_some()).await;
@@ -1293,4 +1295,235 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
     assert_eq!(state.library.len(), 2);
     assert_eq!(asked.lock().expect("one at a time").len(), 2);
     assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn a_hub_that_cannot_keep_up_refuses_commands_and_says_busy() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    let before = app.outlet.said.now().1.next;
+    let (mut accepted, mut refused) = (0usize, 0usize);
+    for _ in 0..300 {
+        match app.core.send(Command::Pause) {
+            Ok(()) => accepted += 1,
+            Err(code) => {
+                assert_eq!(code, "busy");
+                refused += 1;
+            }
+        }
+    }
+    assert!(accepted > 0 && accepted <= HUB_MAIL_MSGS, "accepted={accepted}");
+    assert_eq!(accepted + refused, 300);
+    assert!(refused > 0, "expected at least one refused command");
+
+    let target = before + accepted as u64;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while app.outlet.said.now().1.next < target {
+            app.outlet.said.next().await.expect("the core runs");
+        }
+    })
+    .await
+    .expect("all accepted Pause commands were handled");
+
+    let (_, said) = app.outlet.said.now();
+    assert_eq!(said.next, target);
+    assert!(said.codes.iter().all(|c| c == "recording.none"), "{:?}", said.codes);
+    let said_events = app
+        .seen
+        .of("notice.said")
+        .into_iter()
+        .filter(|l| l.text("code") == Some("recording.none"))
+        .count();
+    assert_eq!(said_events, accepted);
+
+    let full = app.seen.of("queue.full");
+    assert_eq!(full.len(), 1, "{full:?}");
+    assert_eq!(full[0].level, zutalk_log::Level::Warn);
+    assert_eq!(full[0].text("queue"), Some("hub.mail"));
+    assert_eq!(full[0].text("policy"), Some("reject"));
+    assert_eq!(full[0].u64("capacity"), Some(HUB_MAIL_MSGS as u64));
+
+    let refused_events = app.seen.of("command.refused");
+    assert_eq!(refused_events.len(), refused, "{refused_events:?}");
+    assert!(
+        refused_events.iter().all(|l| {
+            l.level == zutalk_log::Level::Warn
+                && l.text("kind") == Some("Pause")
+                && l.text("code") == Some("busy")
+        }),
+        "{refused_events:?}"
+    );
+
+    let done_events = app.seen.of("command.done");
+    assert_eq!(done_events.len(), accepted, "{done_events:?}");
+    assert!(
+        done_events.iter().all(|l| {
+            l.level == zutalk_log::Level::Warn
+                && l.text("kind") == Some("Pause")
+                && l.text("code") == Some("recording.none")
+                && l.u64("took_us").is_some()
+        }),
+        "{done_events:?}"
+    );
+
+    let tally = app.core.stats().tally();
+    let row = tally.queues.iter().find(|r| r.name == "hub.mail").expect("hub.mail queue row");
+    assert_eq!(row.capacity, HUB_MAIL_MSGS as u64);
+    assert_eq!(row.full, refused as u64);
+    assert_eq!(row.deepest, HUB_MAIL_MSGS as u64);
+    assert_eq!(
+        tally.counts.iter().find(|r| r.name == "commands.refused").map(|r| r.n),
+        Some(refused as u64)
+    );
+    assert_eq!(
+        tally.counts.iter().find(|r| r.name == "commands.done").map(|r| r.n),
+        Some(accepted as u64)
+    );
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn what_the_shell_found_is_never_dropped() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    let mut refused = 0usize;
+    for _ in 0..300 {
+        if app.core.send(Command::Pause).is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "mailbox must be full before calling looked");
+
+    app.core.looked(Ok("0.9.1".into())).await;
+    let state = app.until(|s| s.update.as_deref() == Some("0.9.1")).await;
+    assert_eq!(state.update.as_deref(), Some("0.9.1"));
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn every_command_leaves_its_kind_its_answer_and_nothing_it_carried() {
+    use zutalk_core::live::lines::Line;
+    use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec130001";
+    let secret_title = "KestrelTitleMarker";
+    let secret_query = "AlbatrossSearchNeedle";
+
+    let shelf = hub::local_shelf(dir.path());
+    let line = Line {
+        language: "en".into(),
+        text: format!("Contains {secret_query} here."),
+        ..Line::default()
+    };
+    let said = Said { line, via: [("text".to_string(), "stt-rt-v6".to_string())].into() };
+    shelf.put(id, LINE, &[(format!("{id}.0.00000"), Some(said))], now).expect("line");
+    let about = About {
+        started: now,
+        length_ms: 1_000,
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.to_string(), Some(about))], now).expect("recording");
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.iter().any(|r| r.id == id)).await;
+
+    let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+    app.send(Command::Setup { setup });
+    app.send(Command::Change {
+        id: id.into(),
+        change: Change::Title { text: secret_title.into() },
+    });
+    app.send(Command::Search { query: secret_query.into() });
+    app.send(Command::Pause);
+    app.notice("recording.none").await;
+
+    let done = app.seen.of("command.done");
+    assert_eq!(done.len(), 4, "{done:?}");
+    let expected = [
+        ("Setup", "ok", zutalk_log::Level::Info),
+        ("Change", "ok", zutalk_log::Level::Info),
+        ("Search", "ok", zutalk_log::Level::Info),
+        ("Pause", "recording.none", zutalk_log::Level::Warn),
+    ];
+    for (line, (kind, code, level)) in done.iter().zip(expected) {
+        assert_eq!(line.level, level, "{line:?}");
+        assert_eq!(line.text("kind"), Some(kind), "{line:?}");
+        assert_eq!(line.text("code"), Some(code), "{line:?}");
+        assert!(line.u64("took_us").is_some(), "{line:?}");
+        let mut names = line.names();
+        names.sort_unstable();
+        assert_eq!(names, ["code", "kind", "took_us"], "{line:?}");
+    }
+
+    for line in app.seen.all() {
+        let rendered = format!("{line:?}");
+        assert!(!rendered.contains(secret_title), "title leaked into log: {line:?}");
+        assert!(!rendered.contains(secret_query), "query leaked into log: {line:?}");
+    }
+    let tally = app.core.stats().tally();
+    assert_eq!(tally.counts.iter().find(|r| r.name == "commands.done").map(|r| r.n), Some(4));
+    assert!(
+        tally.spreads.iter().find(|r| r.name == "hub.turn_us").is_some_and(|r| r.n >= 4),
+        "{:?}",
+        tally.spreads
+    );
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn progress_that_finds_the_mailbox_full_is_let_go() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let stats = Stats::new();
+    let (commands, mut mail) =
+        queue::bounded::<&'static str>(&stats, "hub.mail", HUB_MAIL_MSGS, Full::Reject);
+    let results = commands.with(Full::Wait);
+    let progress = commands.with(Full::Drop);
+
+    for _ in 0..HUB_MAIL_MSGS {
+        commands.offer("cmd").expect("command fits until capacity");
+    }
+
+    // Progress offered while the mailbox is full is handed back at once without waiting.
+    assert_eq!(progress.offer("progress"), Err(Back::Full("progress")));
+    let full = seen.of("queue.full");
+    assert_eq!(full.len(), 1, "{full:?}");
+    assert_eq!(full[0].text("queue"), Some("hub.mail"));
+    assert_eq!(full[0].text("policy"), Some("drop"));
+    assert_eq!(full[0].u64("capacity"), Some(HUB_MAIL_MSGS as u64));
+
+    // A result sent on the Full::Wait handle waits for room and arrives once the hub drains.
+    let waiter = tokio::spawn(zutalk_log::carry(async move {
+        results.send("result").await.expect("result arrives once room opens");
+    }));
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "Full::Wait sender must wait while mailbox is full");
+
+    let mut drained = Vec::with_capacity(HUB_MAIL_MSGS + 1);
+    for _ in 0..HUB_MAIL_MSGS {
+        drained.push(mail.recv().await.expect("queued command"));
+    }
+    waiter.await.expect("result sender completes");
+    drained.push(mail.recv().await.expect("result arrives after room opens"));
+
+    assert_eq!(drained.len(), HUB_MAIL_MSGS + 1);
+    assert_eq!(drained.last().copied(), Some("result"));
+    let clear = seen.of("queue.clear");
+    assert_eq!(clear.len(), 1, "{clear:?}");
+    assert_eq!(clear[0].text("queue"), Some("hub.mail"));
+    assert_eq!(clear[0].u64("lost"), Some(1));
+    assert_eq!(seen.refused(), 0);
 }
