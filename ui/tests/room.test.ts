@@ -13,7 +13,7 @@ async function seal(raw: Uint8Array<ArrayBuffer>, value: unknown) {
   return b64(new Uint8Array([...nonce, ...sealed]));
 }
 
-const columns: Column[] = [{ language: 'th', rate: 5, lines: [], tail: { speaker: '1', text: 'สวัสดีครับ', units: [6, 10] } }];
+const columns: Column[] = [{ language: 'th', rate: 5, lines: [], tail: { speaker: '1', text: 'สวัสดีครับ', units: [6, 10] }, health: { is: 'Live' } }];
 
 describe('a room frame', () => {
   it('opens with the key from the link', async () => {

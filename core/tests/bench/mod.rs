@@ -28,7 +28,7 @@ use zutalk_core::app::hub::{Config, Core};
 use zutalk_core::app::proto::{Column, Command, Event, Setup, State, Status};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::Shelf;
-use zutalk_core::rt::stats::{QueueRow, Tally};
+use zutalk_core::rt::stats::{PeakRow, QueueRow, Tally};
 use zutalk_log::{Level, Seen};
 
 /// Maximum JSON size of one live caption frame (`P1.md` §3.4).
@@ -192,7 +192,7 @@ impl ProbeState {
 fn cheap_frame_bound(columns: &[Column]) -> usize {
     let mut bound = FRAME_OVERHEAD_BYTES;
     for col in columns {
-        bound += COLUMN_OVERHEAD_BYTES + col.language.len();
+        bound += COLUMN_OVERHEAD_BYTES + col.language.len() + col.health.why().len() + 32;
         for cap in col.lines.iter().chain(col.tail.iter()) {
             bound += CAPTION_OVERHEAD_BYTES
                 + cap.speaker.len()
@@ -374,6 +374,10 @@ impl Bench {
 
     pub fn count(&self, name: &str) -> u64 {
         self.tally().counts.iter().find(|r| r.name == name).map_or(0, |r| r.n)
+    }
+
+    pub fn peak(&self, name: &str) -> Option<PeakRow> {
+        self.tally().peaks.into_iter().find(|r| r.name == name)
     }
 
     pub fn queue(&self, name: &str) -> Option<QueueRow> {

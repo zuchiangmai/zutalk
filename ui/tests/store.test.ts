@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Column } from '$proto/Column';
 import type { State } from '$proto/State';
 import { EMPTY } from '../dev/mock';
 import { seen, store, take } from '../src/lib/core.svelte';
@@ -17,8 +18,8 @@ describe('store', () => {
   });
 
   it('replaces the live columns whole', () => {
-    take({ kind: 'Live', is: [{ language: 'en', rate: 4, lines: [], tail: null }, { language: 'th', rate: 5, lines: [], tail: null }] });
-    const next = [{ language: 'zh', rate: 7, lines: [], tail: null }];
+    take({ kind: 'Live', is: [{ language: 'en', rate: 4, lines: [], tail: null, health: { is: 'Live' } }, { language: 'th', rate: 5, lines: [], tail: null, health: { is: 'Live' } }] });
+    const next: Column[] = [{ language: 'zh', rate: 7, lines: [], tail: null, health: { is: 'Live' } }];
     take({ kind: 'Live', is: next });
     expect(store.live).toBe(next);
   });

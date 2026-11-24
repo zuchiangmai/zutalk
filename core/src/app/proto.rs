@@ -5,6 +5,7 @@
 pub use crate::capture::audio::Device;
 pub use crate::id::keys::From;
 use crate::knowledge::glossary::Term;
+pub use crate::live::frame::{Caption, Column, Frame, Status};
 use crate::out::city::{Calendar, Filing};
 use crate::record::shelf::Said;
 use serde::{Deserialize, Serialize};
@@ -78,18 +79,6 @@ pub struct Setup {
     pub keep: Option<u32>,        // days from a recording's start; none: until destroyed
 }
 
-/// The one sentence the interface says about the recording under way. Audio only: sound is
-/// kept, there is no text, for the reason given as a code.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-#[serde(tag = "is")]
-pub enum Status {
-    Recording,
-    Paused,
-    AudioOnly { why: String },
-    Connecting,
-    Behind,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct Session {
     pub id: String,
@@ -128,25 +117,6 @@ pub struct Room {
     pub id: String,
     pub recording: Option<String>,
     pub link: String,
-}
-
-/// One caption, cut where it may be revealed: `units` are where each one ends, as UTF-16
-/// offsets in `text`.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-pub struct Caption {
-    pub speaker: String,
-    pub text: String,
-    pub units: Vec<u16>,
-}
-
-/// One language's captions: the last lines said, and the one still being said, revealed at
-/// `rate` units a second.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-pub struct Column {
-    pub language: String,
-    pub rate: f32,
-    pub lines: Vec<Caption>,
-    pub tail: Option<Caption>,
 }
 
 /// Live columns are ready to draw: the interface does not merge, it replaces. A notice is

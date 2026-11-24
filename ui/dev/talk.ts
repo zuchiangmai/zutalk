@@ -43,7 +43,8 @@ export function talk(ms: number, langs = Object.keys(SCRIPT)): Column[] {
   return langs.map((language) => ({
     language,
     rate: RATE[language] ?? 4,
-    lines: [k - 3, k - 2, k - 1].filter((i) => i >= 0).map((i) => caption(language, i)),
+    lines: [k - 3, k - 2, k - 1].filter((i) => i >= 0).map((i) => ({ ...caption(language, i), units: [] })),
     tail: into < 1 ? caption(language, k, into) : null,
+    health: { is: 'Live' },
   }));
 }

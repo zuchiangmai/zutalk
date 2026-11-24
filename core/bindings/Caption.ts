@@ -2,6 +2,6 @@
 
 /**
  * One caption, cut where it may be revealed: `units` are where each one ends, as UTF-16
- * offsets in `text`.
+ * offsets in `text` (only on a tail).
  */
 export type Caption = { speaker: string, text: string, units: Array<number>, };

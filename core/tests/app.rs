@@ -15,12 +15,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zutalk_core::ai::write::wav_header;
-use zutalk_core::app::hub::{Clip, Config, Core, Install, status};
+use zutalk_core::app::hub::{Clip, Config, Core, Install};
 use zutalk_core::app::proto::{Change, Command, Event, Setup, State, Status};
 use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
 use zutalk_core::capture::clock::{Gap, wall_ms};
 use zutalk_core::id::keys;
-use zutalk_core::live::lane::Health;
 use zutalk_core::rt::supervise::End;
 use zutalk_server::Invites;
 
@@ -124,19 +123,6 @@ fn wav(path: &Path, ms: u32) {
     let samples = ms * 16;
     let pcm = (0..samples).flat_map(|i| (((i as f32 * 0.05).sin() * 8_000.0) as i16).to_le_bytes());
     fs::write(path, [wav_header(samples), pcm.collect()].concat()).expect("the file is written");
-}
-
-#[test]
-fn the_status_line_says_what_most_needs_saying() {
-    use Health::{Behind, Connecting, Live, Stopped};
-    let only = |why: &str| Status::AudioOnly { why: why.into() };
-    assert_eq!(status(true, &[Connecting], "captions.off"), Status::Paused);
-    assert_eq!(status(false, &[], "captions.off"), only("captions.off"));
-    assert_eq!(status(false, &[], "captions.no_key"), only("captions.no_key"));
-    assert_eq!(status(false, &[Stopped("keys.none"), Stopped("done")], ""), only("keys.none"));
-    assert_eq!(status(false, &[Live, Connecting], ""), Status::Connecting);
-    assert_eq!(status(false, &[Behind, Live], ""), Status::Behind);
-    assert_eq!(status(false, &[Live, Stopped("key")], ""), Status::Recording);
 }
 
 /// Names of identity directories under `data/records`, sorted.
@@ -784,13 +770,13 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
             }
         }
     });
-    // The captions show it, cut where each unit ends, and so does the room, sealed.
+    // The captions show it, and so does the room, sealed.
     let columns = app.next(|event| match event {
         Event::Live(columns) if columns.iter().any(|c| !c.lines.is_empty()) => Some(columns),
         _ => None,
     });
     let column = columns.await.remove(0);
-    assert_eq!((column.lines[0].text.as_str(), &column.lines[0].units[..]), ("Hello", &[5u16][..]));
+    assert_eq!((column.lines[0].text.as_str(), &column.lines[0].units[..]), ("Hello", &[][..]));
     assert_eq!(column.rate, 4.0);
     let shown = |event: &str, plain: Option<&[u8]>| {
         let columns: serde_json::Value = serde_json::from_slice(plain?).ok()?;

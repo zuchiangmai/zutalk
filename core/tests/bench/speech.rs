@@ -148,7 +148,7 @@ impl Speech {
 
         while cursor_ms < cutoff_ms {
             let is_long_24s = sentence_idx % LONG_EVERY_SENTENCES == LONG_EVERY_SENTENCES - 1;
-            let is_long_zh = spec.long_zh_lines && !is_long_24s && sentence_idx % 3 == 1;
+            let is_long_zh = spec.long_zh_lines && !is_long_24s && sentence_idx % 2 == 1;
             let language =
                 if is_long_zh || (!is_long_24s && sentence_idx % 3 == 2) { "zh" } else { "en" };
             let speaker = SPEAKERS[sentence_idx % SPEAKERS.len()];
@@ -179,13 +179,16 @@ impl Speech {
 
                 let (token, needle) = match (language, is_long_zh) {
                     ("en", _) => (format!(" w{id:06}"), format!("w{id:06}")),
-                    ("zh", true) => (format!("词{id:06}甲乙丙"), format!("词{id:06}")),
+                    ("zh", true) => (format!("词{id:06}甲乙丙丁戊己庚"), format!("词{id:06}")),
                     ("zh", false) => (format!("词{id:06}语"), format!("词{id:06}")),
                     _ => unreachable!(),
                 };
-                let trans_en = format!(" en{id:06}");
+                let (trans_en, trans_es) = if is_long_zh {
+                    (format!(" en{id:06}_clause_text"), format!(" es{id:06}_frase_larga"))
+                } else {
+                    (format!(" en{id:06}"), format!(" es{id:06}"))
+                };
                 let trans_zh = format!("译{id:06}字");
-                let trans_es = format!(" es{id:06}");
 
                 let word_idx = words.len();
                 let block_idx = (block_t_ms / BLOCK_MS) as usize;

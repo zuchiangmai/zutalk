@@ -4,15 +4,15 @@
 //! to a room or to a city.
 
 use crate::ai::write;
-use crate::app::proto::{Caption, Change, Column, Command, Event, From, Open, Room, Row, Session};
+use crate::app::proto::{Change, Column, Command, Event, From, Open, Room, Row, Session};
 use crate::app::proto::{Sound, State, Status, Writing};
 use crate::capture::audio::{self, Capture, Hear, Hearing, Notice, Source};
 use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
 use crate::capture::tape::{self, Reels};
 use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
-use crate::live::lane::{self, Health, Mode, Stream};
-use crate::live::lang::profile;
+use crate::live::frame::{Composer, Fit, status};
+use crate::live::lane::{self, Mode, Stream};
 use crate::live::lines::Line;
 use crate::live::wire::{self, Dial};
 use crate::out::city::{self, Calendar, Filer, Filing};
@@ -35,7 +35,6 @@ const REALTIME: &str = "stt-rt-v6";
 const WHOLE: &str = "stt-async-v6";
 /// Captions are drawn at most this often: once a 100 ms block, as new words come no faster.
 const FRAME_MS: u64 = 100;
-const KEEP: usize = 12; // the finished lines a column keeps on screen
 /// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
 const SLOT_MS: u64 = 250;
 
@@ -511,9 +510,14 @@ impl Hub {
     }
 
     fn task(&self, id: &str, shelf: &Arc<Shelf>) -> Task {
-        let (config, tx, keys, shelf) =
-            (self.config.clone(), self.tx.clone(), self.keys.clone(), shelf.clone());
-        Task { id: id.into(), shelf, keys, config, tx, terms: self.state.terms.clone() }
+        let (config, tx, keys, shelf, stats) = (
+            self.config.clone(),
+            self.tx.clone(),
+            self.keys.clone(),
+            shelf.clone(),
+            self.tree.stats().clone(),
+        );
+        Task { id: id.into(), shelf, keys, config, tx, stats, terms: self.state.terms.clone() }
     }
 
     /// A recording from the sound the person chose, or from a file: a file has no live
@@ -859,6 +863,7 @@ struct Task {
     keys: Arc<Chain>,
     config: Arc<Config>,
     tx: Sender,
+    stats: Stats,
     terms: Vec<Term>, // the glossary as it was when the task began
 }
 
@@ -908,15 +913,16 @@ impl Task {
         let setup = lane::Setup { endpoint, model, spoken, ..lane::Setup::default() };
         for (n, stream) in streams.iter().cloned().enumerate() {
             let setup = glossary::live(&self.terms, &stream, setup.clone());
-            let (keys, dial, lanes, audio, mode) = (
+            let (keys, dial, stats, lanes, audio, mode) = (
                 self.keys.clone(),
                 self.config.dial.clone(),
+                self.stats.clone(),
                 lanes.clone(),
                 audio.subscribe(),
                 mode.clone(),
             );
             tokio::spawn(zutalk_log::carry(async move {
-                lane::run(n, stream, &setup, keys, dial, audio, mode, lanes).await
+                lane::run(n, stream, &setup, keys, dial, stats, audio, mode, lanes).await
             }));
         }
         drop(lanes);
@@ -941,8 +947,14 @@ impl Task {
         let mut capture =
             Some((self.config.hear)(source, Box::new(sink), Box::new(notice)).map_err(code)?);
         let (mut draft, mut n) = (self.shelf.open(&self.id, LINE).map_err(fail)?, 0);
-        let (mut view, mut frame) = (View::new(&about.shown, streams), tick());
-        let mut open = !view.streams.is_empty();
+        let mut open = !streams.is_empty();
+        let (mut composer, mut frame_tick) = (Composer::new(&about.shown, streams), tick());
+        let (frame_made, frame_cut, frame_bound) = (
+            self.stats.counter("frame.made"),
+            self.stats.counter("frame.cut"),
+            self.stats.peak("frame.bound_bytes"),
+        );
+        let (mut last_fit, mut told) = (Fit::Whole, None);
         while capture.is_some() || open {
             tokio::select! {
                 changed = mode.changed(), if capture.is_some() => {
@@ -952,7 +964,7 @@ impl Task {
                         (Mode::Recording, Some(capture)) => capture.resume(),
                         _ => capture = None, // the last blocks are delivered, the tape closed
                     }
-                    (view.paused, view.dirty) = (now == Mode::Paused, true);
+                    composer.pause(now == Mode::Paused);
                 }
                 event = heard.recv(), if open => match event {
                     None => open = false,
@@ -962,16 +974,32 @@ impl Task {
                                 .map_err(fail)?;
                             n += 1;
                         }
-                        view.take(event);
+                        composer.take(event);
                     }
                 },
-                _ = frame.tick(), if view.dirty => {
-                    self.tell(Msg::Live(self.id.clone(), view.columns()));
-                    let status = status(view.paused, &view.health, quiet);
-                    if view.told.replace(status.clone()) != Some(status.clone()) {
-                        self.tell(Msg::Status(self.id.clone(), status));
+                _ = frame_tick.tick(), if composer.dirty() => {
+                    if let Some((frame, fit)) = composer.frame() {
+                        frame_made.add(1);
+                        frame_bound.set(composer.bound_bytes() as u64);
+                        if fit != Fit::Whole {
+                            frame_cut.add(1);
+                        }
+                        if fit != last_fit {
+                            let bytes = serde_json::to_vec(&frame).map_or(0, |v| v.len());
+                            info!(
+                                "frame.fit",
+                                from = last_fit.code(),
+                                to = fit.code(),
+                                bytes = bytes,
+                            );
+                            last_fit = fit;
+                        }
+                        self.tell(Msg::Live(self.id.clone(), frame.columns));
+                        let status = status(composer.paused(), composer.links(), quiet);
+                        if told.replace(status.clone()) != Some(status.clone()) {
+                            self.tell(Msg::Status(self.id.clone(), status));
+                        }
                     }
-                    view.dirty = false;
                 }
             }
         }
@@ -1068,97 +1096,5 @@ fn drafted(event: &lane::Event) -> Vec<Said> {
             vec![said(Line { t0, t1, text: "…".into(), incomplete: true, ..Line::default() })]
         }
         _ => Vec::new(),
-    }
-}
-
-/// The sentence the interface says about a recording under way.
-pub fn status(paused: bool, health: &[Health], quiet: &str) -> Status {
-    let why =
-        health.iter().find_map(|h| if let Health::Stopped(why) = h { Some(*why) } else { None });
-    if paused {
-        Status::Paused
-    } else if health.iter().all(|h| matches!(h, Health::Stopped(_))) {
-        Status::AudioOnly { why: why.unwrap_or(quiet).into() }
-    } else if health.contains(&Health::Connecting) {
-        Status::Connecting
-    } else if health.contains(&Health::Behind) {
-        Status::Behind
-    } else {
-        Status::Recording
-    }
-}
-
-/// What the captions show: for each stream, the last lines it finished, the ones still open,
-/// and how it is doing.
-struct View {
-    shown: Vec<String>,
-    streams: Vec<Stream>,
-    said: Vec<Vec<Line>>,
-    open: Vec<Vec<Line>>,
-    health: Vec<Health>,
-    paused: bool,
-    dirty: bool,
-    told: Option<Status>, // what the interface was last told
-}
-
-impl View {
-    fn new(shown: &[String], streams: Vec<Stream>) -> Self {
-        let n = streams.len();
-        let (said, open, health) =
-            (vec![Vec::new(); n], vec![Vec::new(); n], vec![Health::Connecting; n]);
-        Self {
-            shown: shown.to_vec(),
-            streams,
-            said,
-            open,
-            health,
-            paused: false,
-            dirty: true,
-            told: None,
-        }
-    }
-
-    fn take(&mut self, event: lane::Event) {
-        match event {
-            lane::Event::Lines { stream, lines } => {
-                let said = &mut self.said[stream];
-                said.extend(lines);
-                said.drain(..said.len().saturating_sub(KEEP));
-            }
-            lane::Event::Tail { stream, tail } => self.open[stream] = tail,
-            lane::Event::Health { stream, state } => self.health[stream] = state,
-            lane::Event::Gap { .. } => {}
-        }
-        self.dirty = true;
-    }
-
-    /// The first two languages share a stream, which translates both ways. A line shows in a
-    /// column in its language if it has been translated, else as it was said when it is
-    /// finished or the stream only transcribes, else not yet.
-    fn columns(&self) -> Vec<Column> {
-        let column = |(j, language): (usize, &String)| {
-            let n = j.saturating_sub(1);
-            let caption = |line: &Line, as_said: bool| {
-                let (text, written) = match line.translations.get(language) {
-                    Some(text) => (text, language),
-                    None if as_said || line.language == *language => (&line.text, &line.language),
-                    None => return None,
-                };
-                let units = profile(written).units(text);
-                Some(Caption { speaker: line.speaker.clone(), text: text.clone(), units })
-            };
-            let own = self.streams[n] == Stream::Transcribe;
-            let mut open: Vec<Caption> =
-                self.open[n].iter().filter_map(|l| caption(l, own)).collect();
-            let tail = open.pop();
-            let lines = self.said[n].iter().filter_map(|l| caption(l, true)).chain(open).collect();
-            let rate = profile(language).reveal_per_s;
-            Column { language: language.clone(), rate, lines, tail }
-        };
-        if self.streams.is_empty() {
-            Vec::new()
-        } else {
-            self.shown.iter().enumerate().map(column).collect()
-        }
     }
 }

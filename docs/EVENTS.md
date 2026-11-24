@@ -92,3 +92,6 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `write.skipped` | info | 有音频的草稿没有送去写整场记录：没有钥匙可取。停止以后一条（`n = 1`）；启动或切换身份清点时有就一条 | `n` `why`（`keys.none`） |
 | `part.state` | info；`to = "Waiting"` 时 warn | 受监督的部件每次状态转换 | `part` `from` `to`（`Opening` / `Running` / `Waiting` / `Ended`） `why` `wait_ms` `n` |
 | `part.gave_up` | error | 受监督的部件到了重启上限，不再自己重试 | `part` `why` `n` |
+| `lane.link` | info；到 `Behind`、`Stopped`（不是 `done`）时 warn | lane 的连接状态变了 | `lane` `from` `to`（`Connecting` / `Live` / `Behind` / `Stopped`） `why` |
+| `lane.gap` | warn | lane 说了一段空缺 | `lane` `t0_ms` `t1_ms` `why` |
+| `frame.fit` | info | 一帧为了放得下而让掉的东西变了 | `from` `to`（`Whole` / `Lines` / `Units` / `Tail`） `bytes` |

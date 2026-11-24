@@ -5,8 +5,10 @@
 
 use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::id::keys::{Keys, Service};
+use crate::live::frame::MAX_COLUMNS;
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::live::wire::{Dial, Wire};
+use crate::rt::stats::{Counter, Stats};
 use crate::rt::supervise::{End, Part, Restarts, supervise};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -17,6 +19,7 @@ use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::{Error, Message};
+use zutalk_log::{info, warn};
 
 /// Fixed task and part names for the up to three caption lanes of one recording (`P1.md` §3.13.10).
 pub const LANE_NAMES: [&str; 3] = ["lane.0", "lane.1", "lane.2"];
@@ -57,9 +60,10 @@ pub enum Stream {
     OneWay(String),         // each line with its translation into this one
 }
 
-/// The streams that fill these columns: one connection translates into one language, or
-/// both ways between two.
+/// The streams that fill these columns (up to [`MAX_COLUMNS`]): one connection translates
+/// into one language, or both ways between two.
 pub fn plan(shown: &[String]) -> Vec<Stream> {
+    let shown = &shown[..shown.len().min(MAX_COLUMNS)];
     let [a, b, more @ ..] = shown else {
         return shown.iter().map(|_| Stream::Transcribe).collect();
     };
@@ -92,11 +96,35 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Health {
+pub enum Link {
     Connecting,
     Live,                  // audio is reaching the service
     Behind,                // it could not keep up with the audio, and skips to the live edge
     Stopped(&'static str), // for good: `done`, or the code of what ended it
+}
+
+impl Link {
+    /// Stable plain code for structured log events.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Link::Connecting => "Connecting",
+            Link::Live => "Live",
+            Link::Behind => "Behind",
+            Link::Stopped(_) => "Stopped",
+        }
+    }
+
+    /// Pure transition table: repeating a state is no change, and once `Stopped` only starting a
+    /// fresh lane can leave it (`P1.md` §3.13.11).
+    pub fn next(self, to: Link) -> Option<Link> {
+        match (self, to) {
+            (Link::Stopped(_), _) => None,
+            (Link::Connecting, Link::Connecting)
+            | (Link::Live, Link::Live)
+            | (Link::Behind, Link::Behind) => None,
+            (Link::Connecting | Link::Live | Link::Behind, next) => Some(next),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +132,7 @@ pub enum Event {
     Lines { stream: usize, lines: Vec<Line> }, // finished: they will not change
     Tail { stream: usize, tail: Vec<Line> },   // still open: each one replaces the last
     Gap { stream: usize, t0: u32, t1: u32, why: &'static str }, // no text for this stretch
-    Health { stream: usize, state: Health },
+    Link { stream: usize, state: Link },
 }
 
 /// The first message on a connection: who is asking, and for what.
@@ -141,7 +169,7 @@ fn stated(mut value: Value) -> Value {
 
 /// One response from the service.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Frame {
+pub struct Reply {
     pub tokens: Vec<Token>, // their times are on the service's clock
     pub ended: bool,        // `<end>`, or `<fin>` when asked to: the service closed its lines
     pub clock_ms: u32,      // how much of the audio it has taken in
@@ -150,7 +178,7 @@ pub struct Frame {
 
 /// Reads one response. An error in it is how the connection ends; what is not a JSON
 /// object is not the protocol.
-pub fn frame(text: &str) -> Result<Frame, End> {
+pub fn reply(text: &str) -> Result<Reply, End> {
     let wire = Value::Object(serde_json::from_str(text).map_err(|_| End::Fatal("protocol"))?);
     let string = |of: &Value| of.as_str().unwrap_or_default().to_string();
     let ms = |of: &Value| of.as_u64().unwrap_or(0) as u32;
@@ -159,12 +187,12 @@ pub fn frame(text: &str) -> Result<Frame, End> {
         return Err(failure(ms(&wire["error_code"]) as u16, &string(&wire["error_type"])));
     }
     let (clock_ms, finished) = (ms(&wire["total_audio_proc_ms"]), wire["finished"] == true);
-    let mut frame = Frame { clock_ms, finished, ..Frame::default() };
+    let mut reply = Reply { clock_ms, finished, ..Reply::default() };
     for token in wire["tokens"].as_array().into_iter().flatten() {
         let translation = token["translation_status"] == "translation";
         match token["text"].as_str().unwrap_or_default() {
-            "<end>" | "<fin>" => frame.ended = true,
-            text => frame.tokens.push(Token {
+            "<end>" | "<fin>" => reply.ended = true,
+            text => reply.tokens.push(Token {
                 text: text.into(),
                 start_ms: ms(&token["start_ms"]),
                 end_ms: ms(&token["end_ms"]),
@@ -176,7 +204,7 @@ pub fn frame(text: &str) -> Result<Frame, End> {
             }),
         }
     }
-    Ok(frame)
+    Ok(reply)
 }
 
 /// What the service's error, or the code it closed the connection with, means for the lane.
@@ -252,6 +280,7 @@ struct Lane<K> {
     setup: Setup,
     keys: Arc<K>,
     dial: Dial,
+    gaps: Counter,
     out: mpsc::Sender<Event>,
     audio: Receiver<Arc<Block>>,
     mode: watch::Receiver<Mode>,
@@ -259,6 +288,7 @@ struct Lane<K> {
     tail: Vec<Line>,   // the open lines, as last told
     edge: u32,         // the capture time text is accounted for up to
     why: &'static str, // why none has come since; empty while it does
+    link: Link,        // the link state last said
     paused: bool,
 }
 
@@ -271,6 +301,7 @@ pub async fn run<K: Keys>(
     setup: &Setup,
     keys: Arc<K>,
     dial: Dial,
+    stats: Stats,
     audio: Receiver<Arc<Block>>,
     mode: watch::Receiver<Mode>,
     out: mpsc::Sender<Event>,
@@ -278,8 +309,24 @@ pub async fn run<K: Keys>(
     let spoken: Vec<&str> = setup.spoken.iter().map(String::as_str).collect();
     let (lines, tail, mut stop) = (Assembler::new(&spoken), Vec::new(), mode.clone());
     let (setup, edge, why, paused) = (setup.clone(), 0, "start", *mode.borrow() == Mode::Paused);
-    let lane =
-        Lane { stream, kind, setup, keys, dial, out, audio, mode, lines, tail, edge, why, paused };
+    let gaps = stats.counter("lane.gaps");
+    let lane = Lane {
+        stream,
+        kind,
+        setup,
+        keys,
+        dial,
+        gaps,
+        out,
+        audio,
+        mode,
+        lines,
+        tail,
+        edge,
+        why,
+        link: Link::Connecting,
+        paused,
+    };
     let lane = Arc::new(Mutex::new(lane));
     let stopped = async {
         let _ = stop.wait_for(|mode| *mode == Mode::Stopped).await; // dropped: sender dropped means the recording has already stopped
@@ -314,17 +361,17 @@ pub async fn run<K: Keys>(
     let mut lane = lane.lock().await;
     lane.seam().await;
     let code = if let End::Retry(code) | End::Fatal(code) = end { code } else { "done" };
-    lane.say(Health::Stopped(code)).await;
+    lane.say(Link::Stopped(code)).await;
     end
 }
 
-async fn open<K: Keys>(lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
+async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
     if lane.why == "panic" {
         lane.tell(Event::Tail { stream: lane.stream, tail: Vec::new() }).await;
     }
     // A connection that gave way on purpose is no news, unless the next one fails.
     if lane.why != "cap" {
-        lane.say(Health::Connecting).await;
+        lane.say(Link::Connecting).await;
     }
     let lease = lane.keys.lease(Service::Soniox).await?;
     let dialed = Instant::now(); // before the socket opens: the service's count starts later
@@ -348,8 +395,22 @@ impl<K: Keys> Lane<K> {
         let _ = self.out.send(event).await; // dropped: nobody listening is not this lane's failure
     }
 
-    async fn say(&self, state: Health) {
-        self.tell(Event::Health { stream: self.stream, state }).await;
+    async fn say(&mut self, state: Link) {
+        if let Some(next) = self.link.next(state) {
+            let (from, to) = (self.link.code(), next.code());
+            let why = match next {
+                Link::Stopped(code) => code,
+                _ => self.why,
+            };
+            if matches!(next, Link::Behind) || matches!(next, Link::Stopped(code) if code != "done")
+            {
+                warn!("lane.link", lane = self.stream, from = from, to = to, why = why);
+            } else {
+                info!("lane.link", lane = self.stream, from = from, to = to, why = why);
+            }
+            self.link = next;
+        }
+        self.tell(Event::Link { stream: self.stream, state }).await;
     }
 
     /// Tells the lines that finished, and the open ones when they changed.
@@ -473,19 +534,19 @@ impl<K: Keys> Conn<K> {
             Some(Ok(Message::Close(None)) | Err(_)) | None => return Err(End::Retry("closed")),
             Some(Ok(_)) => return Ok(()),
         };
-        let (mut frame, feed) = (frame(&text)?, &mut self.feed);
-        for token in frame.tokens.iter_mut().filter(|token| token.into.is_none()) {
+        let (mut reply, feed) = (reply(&text)?, &mut self.feed);
+        for token in reply.tokens.iter_mut().filter(|token| token.into.is_none()) {
             (token.start_ms, token.end_ms) =
                 (feed.capture(token.start_ms), feed.capture(token.end_ms));
         }
-        feed.heard = feed.heard.max(frame.clock_ms);
-        let boundary = if frame.ended { Boundary::Provider } else { Boundary::None };
-        let lines = self.lane.lines.push(&frame.tokens, boundary);
+        feed.heard = feed.heard.max(reply.clock_ms);
+        let boundary = if reply.ended { Boundary::Provider } else { Boundary::None };
+        let lines = self.lane.lines.push(&reply.tokens, boundary);
         self.lane.show(lines).await;
-        if frame.finished {
+        if reply.finished {
             return Err(self.ending.unwrap_or(End::Retry("finished")));
         }
-        if frame.ended && self.due(true) {
+        if reply.ended && self.due(true) {
             self.finish(End::Retry("cap")).await?;
         }
         Ok(())
@@ -499,17 +560,19 @@ impl<K: Keys> Conn<K> {
             // Behind, not dead: what waits is skipped, and it carries on from the live edge.
             _ => {
                 (lane.audio, lane.why) = (lane.audio.resubscribe(), "behind");
-                lane.say(Health::Behind).await;
+                lane.say(Link::Behind).await;
                 return Ok(());
             }
         };
         if !lane.why.is_empty() {
             if lane.why != "start" && block.t_ms > lane.edge {
-                let (stream, t0, t1) = (lane.stream, lane.edge, block.t_ms);
-                lane.tell(Event::Gap { stream, t0, t1, why: lane.why }).await;
+                let (stream, t0, t1, why) = (lane.stream, lane.edge, block.t_ms, lane.why);
+                lane.gaps.add(1);
+                warn!("lane.gap", lane = stream, t0_ms = t0, t1_ms = t1, why = why);
+                lane.tell(Event::Gap { stream, t0, t1, why }).await;
             }
             lane.why = "";
-            lane.say(Health::Live).await;
+            lane.say(Link::Live).await;
         }
         lane.edge = block.t_ms + BLOCK_MS;
         let pause = quiet(&block.pcm, &mut feed.level);

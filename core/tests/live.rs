@@ -12,15 +12,16 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
+use tokio_tungstenite::{WebSocketStream, accept_async, client_async, connect_async};
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::id::keys::{Keys, Lease, Secret, Service};
 use zutalk_core::live::lane::{
-    Event, Frame, Health, Mode, Setup, Stream, captions, config, failure, frame, hand_over,
-    overlong, plan, quiet, run,
+    Event, Link, Mode, Reply, Setup, Stream, captions, config, failure, hand_over, overlong, plan,
+    quiet, reply, run,
 };
 use zutalk_core::live::lines::{Line, Token};
-use zutalk_core::live::wire::dial;
+use zutalk_core::live::wire::{Dial, Wire, dial};
+use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::End;
 
 fn strings(of: &[&str]) -> Vec<String> {
@@ -132,8 +133,8 @@ fn the_glossary_goes_along_and_nothing_empty_does() {
 
 // ---- 3. one response ----
 
-fn read(response: Value) -> Result<Frame, End> {
-    frame(&response.to_string())
+fn read(response: Value) -> Result<Reply, End> {
+    reply(&response.to_string())
 }
 
 #[test]
@@ -172,7 +173,7 @@ fn a_response_is_its_tokens_and_what_it_ended() {
     let wor =
         Token { text: " wor".into(), start_ms: 500, end_ms: 620, is_final: false, ..hello.clone() };
     let tokens = vec![hello, ni, wor];
-    assert_eq!(got, Ok(Frame { tokens, ended: true, clock_ms: 640, ..Frame::default() }));
+    assert_eq!(got, Ok(Reply { tokens, ended: true, clock_ms: 640, ..Reply::default() }));
 }
 
 /// Frames as `stt-rt-v6` sent them on 2026-11-15, for synthesized speech. A translation has
@@ -189,7 +190,7 @@ const REAL_FRAMES: [&str; 5] = [
 
 #[test]
 fn the_services_own_frames_read_as_the_rules_expect() {
-    let [guesses, translation, end, fin, finished] = REAL_FRAMES.map(|text| frame(text).unwrap());
+    let [guesses, translation, end, fin, finished] = REAL_FRAMES.map(|text| reply(text).unwrap());
     let good = Token {
         text: "Good".into(),
         start_ms: 180,
@@ -199,7 +200,7 @@ fn the_services_own_frames_read_as_the_rules_expect() {
         ..Token::default()
     };
     let mor = Token { text: " mor".into(), start_ms: 480, end_ms: 540, ..good.clone() };
-    assert_eq!(guesses, Frame { tokens: vec![good, mor], clock_ms: 1_440, ..Frame::default() });
+    assert_eq!(guesses, Reply { tokens: vec![good, mor], clock_ms: 1_440, ..Reply::default() });
     let da = Token {
         text: "大".into(),
         is_final: true,
@@ -209,12 +210,12 @@ fn the_services_own_frames_read_as_the_rules_expect() {
         ..Token::default()
     };
     let jia = Token { text: "家".into(), ..da.clone() };
-    let expected = Frame { tokens: vec![da, jia], clock_ms: 2_400, ..Frame::default() };
+    let expected = Reply { tokens: vec![da, jia], clock_ms: 2_400, ..Reply::default() };
     assert_eq!(translation, expected);
-    assert_eq!(end, Frame { ended: true, clock_ms: 9_480, ..Frame::default() });
-    assert_eq!(fin, Frame { ended: true, clock_ms: 9_600, ..Frame::default() });
-    assert_eq!(finished, Frame { finished: true, clock_ms: 21_000, ..Frame::default() });
-    assert_eq!(read(json!({})), Ok(Frame::default()));
+    assert_eq!(end, Reply { ended: true, clock_ms: 9_480, ..Reply::default() });
+    assert_eq!(fin, Reply { ended: true, clock_ms: 9_600, ..Reply::default() });
+    assert_eq!(finished, Reply { finished: true, clock_ms: 21_000, ..Reply::default() });
+    assert_eq!(read(json!({})), Ok(Reply::default()));
 }
 
 /// The frame the service sends when a temporary key's session runs out, as captured from it.
@@ -243,7 +244,7 @@ fn an_error_is_never_an_empty_response() {
     // A code that is not a number is still an error.
     assert_eq!(read(json!({"error_code": "broken"})), Err(End::Fatal("request")));
     for not_the_protocol in ["", "not json", "[]", "3", "null"] {
-        assert_eq!(frame(not_the_protocol), Err(End::Fatal("protocol")), "{not_the_protocol:?}");
+        assert_eq!(reply(not_the_protocol), Err(End::Fatal("protocol")), "{not_the_protocol:?}");
     }
 }
 
@@ -437,16 +438,19 @@ struct Lane {
 }
 
 fn start(endpoint: &str, kind: Stream, keys: TestKeys) -> Lane {
+    start_with(endpoint, kind, keys, dial(), Stats::new())
+}
+
+fn start_with(endpoint: &str, kind: Stream, keys: TestKeys, dial: Dial, stats: Stats) -> Lane {
     let (audio, heard) = broadcast::channel(64);
     let (mode, mode_rx) = watch::channel(Mode::Recording);
     let (out, events) = mpsc::channel(1024);
     let (keys, setup) = (Arc::new(keys), setup(endpoint));
     let lane_keys = keys.clone();
     // Spawned: the lane has to be `Send` to run beside the rest of the app.
-    let task =
-        tokio::spawn(
-            async move { run(0, kind, &setup, lane_keys, dial(), heard, mode_rx, out).await },
-        );
+    let task = tokio::spawn(zutalk_log::carry(async move {
+        run(0, kind, &setup, lane_keys, dial, stats, heard, mode_rx, out).await
+    }));
     Lane { audio, mode, events, task, keys, t_ms: 0 }
 }
 
@@ -497,8 +501,8 @@ impl Lane {
     }
 }
 
-fn health(state: Health) -> Event {
-    Event::Health { stream: 0, state }
+fn link_event(state: Link) -> Event {
+    Event::Link { stream: 0, state }
 }
 
 fn lines(events: &[Event]) -> Vec<Line> {
@@ -514,7 +518,7 @@ fn texts(lines: &[Line]) -> Vec<&str> {
 }
 
 fn is_live(event: &Event) -> bool {
-    *event == health(Health::Live)
+    *event == link_event(Link::Live)
 }
 
 fn is_lines(event: &Event) -> bool {
@@ -531,9 +535,9 @@ async fn words_come_out_as_lines_on_the_capture_clock() {
     let (mut ws, config) = accept(&listener).await;
     assert_eq!(config["api_key"], "key-0");
     assert_eq!(config["translation"]["type"], "two_way");
-    assert_eq!(lane.event().await, health(Health::Connecting));
+    assert_eq!(lane.event().await, link_event(Link::Connecting));
     lane.speak(&mut ws, 5).await;
-    assert_eq!(lane.event().await, health(Health::Live));
+    assert_eq!(lane.event().await, link_event(Link::Live));
 
     say(&mut ws, json!({"tokens": [guess("Hel", 120, 300)], "total_audio_proc_ms": 300})).await;
     let Event::Tail { stream: 0, tail } = lane.event().await else { panic!("no open line") };
@@ -583,7 +587,7 @@ async fn a_dropped_connection_is_opened_again_with_a_gap_and_nothing_twice() {
     assert_eq!(config["api_key"], "key-1", "a connection, a lease");
     lane.speak(&mut ws, 2).await;
     let back = lane.until(is_live).await;
-    assert!(back.contains(&health(Health::Connecting)));
+    assert!(back.contains(&link_event(Link::Connecting)));
     // The 200 ms the first connection was sent and never got to are lost, and said to be.
     assert!(back.contains(&Event::Gap { stream: 0, t0: 300, t1: 500, why: "closed" }), "{back:?}");
 
@@ -599,7 +603,7 @@ async fn a_dropped_connection_is_opened_again_with_a_gap_and_nothing_twice() {
     let (end, rest) = lane.ended().await;
     assert_eq!(end, End::Done);
     assert!(lines(&rest).is_empty(), "no line twice: {rest:?}");
-    assert_eq!(rest.last(), Some(&health(Health::Stopped("done"))));
+    assert_eq!(rest.last(), Some(&link_event(Link::Stopped("done"))));
 }
 
 #[tokio::test]
@@ -629,12 +633,12 @@ async fn a_lane_the_audio_ran_away_from_skips_to_the_live_edge_and_says_what_it_
         // More audio than the lane may send at once (30 blocks), then more than the channel
         // holds (100): the recording never waited for it either time.
         (0..flood).for_each(|_| lane.record(loud()));
-        assert_eq!(lane.event().await, health(Health::Behind));
+        assert_eq!(lane.event().await, link_event(Link::Behind));
 
         let t1 = 200 + flood * 100;
         lane.speak(&mut ws, 1).await;
         let gap = Event::Gap { stream: 0, t0: 200, t1, why: "behind" };
-        assert_eq!(lane.until(is_live).await, [gap, health(Health::Live)]);
+        assert_eq!(lane.until(is_live).await, [gap, link_event(Link::Live)]);
         // Same connection, and none of what it skipped was sent after all.
         lane.mode.send(Mode::Stopped).unwrap();
         assert_eq!(sent(&mut ws).await, Sent::Finish);
@@ -803,7 +807,7 @@ async fn a_capped_key_gives_way_at_a_silent_block_to_a_fresh_lease_without_a_hol
     assert_eq!(texts(&lines(&change)), ["bye"]);
     // A change made on purpose is no news: no gap, and not "connecting".
     let news = |event: &&Event| !matches!(event, Event::Lines { .. } | Event::Tail { .. });
-    assert_eq!(change.iter().filter(news).collect::<Vec<_>>(), [&health(Health::Live)]);
+    assert_eq!(change.iter().filter(news).collect::<Vec<_>>(), [&link_event(Link::Live)]);
     say(&mut ws, json!({"tokens": [word("hi", 0, 150), end()], "total_audio_proc_ms": 200})).await;
     assert_eq!(lines(&lane.until(is_lines).await)[0].t0, 600);
 }
@@ -844,7 +848,7 @@ async fn a_session_that_reaches_its_allowed_length_rolls_over_onto_a_fresh_key()
     // Not at once: a key issued with no time on it must not spin the lane.
     assert!(cut.elapsed() >= Duration::from_millis(200), "{:?}", cut.elapsed());
     lane.speak(&mut ws, 1).await;
-    assert_eq!(lane.until(is_live).await, [health(Health::Live)], "neither refused nor news");
+    assert_eq!(lane.until(is_live).await, [link_event(Link::Live)], "neither refused nor news");
     assert_eq!(lane.keys.refused.load(SeqCst), 0);
 }
 
@@ -863,7 +867,7 @@ async fn a_refused_key_is_reported_to_the_keys_and_ends_the_lane() {
         let keys = lane.keys.clone();
         let (end, events) = lane.ended().await;
         assert_eq!(end, End::Fatal("key"));
-        assert_eq!(events, [health(Health::Connecting), health(Health::Stopped("key"))]);
+        assert_eq!(events, [link_event(Link::Connecting), link_event(Link::Stopped("key"))]);
         assert_eq!((keys.leased.load(SeqCst), keys.refused.load(SeqCst)), (1, 1));
     }
 }
@@ -877,7 +881,7 @@ async fn a_request_the_service_rejects_ends_the_lane_and_blames_no_key() {
     let keys = lane.keys.clone();
     let (end, events) = lane.ended().await;
     assert_eq!(end, End::Fatal("request"));
-    assert_eq!(events.last(), Some(&health(Health::Stopped("request"))));
+    assert_eq!(events.last(), Some(&link_event(Link::Stopped("request"))));
     assert_eq!(keys.refused.load(SeqCst), 0);
 }
 
@@ -886,7 +890,7 @@ async fn with_no_key_to_be_had_the_lane_ends_saying_so() {
     let keys = TestKeys { fail: Some(End::Fatal("no key")), ..TestKeys::default() };
     let (end, events) = start("ws://127.0.0.1:1", Stream::Transcribe, keys).ended().await;
     assert_eq!(end, End::Fatal("no key"));
-    assert_eq!(events, [health(Health::Connecting), health(Health::Stopped("no key"))]);
+    assert_eq!(events, [link_event(Link::Connecting), link_event(Link::Stopped("no key"))]);
 }
 
 // ---- 14. stop ----
@@ -911,7 +915,7 @@ async fn a_stop_sends_what_was_recorded_then_waits_for_the_last_words() {
     assert_eq!(end, End::Done);
     let last = &lines(&rest)[0];
     assert_eq!((last.text.as_str(), last.t1, last.incomplete), ("last words", 380, false));
-    assert_eq!(rest.last(), Some(&health(Health::Stopped("done"))));
+    assert_eq!(rest.last(), Some(&link_event(Link::Stopped("done"))));
 }
 
 #[tokio::test]
@@ -946,7 +950,7 @@ async fn a_connection_that_never_carried_audio_ends_without_waiting() {
     assert_eq!(sent(&mut ws).await, Sent::Gone, "no end of stream is sent on it");
     let (end, events) = lane.ended().await;
     assert_eq!(end, End::Done);
-    assert_eq!(events, [health(Health::Connecting), health(Health::Stopped("done"))]);
+    assert_eq!(events, [link_event(Link::Connecting), link_event(Link::Stopped("done"))]);
 }
 
 #[tokio::test]
@@ -958,8 +962,185 @@ async fn a_stop_while_there_is_no_connection_ends_the_lane_at_once() {
     let (end, events) = lane.ended().await;
     assert_eq!(end, End::Done);
     assert!(stopped_at.elapsed() < Duration::from_millis(200), "{:?}", stopped_at.elapsed());
-    assert_eq!(events.first(), Some(&health(Health::Connecting)));
-    assert_eq!(events.last(), Some(&health(Health::Stopped("done"))));
+    assert_eq!(events.first(), Some(&link_event(Link::Connecting)));
+    assert_eq!(events.last(), Some(&link_event(Link::Stopped("done"))));
+}
+
+// ---- 15. link state machine and structured events ----
+
+type DuplexSocket = WebSocketStream<tokio::io::DuplexStream>;
+
+fn duplex_dial() -> (Dial, mpsc::Receiver<DuplexSocket>) {
+    let (tx, rx) = mpsc::channel(16);
+    let dial: Dial = Arc::new(move |_| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                if let Ok(ws) = accept_async(server_io).await {
+                    let _ = tx.send(ws).await;
+                }
+            });
+            let (ws, _) = client_async("ws://duplex.local/transcribe-websocket", client_io)
+                .await
+                .map_err(|_| End::Retry("connect"))?;
+            Ok(Box::new(ws) as Wire)
+        })
+    });
+    (dial, rx)
+}
+
+async fn duplex_sent(ws: &mut DuplexSocket) -> Sent {
+    match soon(ws.next()).await {
+        Some(Ok(Message::Text(text))) if text.is_empty() => Sent::Finish,
+        Some(Ok(Message::Text(text))) => Sent::Text(serde_json::from_str(&text).unwrap()),
+        Some(Ok(Message::Binary(pcm))) => Sent::Audio(pcm.len()),
+        _ => Sent::Gone,
+    }
+}
+
+async fn duplex_accept(rx: &mut mpsc::Receiver<DuplexSocket>) -> (DuplexSocket, Value) {
+    let mut ws = soon(rx.recv()).await.expect("duplex connection accepted");
+    let Sent::Text(config) = duplex_sent(&mut ws).await else { panic!("no configuration") };
+    (ws, config)
+}
+
+async fn duplex_say(ws: &mut DuplexSocket, response: Value) {
+    ws.send(Message::text(response.to_string())).await.unwrap();
+}
+
+#[test]
+fn a_link_changes_only_as_its_table_says() {
+    use Link::{Behind, Connecting, Live, Stopped};
+    assert_eq!(
+        [Connecting.code(), Live.code(), Behind.code(), Stopped("done").code()],
+        ["Connecting", "Live", "Behind", "Stopped"]
+    );
+
+    let all = [Connecting, Live, Behind, Stopped("done"), Stopped("key")];
+    for from in all {
+        for to in all {
+            let expected = match (from, to) {
+                (Stopped(_), _) => None,
+                (Connecting, Connecting) | (Live, Live) | (Behind, Behind) => None,
+                (_, next) => Some(next),
+            };
+            assert_eq!(from.next(to), expected, "from={from:?} to={to:?}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_change_of_link_is_said_once() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let stats = Stats::new();
+    let (dial, mut conns) = duplex_dial();
+    let mut lane =
+        start_with("ws://duplex.local", Stream::Transcribe, TestKeys::default(), dial, stats);
+
+    let (mut ws, _) = duplex_accept(&mut conns).await;
+    assert_eq!(lane.event().await, link_event(Link::Connecting));
+
+    // Connecting -> Live.
+    for _ in 0..2 {
+        lane.record(loud());
+        assert_eq!(duplex_sent(&mut ws).await, Sent::Audio(BLOCK * 2));
+    }
+    assert_eq!(lane.event().await, link_event(Link::Live));
+
+    // Live -> Behind, then flood a second time while already Behind so `say(Behind)` runs twice
+    // without emitting a duplicate `lane.link`.
+    (0..30).for_each(|_| lane.record(loud()));
+    assert_eq!(lane.event().await, link_event(Link::Behind));
+    (0..30).for_each(|_| lane.record(loud()));
+    assert_eq!(lane.event().await, link_event(Link::Behind));
+
+    // Behind -> Live.
+    lane.record(loud());
+    assert_eq!(duplex_sent(&mut ws).await, Sent::Audio(BLOCK * 2));
+    lane.until(is_live).await;
+
+    // Live -> Stopped("done").
+    lane.mode.send(Mode::Stopped).unwrap();
+    assert_eq!(duplex_sent(&mut ws).await, Sent::Finish);
+    duplex_say(&mut ws, json!({"tokens": [], "finished": true, "total_audio_proc_ms": 300})).await;
+    let (end, _) = lane.ended().await;
+    assert_eq!(end, End::Done);
+
+    let links = seen.of("lane.link");
+    let summary: Vec<_> = links
+        .iter()
+        .map(|l| (l.u64("lane"), l.text("from"), l.text("to"), l.text("why"), l.level))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (Some(0), Some("Connecting"), Some("Live"), Some(""), zutalk_log::Level::Info),
+            (Some(0), Some("Live"), Some("Behind"), Some("behind"), zutalk_log::Level::Warn),
+            (Some(0), Some("Behind"), Some("Live"), Some(""), zutalk_log::Level::Info),
+            (Some(0), Some("Live"), Some("Stopped"), Some("done"), zutalk_log::Level::Info),
+        ]
+    );
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gap_is_an_event_with_its_edges_and_its_reason() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let stats = Stats::new();
+    let (dial, mut conns) = duplex_dial();
+    let mut lane = start_with(
+        "ws://duplex.local",
+        Stream::Transcribe,
+        TestKeys::default(),
+        dial,
+        stats.clone(),
+    );
+
+    let (mut ws, _) = duplex_accept(&mut conns).await;
+    for _ in 0..5 {
+        lane.record(loud());
+        assert_eq!(duplex_sent(&mut ws).await, Sent::Audio(BLOCK * 2));
+    }
+    duplex_say(&mut ws, json!({"tokens": [word("one", 100, 250)], "total_audio_proc_ms": 300}))
+        .await;
+    lane.until(|event| matches!(event, Event::Tail { .. })).await;
+
+    // Service hangs up after hearing 300 ms of 500 ms sent.
+    drop(ws);
+
+    let (mut ws2, _) = duplex_accept(&mut conns).await;
+    for _ in 0..2 {
+        lane.record(loud());
+        assert_eq!(duplex_sent(&mut ws2).await, Sent::Audio(BLOCK * 2));
+    }
+    let back = lane.until(is_live).await;
+    let gap_event = back
+        .iter()
+        .find_map(|e| match *e {
+            Event::Gap { t0, t1, why, .. } => Some((t0, t1, why)),
+            _ => None,
+        })
+        .expect("expected Event::Gap");
+    assert_eq!(gap_event, (300, 500, "closed"));
+
+    lane.mode.send(Mode::Stopped).unwrap();
+    assert_eq!(duplex_sent(&mut ws2).await, Sent::Finish);
+    duplex_say(&mut ws2, json!({"tokens": [], "finished": true, "total_audio_proc_ms": 200})).await;
+    let (end, _) = lane.ended().await;
+    assert_eq!(end, End::Done);
+
+    let gaps = seen.of("lane.gap");
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].level, zutalk_log::Level::Warn);
+    assert_eq!(gaps[0].u64("lane"), Some(0));
+    assert_eq!(gaps[0].u64("t0_ms"), Some(u64::from(gap_event.0)));
+    assert_eq!(gaps[0].u64("t1_ms"), Some(u64::from(gap_event.1)));
+    assert_eq!(gaps[0].text("why"), Some("closed"));
+
+    let counted = stats.tally().counts.into_iter().find(|r| r.name == "lane.gaps").map(|r| r.n);
+    assert_eq!(counted, Some(1));
+    assert_eq!(seen.refused(), 0);
 }
 
 // ---- the real service ----
@@ -1075,7 +1256,7 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
     let (out, mut events) = mpsc::channel(64);
     let (setup, keys) = (Setup { terms: strings(&["ZuTalk"]), ..setup(&endpoint) }, OneKey(key));
     let lane = tokio::spawn(async move {
-        run(0, two_way(), &setup, Arc::new(keys), dial(), heard, mode_rx, out).await
+        run(0, two_way(), &setup, Arc::new(keys), dial(), Stats::new(), heard, mode_rx, out).await
     });
     // Everything the lane says, with when it said it.
     let started = Instant::now();
@@ -1173,7 +1354,7 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
     let news: Vec<_> =
         events.iter().filter(|e| !matches!(e, Event::Lines { .. } | Event::Tail { .. })).collect();
     let expected =
-        [health(Health::Connecting), health(Health::Live), health(Health::Stopped("done"))];
+        [link_event(Link::Connecting), link_event(Link::Live), link_event(Link::Stopped("done"))];
     assert!(news.iter().map(|e| **e).eq(expected.iter()), "{news:?}");
     let all = texts(&said).join(" ").to_lowercase();
     for heard in [if long { "quarterly" } else { "budget" }, "agenda", "december"] {

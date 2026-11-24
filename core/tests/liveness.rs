@@ -145,12 +145,12 @@ async fn fake_service_frames_parse_as_expected_tokens() {
     let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
     ws.send(Message::binary(bytes)).await.expect("send audio block");
 
-    // After GUESS_DELAY_MS: non-final guess token arrives and parses cleanly via `lane::frame`.
+    // After GUESS_DELAY_MS: non-final guess token arrives and parses cleanly via `lane::reply`.
     tokio::time::advance(Duration::from_millis(GUESS_DELAY_MS)).await;
     let Some(Ok(Message::Text(text))) = ws.next().await else {
         panic!("expected guess frame");
     };
-    let guess = lane::frame(&text).expect("guess frame parses");
+    let guess = lane::reply(&text).expect("guess reply parses");
     assert_eq!(guess.tokens.len(), 1);
     assert!(!guess.tokens[0].is_final);
     assert_eq!(guess.tokens[0].text, first_word.token);
@@ -161,7 +161,7 @@ async fn fake_service_frames_parse_as_expected_tokens() {
     let Some(Ok(Message::Text(text))) = ws.next().await else {
         panic!("expected final frame");
     };
-    let settled = lane::frame(&text).expect("final frame parses");
+    let settled = lane::reply(&text).expect("final reply parses");
     assert!(
         settled.tokens.iter().any(|t| t.is_final && t.into.is_none() && t.text == first_word.token)
     );
@@ -176,7 +176,7 @@ async fn fake_service_frames_parse_as_expected_tokens() {
     let Some(Ok(Message::Text(text))) = ws.next().await else {
         panic!("expected silence progress frame");
     };
-    let progress = lane::frame(&text).expect("progress frame parses");
+    let progress = lane::reply(&text).expect("progress reply parses");
     assert_eq!(progress.clock_ms, 200);
 
     // Finalize command returns `<fin>` (parsed as `ended: true`).
@@ -184,7 +184,7 @@ async fn fake_service_frames_parse_as_expected_tokens() {
     let Some(Ok(Message::Text(text))) = ws.next().await else {
         panic!("expected finalize frame");
     };
-    let fin = lane::frame(&text).expect("fin frame parses");
+    let fin = lane::reply(&text).expect("fin reply parses");
     assert!(fin.ended);
 
     // Empty frame returns `finished: true`.
@@ -192,7 +192,7 @@ async fn fake_service_frames_parse_as_expected_tokens() {
     let Some(Ok(Message::Text(text))) = ws.next().await else {
         panic!("expected finished frame");
     };
-    let done = lane::frame(&text).expect("finished frame parses");
+    let done = lane::reply(&text).expect("finished reply parses");
     assert!(done.finished);
 }
 
@@ -325,11 +325,18 @@ async fn nothing_said_or_secret_reaches_the_log() {
 
 // ---- 2. I1: speech-to-screen latency and bounded frames ----
 
-async fn run_i1(
-    spec: SpeechSpec,
-    shown: &[&str],
-    hours: usize,
-) -> (Vec<bench::LatencySummary>, usize, usize, usize, Duration) {
+struct I1Run {
+    summaries: Vec<bench::LatencySummary>,
+    missing: usize,
+    max_frame_bytes: usize,
+    captured_events: usize,
+    fit_events: usize,
+    frame_cut: u64,
+    frame_bound_most: u64,
+    wall: Duration,
+}
+
+async fn run_i1(spec: SpeechSpec, shown: &[&str], hours: usize) -> I1Run {
     let wall_start = WallInstant::now();
     let duration_ms = spec.duration_ms;
     let speech = Speech::build(spec);
@@ -355,6 +362,9 @@ async fn run_i1(
     let max_frame_bytes = bench.max_frame_bytes();
     let col_active = bench.column_active();
     let captured_events = bench.seen().all().len();
+    let fit_events = bench.seen().count("frame.fit");
+    let frame_cut = bench.count("frame.cut");
+    let frame_bound_most = bench.peak("frame.bound_bytes").map_or(0, |p| p.most);
 
     let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); hours.max(1)];
     let mut missing = 0usize;
@@ -376,39 +386,54 @@ async fn run_i1(
     bench.finish();
 
     let summaries = buckets.into_iter().map(summarize_latencies).collect();
-    (summaries, missing, max_frame_bytes, captured_events, wall_start.elapsed())
+    I1Run {
+        summaries,
+        missing,
+        max_frame_bytes,
+        captured_events,
+        fit_events,
+        frame_cut,
+        frame_bound_most,
+        wall: wall_start.elapsed(),
+    }
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "P1-10：一帧字节上限"]
 async fn i1_three_languages_fit_a_frame() {
     let _store = STORE.lock().await;
-    let (summaries, missing, max_bytes, events, wall) =
-        run_i1(SpeechSpec::three_languages(THIRTY_MINUTES_MS), &["en", "zh", "es"], 1).await;
-    let s = summaries[0];
+    let run = run_i1(SpeechSpec::three_languages(THIRTY_MINUTES_MS), &["en", "zh", "es"], 1).await;
+    let s = run.summaries[0];
     eprintln!(
-        "i1_three_languages: words={} missing={} p50={}ms p99={}ms max={}ms max_frame={}B events={} wall={:.2}s",
+        "i1_three_languages: words={} missing={} p50={}ms p99={}ms max={}ms max_frame={}B bound_most={}B cut={} fit_events={} events={} wall={:.2}s",
         s.count,
-        missing,
+        run.missing,
         s.p50_ms,
         s.p99_ms,
         s.max_ms,
-        max_bytes,
-        events,
-        wall.as_secs_f64()
+        run.max_frame_bytes,
+        run.frame_bound_most,
+        run.frame_cut,
+        run.fit_events,
+        run.captured_events,
+        run.wall.as_secs_f64()
     );
-    assert_eq!(missing, 0, "no words may be lost");
+    assert_eq!(run.missing, 0, "no words may be lost");
     assert!(s.p99_ms <= I1_P99_LIMIT_MS, "p99 {} ms > {I1_P99_LIMIT_MS} ms", s.p99_ms);
-    assert!(max_bytes <= MAX_FRAME_BYTES, "max frame {max_bytes} bytes > {MAX_FRAME_BYTES} bytes");
+    assert!(
+        run.max_frame_bytes <= MAX_FRAME_BYTES,
+        "max frame {} bytes > {MAX_FRAME_BYTES} bytes",
+        run.max_frame_bytes
+    );
+    assert!(run.fit_events >= 1, "expected at least one frame.fit event");
+    assert!(run.frame_cut > 0, "expected frame.cut > 0");
+    assert!(run.frame_bound_most > 0, "expected frame.bound_bytes peak > 0");
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "P1-10：一帧字节上限"]
 async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
     let _store = STORE.lock().await;
-    let (summaries, missing, max_bytes, events, wall) =
-        run_i1(SpeechSpec::standard(EIGHT_HOURS_MS), &["en", "zh"], 8).await;
-    for (h, s) in summaries.iter().enumerate() {
+    let run = run_i1(SpeechSpec::standard(EIGHT_HOURS_MS), &["en", "zh"], 8).await;
+    for (h, s) in run.summaries.iter().enumerate() {
         eprintln!(
             "i1_eight_hours h{}: words={} p50={}ms p99={}ms max={}ms",
             h + 1,
@@ -419,14 +444,15 @@ async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
         );
     }
     eprintln!(
-        "i1_eight_hours total: missing={} max_frame={}B events={} wall={:.2}s",
-        missing,
-        max_bytes,
-        events,
-        wall.as_secs_f64()
+        "i1_eight_hours total: missing={} max_frame={}B bound_most={}B events={} wall={:.2}s",
+        run.missing,
+        run.max_frame_bytes,
+        run.frame_bound_most,
+        run.captured_events,
+        run.wall.as_secs_f64()
     );
-    assert_eq!(missing, 0, "no words may be lost across 8 hours");
-    for (h, s) in summaries.iter().enumerate() {
+    assert_eq!(run.missing, 0, "no words may be lost across 8 hours");
+    for (h, s) in run.summaries.iter().enumerate() {
         assert!(s.count > 0, "hour {} had no words", h + 1);
         assert!(
             s.p99_ms <= I1_P99_LIMIT_MS,
@@ -436,12 +462,16 @@ async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
         );
     }
     assert!(
-        summaries[7].p99_ms <= summaries[0].p99_ms + I1_DRIFT_LIMIT_MS,
+        run.summaries[7].p99_ms <= run.summaries[0].p99_ms + I1_DRIFT_LIMIT_MS,
         "hour 8 p99 {} ms drifted > {I1_DRIFT_LIMIT_MS} ms past hour 1 p99 {} ms",
-        summaries[7].p99_ms,
-        summaries[0].p99_ms
+        run.summaries[7].p99_ms,
+        run.summaries[0].p99_ms
     );
-    assert!(max_bytes <= MAX_FRAME_BYTES, "max frame {max_bytes} bytes > {MAX_FRAME_BYTES} bytes");
+    assert!(
+        run.max_frame_bytes <= MAX_FRAME_BYTES,
+        "max frame {} bytes > {MAX_FRAME_BYTES} bytes",
+        run.max_frame_bytes
+    );
 }
 
 // ---- 3. I2: slow/blocked paths never stall captions or commands ----
@@ -874,15 +904,22 @@ async fn i6_a_lane_that_dies_comes_back_and_marks_what_it_missed() {
             .count(),
         1
     );
-    // P1-10: `lane.link` back to `Live` and `lane.gap` (`why = "panic"`):
-    // assert!(
-    //     bench.seen().of("lane.link").iter().any(|l| l.text("to") == Some("Live")),
-    //     "expected lane.link back to Live"
-    // );
-    // assert_eq!(
-    //     bench.seen().of("lane.gap").iter().filter(|l| l.text("why") == Some("panic")).count(),
-    //     1
-    // );
+    assert!(
+        bench
+            .seen()
+            .of("lane.link")
+            .iter()
+            .any(|l| l.text("from") == Some("Connecting") && l.text("to") == Some("Live")),
+        "expected lane.link Connecting -> Live"
+    );
+    assert!(
+        bench.seen().of("lane.link").iter().filter(|l| l.text("to") == Some("Live")).count() >= 2,
+        "expected lane.link back to Live after panic"
+    );
+    assert_eq!(
+        bench.seen().of("lane.gap").iter().filter(|l| l.text("why") == Some("panic")).count(),
+        1
+    );
     // P1-16: `part.restarts` counter once lanes start on the supervision tree:
     // assert_eq!(bench.count("part.restarts"), 1);
 
