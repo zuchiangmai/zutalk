@@ -3,5 +3,7 @@
 //! Must not use any other module of this crate.
 
 pub mod queue;
+pub mod signal;
 pub mod stats;
 pub mod supervise;
+pub mod water;

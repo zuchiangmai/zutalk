@@ -7,7 +7,7 @@ use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::id::keys::{Keys, Service};
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::live::wire::{Dial, Wire};
-use crate::rt::supervise::{End, Part, supervise};
+use crate::rt::supervise::{End, Part, Restarts, supervise};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::convert::Infallible;
@@ -17,6 +17,9 @@ use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::{Error, Message};
+
+/// Fixed task and part names for the up to three caption lanes of one recording (`P1.md` §3.13.10).
+pub const LANE_NAMES: [&str; 3] = ["lane.0", "lane.1", "lane.2"];
 
 const BLOCK_MS: u32 = (BLOCK as u64 * 1000 / RATE) as u32; // a block's length, worked out
 /// A dial or a write that takes longer than this is a dead connection. 0.8's, for both.
@@ -286,11 +289,26 @@ pub async fn run<K: Keys>(
     };
     // What `supervise` is given owns what it uses: borrowing here, the lane could not be
     // proved `Send`, and so could not run beside the rest of the app.
+    let name = LANE_NAMES[stream];
     let (opener, broken) = (lane.clone(), lane.clone());
-    let broke = move |why| broken.try_lock().into_iter().for_each(|mut lane| lane.why = why);
+    let broke = move |why| {
+        if let Ok(mut lane) = broken.try_lock() {
+            lane.why = why;
+            if why == "panic" {
+                let spoken: Vec<&str> = lane.setup.spoken.iter().map(String::as_str).collect();
+                lane.lines = Assembler::new(&spoken);
+                lane.tail.clear();
+            }
+        }
+    };
     let end = tokio::select! {
         biased;
-        end = supervise(async move || open(opener.clone().lock_owned().await).await, broke) => end,
+        end = supervise(
+            name,
+            async move || open(opener.clone().lock_owned().await).await,
+            broke,
+            Restarts::default(),
+        ) => end,
         () = stopped => End::Done,
     };
     let mut lane = lane.lock().await;
@@ -301,6 +319,9 @@ pub async fn run<K: Keys>(
 }
 
 async fn open<K: Keys>(lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
+    if lane.why == "panic" {
+        lane.tell(Event::Tail { stream: lane.stream, tail: Vec::new() }).await;
+    }
     // A connection that gave way on purpose is no news, unless the next one fails.
     if lane.why != "cap" {
         lane.say(Health::Connecting).await;
@@ -362,16 +383,21 @@ struct Conn<K> {
     wake: Instant,         // the next keepalive while paused; the end of the wait when ending
 }
 
+impl<K> Drop for Conn<K> {
+    fn drop(&mut self) {
+        // Text is accounted for as far as the service got, not as far as it was sent.
+        if self.feed.sent > 0 {
+            self.lane.edge = self.lane.edge.min(self.feed.capture(self.feed.heard));
+        }
+    }
+}
+
 impl<K: Keys> Part for Conn<K> {
     async fn run(&mut self) -> End {
         let Err(end) = self.live().await;
         self.lane.seam().await;
         if end == End::Fatal("key") {
             self.lane.keys.refused(Service::Soniox);
-        }
-        // Text is accounted for as far as the service got, not as far as it was sent.
-        if self.feed.sent > 0 {
-            self.lane.edge = self.lane.edge.min(self.feed.capture(self.feed.heard));
         }
         end
     }

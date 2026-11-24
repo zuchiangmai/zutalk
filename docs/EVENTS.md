@@ -90,3 +90,5 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `stat.queue` | info | 汇总和快照里的队列行 | `snap` `name` `capacity` `depth` `deepest` `sent` `full` `lost` |
 | `identity.who` | info；`to = "nobody"` 时 warn | 启动、登录、登出换了签记录的身份。`made` 为真而这不是第一次启动，说明秘密丢过，旧的本机书架还在盘上（`P1.md` §3.14.8 第 5 条） | `from` `to`（`nobody` / `local` / `person`） `why`（`boot` / `sign_in` / `sign_out`） `made` |
 | `write.skipped` | info | 有音频的草稿没有送去写整场记录：没有钥匙可取。停止以后一条（`n = 1`）；启动或切换身份清点时有就一条 | `n` `why`（`keys.none`） |
+| `part.state` | info；`to = "Waiting"` 时 warn | 受监督的部件每次状态转换 | `part` `from` `to`（`Opening` / `Running` / `Waiting` / `Ended`） `why` `wait_ms` `n` |
+| `part.gave_up` | error | 受监督的部件到了重启上限，不再自己重试 | `part` `why` `n` |

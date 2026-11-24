@@ -209,5 +209,10 @@
  "code.city.deny": "La ville ne l’accepte pas",
  "code.city.audio.big": "Texte déposé · l’audio est trop volumineux pour la ville",
  "code.city.audio.deny": "Texte déposé · la ville n’a pas accepté l’audio",
- "code.city.none": "Choisissez d’abord une ville"
+ "code.city.none": "Choisissez d’abord une ville",
+ "code.tape.slow": "L’enregistrement de l’audio a pris du retard",
+ "code.draft.behind": "L’enregistrement du texte en direct a pris du retard",
+ "code.silent": "Le service ne répond plus",
+ "code.shell": "La fenêtre a pris du retard",
+ "code.panic": "Arrêt inattendu, relancé"
 }

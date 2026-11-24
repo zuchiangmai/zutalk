@@ -209,5 +209,10 @@
  "code.city.deny": "城不收这些",
  "code.city.audio.big": "文字已交 · 音频太大，城收不下",
  "code.city.audio.deny": "文字已交 · 城没收音频",
- "code.city.none": "先选一座城"
+ "code.city.none": "先选一座城",
+ "code.tape.slow": "保存音频慢了",
+ "code.draft.behind": "保存现场稿慢了",
+ "code.silent": "服务不再回应",
+ "code.shell": "窗口刷新慢了",
+ "code.panic": "意外中断，已重开"
 }

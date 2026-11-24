@@ -209,5 +209,10 @@
  "code.city.deny": "La ciudad no lo acepta",
  "code.city.audio.big": "Texto archivado · el audio es demasiado grande para la ciudad",
  "code.city.audio.deny": "Texto archivado · la ciudad no aceptó el audio",
- "code.city.none": "Elige primero una ciudad"
+ "code.city.none": "Elige primero una ciudad",
+ "code.tape.slow": "El guardado de audio se retrasó",
+ "code.draft.behind": "El guardado del texto en vivo se retrasó",
+ "code.silent": "El servicio dejó de responder",
+ "code.shell": "La ventana se retrasó",
+ "code.panic": "Se detuvo inesperadamente y se reinició"
 }

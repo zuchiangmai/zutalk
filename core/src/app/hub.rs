@@ -915,9 +915,9 @@ impl Task {
                 audio.subscribe(),
                 mode.clone(),
             );
-            tokio::spawn(async move {
+            tokio::spawn(zutalk_log::carry(async move {
                 lane::run(n, stream, &setup, keys, dial, audio, mode, lanes).await
-            });
+            }));
         }
         drop(lanes);
         let (tx, id, mut kept) = (self.tx.clone(), self.id.clone(), true);

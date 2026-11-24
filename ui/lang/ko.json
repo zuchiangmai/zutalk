@@ -209,5 +209,10 @@
  "code.city.deny": "도시가 받지 않아요",
  "code.city.audio.big": "텍스트 제출됨 · 오디오가 너무 커서 도시가 받을 수 없어요",
  "code.city.audio.deny": "텍스트 제출됨 · 도시가 오디오를 받지 않았어요",
- "code.city.none": "먼저 도시를 고르세요"
+ "code.city.none": "먼저 도시를 고르세요",
+ "code.tape.slow": "오디오 저장이 늦어졌어요",
+ "code.draft.behind": "실시간 텍스트 저장이 늦어졌어요",
+ "code.silent": "서비스 응답이 멈췄어요",
+ "code.shell": "창 업데이트가 늦어졌어요",
+ "code.panic": "예기치 않게 멈춰 다시 시작했어요"
 }

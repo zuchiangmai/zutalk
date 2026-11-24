@@ -16,8 +16,8 @@ function coreCodes(root = new URL('../../core/src/', import.meta.url).pathname):
   const said = /(?:End::(?:Fatal|Retry)|Notice::(?:Fatal|Restarted)|Msg::Say|Err|ok_or)\("([^"]+)"\)|map_err\(\|_\| "([^"]+)"\)/g;
   const found = [...text.matchAll(said)].map((m) => m[1] ?? m[2]);
   const verdicts = [...text.matchAll(/Some\("([a-z]+\.[a-z0-9_.]+)"\)/g)].map((m) => m[1]);
-  const tables = [...text.matchAll(/const (?:CODES|REFUSED)[^=]*=([\s\S]*?\]);/g)]
-    .flatMap((m) => [...m[1].matchAll(/"([a-z]+\.[a-z0-9_.]+)"/g)].map((x) => x[1]));
+  const tables = [...text.matchAll(/const (?:CODES|REFUSED|BUDGETS)[^=]*=([\s\S]*?\]);/g)]
+    .flatMap((m) => [...m[1].matchAll(/"([a-z]+\.[a-z0-9_.]+)"|why:\s*"([a-z][a-z0-9_.]*)"/g)].map((x) => x[1] ?? x[2]));
   return [...new Set([...found, ...verdicts, ...tables])].filter((c) => /^[a-z][a-z0-9_.]*$/.test(c)); // a sentence is not a code
 }
 // Read from core/src: the steps of writing a transcript, of filing it to a city and of moving the

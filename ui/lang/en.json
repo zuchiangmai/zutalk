@@ -209,5 +209,10 @@
  "code.city.deny": "The city does not take this",
  "code.city.audio.big": "Text filed · the audio is too large for the city",
  "code.city.audio.deny": "Text filed · the city did not take the audio",
- "code.city.none": "Choose a city first"
+ "code.city.none": "Choose a city first",
+ "code.tape.slow": "Saving audio fell behind",
+ "code.draft.behind": "Saving live text fell behind",
+ "code.silent": "The service stopped answering",
+ "code.shell": "The window fell behind",
+ "code.panic": "Stopped unexpectedly and restarted"
 }

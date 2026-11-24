@@ -209,5 +209,10 @@
  "code.city.deny": "都市が受け付けません",
  "code.city.audio.big": "テキストは提出済み · 音声が大きすぎて都市が受け取れません",
  "code.city.audio.deny": "テキストは提出済み · 都市が音声を受け付けませんでした",
- "code.city.none": "先に都市を選んでください"
+ "code.city.none": "先に都市を選んでください",
+ "code.tape.slow": "音声の保存が遅れています",
+ "code.draft.behind": "リアルタイム文字の保存が遅れています",
+ "code.silent": "サービスからの応答が止まりました",
+ "code.shell": "画面の更新が遅れています",
+ "code.panic": "予期せず停止し、再開しました"
 }
