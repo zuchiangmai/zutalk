@@ -78,3 +78,13 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `queue.full` | warn | 一条队列从「有位置」变成「满了」的那一次 | `queue` `policy` `capacity` |
 | `queue.clear` | info | 满过的队列又放进去了 | `queue` `lost`（这一段里被退回、丢掉的个数） |
 | `stats.full` | warn | 统计的行数到了上限，或名字超长（一种一次） | `kind`（`counts` / `peaks` / `spreads` / `queues` / `tasks`） |
+| `task.start` | info | 树上一个任务开始 | `tree` `task` |
+| `task.end` | info；panic 时 error | 树上一个任务结束 | `tree` `task` `code`（`done` / `cancelled` / `panic`） `ran_ms` |
+| `task.refused` | warn | 往一棵已经收尾的树上起任务 | `tree` `task` |
+| `thread.start` | info | 一个有名字的线程开始 | `thread` |
+| `thread.end` | info；panic 时 error | 一个有名字的线程结束 | `thread` `code`（`done` / `panic`） `ran_ms` |
+| `stats.summary` | info | 每分钟一次，后面跟着这一分钟动过的行 | `snap` `up_ms` `rows` |
+| `stat.count` | info | 汇总和快照里的计数行 | `snap` `name` `n` |
+| `stat.peak` | info | 汇总和快照里的高水位行 | `snap` `name` `now` `most` |
+| `stat.spread` | info | 汇总和快照里的分布行 | `snap` `name` `n` `p50` `p99` `most` |
+| `stat.queue` | info | 汇总和快照里的队列行 | `snap` `name` `capacity` `depth` `deepest` `sent` `full` `lost` |

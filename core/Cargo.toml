@@ -26,6 +26,7 @@ sha2 = "0.11.1"
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "mp3", "aac", "isomp4", "flac", "ogg", "vorbis"] }
 tokio = { version = "1.54.1", features = ["rt", "time", "macros", "sync", "net"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 ts-rs = "12.0.1"
 zeroize = "1.9.1"
 zu = { version = "0.9.0", path = "../zu" }

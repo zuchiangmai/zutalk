@@ -516,3 +516,32 @@ async fn an_update_is_installed_only_while_nothing_is_recording() {
     app.notice("update.install").await; // this port returns, as one that could not install
     assert_eq!(installs.load(SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_core_runs_on_a_tree_with_a_name() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let seen = zutalk_log::capture(zutalk_log::Level::Debug);
+    let app = App::start(dir.path());
+
+    let starts = seen.of("task.start");
+    assert_eq!(starts.len(), 2);
+    assert!(
+        starts
+            .iter()
+            .any(|line| line.text("tree") == Some("core") && line.text("task") == Some("hub")),
+        "expected hub task.start, got {starts:?}"
+    );
+    assert!(
+        starts
+            .iter()
+            .any(|line| line.text("tree") == Some("core") && line.text("task") == Some("stats")),
+        "expected stats task.start, got {starts:?}"
+    );
+
+    let tally = app.core.stats().tally();
+    let started = tally.counts.iter().find(|row| row.name == "task.started").map(|row| row.n);
+    assert_eq!(started, Some(2));
+    assert_eq!(seen.refused(), 0);
+}

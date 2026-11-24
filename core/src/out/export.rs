@@ -42,7 +42,7 @@ fn markdown(doc: &Doc, langs: &[String]) -> String {
     for line in doc.lines {
         let who = doc.speakers.get(&line.speaker).unwrap_or(&line.speaker);
         let who = if who.is_empty() { String::new() } else { format!("**{who}** ") };
-        let _ = write!(out, "\n{who}{}\n{}\n", &clock(line.t0, '.')[..8], line.text);
+        let _ = write!(out, "\n{who}{}\n{}\n", &clock(line.t0, '.')[..8], line.text); // dropped: fmt::Write to a String is infallible
         let others = langs.iter().filter(|l| **l != line.language);
         others.filter_map(|l| text_in(line, l)).for_each(|t| _ = writeln!(out, "> {t}"));
     }
@@ -79,7 +79,7 @@ fn cues(doc: &Doc, langs: &[String], sep: char, head: &str) -> String {
             let said = text[byte_at(text, from)..byte_at(text, to)].trim();
             n += 1;
             let (start, end) = (clock(when(from), sep), clock(when(to), sep));
-            let _ = write!(out, "{n}\n{start} --> {end}\n{said}\n\n");
+            let _ = write!(out, "{n}\n{start} --> {end}\n{said}\n\n"); // dropped: fmt::Write to a String is infallible
             from = to;
         }
     }

@@ -34,7 +34,7 @@ impl Directory for Resolver {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One TLS provider in the whole workspace, as in the core: ring.
-    _ = rustls::crypto::ring::default_provider().install_default();
+    _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
     let env = |name: &str, or: &str| std::env::var(name).unwrap_or_else(|_| or.to_owned());
     // The log first, beside the ledger and the rooms, and on standard error for whoever deploys.
     let (data, level) = (env("ZUTALK_DATA", "data"), std::env::var("ZUTALK_LOG").ok());

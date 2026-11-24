@@ -313,7 +313,7 @@ fn cpal_source(output: bool, wanted: Option<String>) -> Open {
         let (ender, id) = (ender.clone(), device.id().ok());
         let lost = move |error: cpal::Error| match error.kind() {
             cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied => {}
-            _ => drop(ender.send(broke(error))),
+            _ => drop(ender.send(broke(error))), // dropped: source already ended when the receiver is gone
         };
         let stream = device.build_input_stream::<f32, _, _>(config.config(), heard, lost, None);
         let stream = stream.map_err(broke)?;
@@ -442,7 +442,7 @@ impl Turner {
         self.blocks.drain(..).for_each(&mut self.sink);
         for (i, why) in self.rebuild.drain(..) {
             if let Some(ender) = self.enders[i].take() {
-                let _ = ender.send(End::Retry(why));
+                let _ = ender.send(End::Retry(why)); // dropped: source already ended when the receiver is gone
             }
         }
         if !alive {
@@ -546,11 +546,11 @@ impl Capture {
 
     /// Paused, the sources stay open, nothing is delivered, and the clock stands from now.
     pub fn pause(&self) {
-        let _ = self.tx.send(Msg::Pause(true, (self.now_ms)()));
+        let _ = self.tx.send(Msg::Pause(true, (self.now_ms)())); // dropped: receiver is gone only once the pump has stopped
     }
 
     pub fn resume(&self) {
-        let _ = self.tx.send(Msg::Pause(false, (self.now_ms)()));
+        let _ = self.tx.send(Msg::Pause(false, (self.now_ms)())); // dropped: receiver is gone only once the pump has stopped
     }
 
     /// Delivers what is whole and joins the one thread. Nothing here waits for a device.
@@ -559,9 +559,9 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop);
+        let _ = self.tx.send(Msg::Stop); // dropped: receiver is gone only once the pump has stopped
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let _ = thread.join(); // dropped: Drop cannot propagate a thread panic; P1-14 moves capture threads onto supervise::thread
         }
     }
 }

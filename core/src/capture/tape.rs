@@ -86,7 +86,7 @@ impl Writer {
 /// A tape that is closed is on the disk.
 impl Drop for Writer {
     fn drop(&mut self) {
-        let _ = self.file.sync_data();
+        let _ = self.file.sync_data(); // dropped: Drop cannot return fsync errors; explicit sync belongs to P1-15
     }
 }
 

@@ -334,7 +334,7 @@ fn parts((dir, key): (PathBuf, [u8; 32])) -> mpsc::Receiver<io::Result<(u32, Blo
                 mime: "audio/wav".into(),
                 size: wav.len() as u64,
             };
-            _ = tx.blocking_send(Ok((t0, file, wav)));
+            _ = tx.blocking_send(Ok((t0, file, wav))); // dropped: send fails only after the filing task stopped listening
         };
         let read = tape::read(&dir, &key, &Pass::City, |block| {
             if block.t_ms / PART != part.0 / PART {

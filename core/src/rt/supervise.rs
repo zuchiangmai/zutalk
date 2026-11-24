@@ -5,8 +5,16 @@
 //! place. The time that was lost is accounted for by whoever owns the timeline: audio
 //! is padded with silence by the capture clock, and text marks a gap.
 
+use crate::rt::stats::{Counter, Peak, Stats};
+use futures_util::FutureExt;
+use serde::Serialize;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::time::{Instant, sleep};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use zutalk_log::{error, info, warn};
 
 /// Why a part stopped running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,4 +94,296 @@ where
         }
         wait_ms = (wait_ms * 2).min(AGAIN_LONGEST_MS);
     }
+}
+
+/// The most running entries one tree tracks: P1 runs under twenty tasks at once, so 64 leaves
+/// room while bounding snapshots and diagnosis files.
+pub const TREE_MOST_TASKS: usize = 64;
+
+/// One task or blocking call currently running on a `Tree`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Running {
+    pub tree: &'static str,
+    pub task: &'static str,
+    pub kind: &'static str,
+    pub for_ms: u64,
+}
+
+/// A blocking call did not finish: it panicked, or its tree was cancelled while waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Broke;
+
+enum Outcome {
+    Done,
+    Cancelled,
+    Panic,
+}
+
+struct Entry {
+    id: u64,
+    tree: &'static str,
+    task: &'static str,
+    kind: &'static str,
+    started: Instant,
+}
+
+#[derive(Default)]
+struct TaskTable {
+    next_id: u64,
+    live: u64,
+    rows: Vec<Entry>,
+    warned: bool,
+}
+
+struct TaskGuard {
+    table: Arc<Mutex<TaskTable>>,
+    tasks: Peak,
+    id: Option<u64>,
+    finished: bool,
+}
+
+impl TaskGuard {
+    fn leave(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(id) = self.id {
+            table.rows.retain(|row| row.id != id);
+        }
+        table.live = table.live.saturating_sub(1);
+        let live = table.live;
+        drop(table);
+        self.tasks.set(live);
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
+/// A named tree of owned tasks (`P1.md` §3.13.10). Cancelling a tree cancels its children too;
+/// `wait` closes it against new tasks and waits for all tasks started on it and its children.
+#[derive(Clone)]
+pub struct Tree {
+    name: &'static str,
+    tracker: TaskTracker,
+    ancestors: Vec<TaskTracker>,
+    token: CancellationToken,
+    stats: Stats,
+    table: Arc<Mutex<TaskTable>>,
+    started: Counter,
+    panics: Counter,
+    tasks: Peak,
+}
+
+impl Tree {
+    /// Creates a root tree with its own running table and counters on `stats`.
+    pub fn root(name: &'static str, stats: Stats) -> Tree {
+        let started = stats.counter("task.started");
+        let panics = stats.counter("task.panics");
+        let tasks = stats.peak("tree.tasks");
+        Tree {
+            name,
+            tracker: TaskTracker::new(),
+            ancestors: Vec::new(),
+            token: CancellationToken::new(),
+            stats,
+            table: Arc::new(Mutex::new(TaskTable::default())),
+            started,
+            panics,
+            tasks,
+        }
+    }
+
+    /// Creates a child tree: cancelled with its parent, with its own `cancel` and `wait`.
+    pub fn child(&self, name: &'static str) -> Tree {
+        let mut ancestors = Vec::with_capacity(self.ancestors.len() + 1);
+        ancestors.extend(self.ancestors.iter().cloned());
+        ancestors.push(self.tracker.clone());
+        Tree {
+            name,
+            tracker: TaskTracker::new(),
+            ancestors,
+            token: self.token.child_token(),
+            stats: self.stats.clone(),
+            table: self.table.clone(),
+            started: self.started.clone(),
+            panics: self.panics.clone(),
+            tasks: self.tasks.clone(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.tracker.is_closed() || self.ancestors.iter().any(TaskTracker::is_closed)
+    }
+
+    fn enter(&self, task: &'static str, kind: &'static str, started: Instant) -> TaskGuard {
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        table.live += 1;
+        let live = table.live;
+        let (id, emit_full) = if table.rows.len() < TREE_MOST_TASKS {
+            table.next_id += 1;
+            let id = table.next_id;
+            table.rows.push(Entry { id, tree: self.name, task, kind, started });
+            (Some(id), false)
+        } else {
+            let emit = !table.warned;
+            table.warned = true;
+            (None, emit)
+        };
+        drop(table);
+        self.tasks.set(live);
+        if emit_full {
+            warn!("stats.full", kind = "tasks");
+        }
+        TaskGuard { table: self.table.clone(), tasks: self.tasks.clone(), id, finished: false }
+    }
+
+    /// Starts a named async task on this tree, carrying the caller's log receiver.
+    pub fn spawn(&self, task: &'static str, work: impl Future<Output = ()> + Send + 'static) {
+        let mut tokens = Vec::with_capacity(1 + self.ancestors.len());
+        tokens.push(self.tracker.token());
+        for ancestor in &self.ancestors {
+            tokens.push(ancestor.token());
+        }
+        if self.is_closed() {
+            drop(tokens);
+            warn!("task.refused", tree = self.name, task = task);
+            return;
+        }
+        let started = Instant::now();
+        let mut guard = self.enter(task, "task", started);
+        self.started.add(1);
+        info!("task.start", tree = self.name, task = task);
+        let tree_name = self.name;
+        let token = self.token.clone();
+        let panics = self.panics.clone();
+        let tracked = async move {
+            let _tokens = tokens;
+            let outcome = tokio::select! {
+                biased;
+                () = token.cancelled() => Outcome::Cancelled,
+                res = AssertUnwindSafe(work).catch_unwind() => match res {
+                    Ok(()) => Outcome::Done,
+                    Err(_) => Outcome::Panic,
+                },
+            };
+            let ran_ms = started.elapsed().as_millis() as u64;
+            guard.leave();
+            match outcome {
+                Outcome::Done => {
+                    info!(
+                        "task.end",
+                        tree = tree_name,
+                        task = task,
+                        code = "done",
+                        ran_ms = ran_ms
+                    );
+                }
+                Outcome::Cancelled => {
+                    info!(
+                        "task.end",
+                        tree = tree_name,
+                        task = task,
+                        code = "cancelled",
+                        ran_ms = ran_ms,
+                    );
+                }
+                Outcome::Panic => {
+                    panics.add(1);
+                    error!(
+                        "task.end",
+                        tree = tree_name,
+                        task = task,
+                        code = "panic",
+                        ran_ms = ran_ms,
+                    );
+                }
+            }
+            drop(_tokens);
+        };
+        tokio::spawn(zutalk_log::carry(tracked));
+    }
+
+    /// Runs a named blocking call on Tokio's blocking pool, carrying the caller's log receiver.
+    /// Does not emit `task.start`/`task.end`; panics and tree cancellation return `Err(Broke)`.
+    pub async fn blocking<R: Send + 'static>(
+        &self,
+        task: &'static str,
+        work: impl FnOnce() -> R + Send + 'static,
+    ) -> Result<R, Broke> {
+        let carrier = zutalk_log::carrier();
+        let guard = self.enter(task, "blocking", Instant::now());
+        let handle = tokio::task::spawn_blocking(move || {
+            let _entered = carrier.enter();
+            let _guard = guard;
+            work()
+        });
+        tokio::select! {
+            res = handle => res.map_err(|_| Broke),
+            () = self.token.cancelled() => Err(Broke),
+        }
+    }
+
+    /// Cancels this tree and every child tree under it.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    /// Resolves once this tree (or an ancestor) has been cancelled.
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+
+    /// Closes this tree against new tasks and waits for all tasks on it and its children to end.
+    pub async fn wait(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+
+    /// The `Stats` attached to this tree.
+    pub fn stats(&self) -> &Stats {
+        &self.stats
+    }
+
+    /// Snapshot of everything currently running on this tree and its relatives, in start order.
+    pub fn running(&self) -> Vec<Running> {
+        let table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        table
+            .rows
+            .iter()
+            .map(|row| Running {
+                tree: row.tree,
+                task: row.task,
+                kind: row.kind,
+                for_ms: row.started.elapsed().as_millis() as u64,
+            })
+            .collect()
+    }
+}
+
+/// Starts a named OS thread carrying the caller's log receiver. Whoever holds the handle owns it.
+pub fn thread(
+    name: &'static str,
+    work: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    let carrier = zutalk_log::carrier();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _entered = carrier.enter();
+            let started = std::time::Instant::now();
+            info!("thread.start", thread = name);
+            let ended = std::panic::catch_unwind(AssertUnwindSafe(work));
+            let ran_ms = started.elapsed().as_millis() as u64;
+            match ended {
+                Ok(()) => info!("thread.end", thread = name, code = "done", ran_ms = ran_ms),
+                Err(_) => error!("thread.end", thread = name, code = "panic", ran_ms = ran_ms),
+            }
+        })
+        .expect("a named thread starts")
 }

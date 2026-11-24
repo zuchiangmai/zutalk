@@ -7,8 +7,13 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use ts_rs::TS;
-use zutalk_log::warn;
+use zutalk_log::{info, warn};
+
+/// How often `publish` writes the rows that moved to the log: once a minute (PLAN.md §4.5.2).
+pub const STATS_SUMMARY_EVERY_MS: u64 = 60_000;
 
 /// The most counter rows one `Stats` holds: sized so the fullest `Tally` fits in 8192 bytes.
 pub const STATS_MOST_COUNTS: usize = 40;
@@ -177,8 +182,7 @@ impl QueueStat {
 
     /// Record `n` items received from a bounded or thread queue.
     pub(crate) fn note_recv(&self, n: u64) {
-        // dropped: fetch_update with Some never returns Err
-        let _ = self
+        let _ = self // dropped: fetch_update with Some never returns Err
             .0
             .depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(n)));
@@ -453,5 +457,80 @@ pub fn moved(before: &Tally, after: &Tally) -> Tally {
             .filter(|row| before.queues.iter().find(|prev| prev.name == row.name) != Some(*row))
             .cloned()
             .collect(),
+    }
+}
+
+/// Emits every row in `tally` as flat `stat.*` events tagged with `snap` (`0` for the periodic
+/// summary, non-zero for a stall snapshot).
+pub fn write(tally: &Tally, snap: u64) {
+    for row in &tally.counts {
+        info!("stat.count", snap = snap, name = row.name, n = row.n);
+    }
+    for row in &tally.peaks {
+        info!("stat.peak", snap = snap, name = row.name, now = row.now, most = row.most);
+    }
+    for row in &tally.spreads {
+        info!(
+            "stat.spread",
+            snap = snap,
+            name = row.name,
+            n = row.n,
+            p50 = row.p50,
+            p99 = row.p99,
+            most = row.most,
+        );
+    }
+    for row in &tally.queues {
+        info!(
+            "stat.queue",
+            snap = snap,
+            name = row.name,
+            capacity = row.capacity,
+            depth = row.depth,
+            deepest = row.deepest,
+            sent = row.sent,
+            full = row.full,
+            lost = row.lost,
+        );
+    }
+}
+
+/// Writes what moved in `stats` to the log once every `STATS_SUMMARY_EVERY_MS` and copies
+/// process log loss/refusal counts into `log.lost` and `log.refused`.
+pub async fn publish(stats: Stats) {
+    let started = Instant::now();
+    let log_lost = stats.counter("log.lost");
+    let log_refused = stats.counter("log.refused");
+    let mut prev_lost = zutalk_log::lost();
+    let mut prev_refused = zutalk_log::refused();
+    log_lost.add(prev_lost);
+    log_refused.add(prev_refused);
+    let mut before = Tally {
+        counts: vec![
+            Count { name: "log.lost", n: prev_lost },
+            Count { name: "log.refused", n: prev_refused },
+        ],
+        ..Tally::default()
+    };
+
+    let mut tick = interval(Duration::from_millis(STATS_SUMMARY_EVERY_MS));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    tick.tick().await; // skip the immediate first tick; the first summary is at one minute
+
+    loop {
+        tick.tick().await;
+        let now_lost = zutalk_log::lost();
+        log_lost.add(now_lost.saturating_sub(prev_lost));
+        prev_lost = now_lost;
+        let now_refused = zutalk_log::refused();
+        log_refused.add(now_refused.saturating_sub(prev_refused));
+        prev_refused = now_refused;
+
+        let now = stats.tally();
+        let diff = moved(&before, &now);
+        let up_ms = started.elapsed().as_millis() as u64;
+        info!("stats.summary", snap = 0u64, up_ms = up_ms, rows = diff.len());
+        write(&diff, 0);
+        before = now;
     }
 }

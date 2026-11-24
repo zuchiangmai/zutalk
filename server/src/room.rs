@@ -70,7 +70,7 @@ impl Room {
     /// Whoever is reading hears each frame; an error to send is only nobody listening.
     fn add(&mut self, frame: String) {
         self.bytes += frame.len();
-        _ = self.live.send(event("log", &frame).id((self.frames.len() + 1).to_string()));
+        _ = self.live.send(event("log", &frame).id((self.frames.len() + 1).to_string())); // dropped: broadcast fails only when no viewers are connected
         self.frames.push(frame);
     }
 }
@@ -90,7 +90,7 @@ pub fn open_all(dir: &std::path::Path) -> Result<HashMap<String, Room>, zu::Erro
 fn remove(server: &Server, rooms: &mut HashMap<String, Room>, id: &str) -> std::io::Result<()> {
     fs::remove_file(server.config.data.join("rooms").join(id))?;
     if let Some(room) = rooms.remove(id) {
-        _ = room.live.send(event("gone", ""));
+        _ = room.live.send(event("gone", "")); // dropped: broadcast fails only when no viewers are connected
     }
     Ok(())
 }
@@ -101,7 +101,7 @@ pub fn sweep(server: &Server, now: i64) {
     let mut rooms = lock(&server.rooms);
     let idle = rooms.iter().filter(|(_, room)| now > room.last + server.config.room.3);
     for id in idle.map(|(id, _)| id.clone()).collect::<Vec<_>>() {
-        _ = remove(server, &mut rooms, &id);
+        _ = remove(server, &mut rooms, &id); // dropped: if the file cannot be removed now, the next sweep tries again
     }
 }
 
@@ -149,7 +149,7 @@ pub async fn write(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
         }
         "slot" => {
             room.slot = (record.at, frame);
-            _ = room.live.send(event("slot", &room.slot.1));
+            _ = room.live.send(event("slot", &room.slot.1)); // dropped: broadcast fails only when no viewers are connected
         }
         "gone" => {
             remove(&server, &mut rooms, &id).map_err(zu::Error::from)?;

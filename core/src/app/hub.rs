@@ -22,7 +22,8 @@ use crate::record::shelf::{
 };
 use crate::record::shelf::{Shelf, Words};
 use crate::record::{migrate, retain};
-use crate::rt::supervise::{End, again};
+use crate::rt::stats::{self, Stats};
+use crate::rt::supervise::{End, Tree, again};
 use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -139,14 +140,19 @@ enum Msg {
 }
 
 /// The core, running. Commands go in; events come out through the function it was given.
-pub struct Core(mpsc::UnboundedSender<Msg>);
+pub struct Core {
+    tx: mpsc::UnboundedSender<Msg>,
+    stats: Stats,
+}
 
 impl Core {
     /// Starts on the current runtime. The key store must be open (`keys::open_store`).
     pub fn start(config: Config, out: impl Fn(Event) + Send + 'static) -> Result<Core, End> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
         let http = reqwest::Client::builder().build().map_err(|_| End::Fatal("tls"))?;
         let (tx, mail) = mpsc::unbounded_channel();
+        let stats = Stats::new();
+        let root = Tree::root("core", stats.clone());
         let (config, out, keys) = (Arc::new(config), Box::new(out), Arc::new(Chain::new(None)));
         let (state, sent, ours, shelf, recording, opened, signing, slot, invite, moving) =
             Default::default();
@@ -154,6 +160,7 @@ impl Core {
         let hub = Hub {
             config,
             tx: tx.clone(),
+            tree: root.clone(),
             out,
             http,
             keys,
@@ -169,18 +176,24 @@ impl Core {
             slot,
             moving,
         };
-        tokio::spawn(hub.run(mail));
-        Ok(Core(tx))
+        root.spawn("hub", hub.run(mail));
+        root.spawn("stats", stats::publish(stats.clone()));
+        Ok(Core { tx, stats })
     }
 
     pub fn send(&self, command: Command) {
-        let _ = self.0.send(Msg::Do(command));
+        let _ = self.tx.send(Msg::Do(command)); // dropped: unbounded mailbox; fails only after the hub has stopped
     }
 
     /// The shell's report from looking for a newer version of the app: one downloaded and
     /// ready to install, or what kept it from being had.
     pub fn looked(&self, found: Result<String, &'static str>) {
-        let _ = self.0.send(Msg::Looked(found));
+        let _ = self.tx.send(Msg::Looked(found)); // dropped: unbounded mailbox; fails only after the hub has stopped
+    }
+
+    /// Live statistics for this core: counters, peaks, spreads, and queues.
+    pub fn stats(&self) -> Stats {
+        self.stats.clone()
     }
 }
 
@@ -209,6 +222,7 @@ fn row(recording: &Recording, tapes: &Path) -> Row {
 struct Hub {
     config: Arc<Config>,
     tx: Sender,
+    tree: Tree,
     out: Box<dyn Fn(Event) + Send>,
     http: reqwest::Client,
     keys: Arc<Chain>,
@@ -255,6 +269,7 @@ impl Hub {
             }
             self.publish();
         }
+        self.tree.cancel();
     }
 
     fn publish(&mut self) {
@@ -379,7 +394,7 @@ impl Hub {
                 self.state.login = Some(sign_in.code().into());
                 let (tx, http) = (self.tx.clone(), self.http.clone());
                 let task = tokio::spawn(async move {
-                    let _ = tx.send(Msg::SignedIn(sign_in.finish(&http).await));
+                    let _ = tx.send(Msg::SignedIn(sign_in.finish(&http).await)); // dropped: unbounded mailbox; fails only after the hub has stopped
                 });
                 if let Some(earlier) = self.signing.replace(task.abort_handle()) {
                     earlier.abort();
@@ -424,7 +439,7 @@ impl Hub {
             Command::City { address } => {
                 let (http, tx) = (self.http.clone(), self.tx.clone());
                 tokio::spawn(async move {
-                    let _ = tx.send(Msg::City(city::calendar(&http, &address).await));
+                    let _ = tx.send(Msg::City(city::calendar(&http, &address).await)); // dropped: unbounded mailbox; fails only after the hub has stopped
                 });
             }
             // What is still being written is filed once it is written.
@@ -448,8 +463,8 @@ impl Hub {
         let (filer, tx) = (Filer { http, me, shelf, tapes }, self.tx.clone());
         self.state.filing.push(writing(&id, "filing"));
         tokio::spawn(async move {
-            let said = city::file(&filer, &id, filing, |w| drop(tx.send(Msg::Filing(w)))).await;
-            let _ = tx.send(Msg::Filed(id, said));
+            let said = city::file(&filer, &id, filing, |w| drop(tx.send(Msg::Filing(w)))).await; // dropped: unbounded mailbox; fails only after the hub has stopped
+            let _ = tx.send(Msg::Filed(id, said)); // dropped: unbounded mailbox; fails only after the hub has stopped
         });
         Ok(())
     }
@@ -527,7 +542,7 @@ impl Hub {
             let claim = tokio::spawn(async move {
                 let claimed = again(|| chain.claim(&token)).await;
                 // Gone over, or refused for good: either way it is not sent again.
-                let _ = tx.send(Msg::Claimed(keys::carried(&token).and(claimed).map_err(code)));
+                let _ = tx.send(Msg::Claimed(keys::carried(&token).and(claimed).map_err(code))); // dropped: unbounded mailbox; fails only after the hub has stopped
             });
             if let Some(earlier) = self.signing.replace(claim.abort_handle()) {
                 earlier.abort();
@@ -564,7 +579,7 @@ impl Hub {
             let tx = self.tx.clone();
             let made = tokio::spawn(async move {
                 let me = again(|| keys::create(&http, &directory)).await;
-                let _ = tx.send(Msg::SignedIn(me));
+                let _ = tx.send(Msg::SignedIn(me)); // dropped: unbounded mailbox; fails only after the hub has stopped
             });
             self.signing = Some(made.abort_handle());
         }
@@ -581,9 +596,9 @@ impl Hub {
         if !std::mem::replace(&mut self.moving, true) {
             let (data, tx) = (self.config.data.clone(), self.tx.clone());
             tokio::task::spawn_blocking(move || {
-                let progress = |writing| drop(tx.send(Msg::Moving(writing)));
+                let progress = |writing| drop(tx.send(Msg::Moving(writing))); // dropped: unbounded mailbox; fails only after the hub has stopped
                 let moved = migrate::run((&old, &data), &shelf, &me, now, progress);
-                let _ = tx.send(Msg::Moved(moved));
+                let _ = tx.send(Msg::Moved(moved)); // dropped: unbounded mailbox; fails only after the hub has stopped
             });
         }
     }
@@ -636,7 +651,7 @@ impl Hub {
                 }
                 Ok(())
             };
-            let _ = tx.send(Msg::Shared(shared.await));
+            let _ = tx.send(Msg::Shared(shared.await)); // dropped: unbounded mailbox; fails only after the hub has stopped
         });
         Ok(())
     }
@@ -657,7 +672,7 @@ impl Hub {
                     back.and(Err(code(end)))
                 }
             };
-            let _ = tx.send(Msg::Shared(gone));
+            let _ = tx.send(Msg::Shared(gone)); // dropped: unbounded mailbox; fails only after the hub has stopped
         });
         self.rooms()
     }
@@ -708,9 +723,9 @@ impl Hub {
         tokio::spawn(async move {
             if let End::Retry(code) | End::Fatal(code) = write::sweep(&tapes, &soniox, &*keys).await
             {
-                let _ = tx.send(Msg::Say(code));
+                let _ = tx.send(Msg::Say(code)); // dropped: unbounded mailbox; fails only after the hub has stopped
             }
-            owing.into_iter().for_each(|task| drop(tokio::spawn(task.finish())));
+            owing.into_iter().for_each(|task| drop(tokio::spawn(task.finish()))); // dropped: detached handle until P1-21 moves finishing onto the tree
         });
     }
 }
@@ -726,7 +741,7 @@ fn open(recording: Recording, tapes: &Path) -> Open {
 async fn slot(ours: Ours, id: String, mut live: watch::Receiver<Vec<Column>>, tx: Sender) {
     let key = match keys::derive("room", &id) {
         Ok(key) => key,
-        Err(end) => return drop(tx.send(Msg::Say(code(end)))),
+        Err(end) => return drop(tx.send(Msg::Say(code(end)))), // dropped: unbounded mailbox; fails only after the hub has stopped
     };
     let mut said = None;
     live.mark_changed(); // whatever the slot held before is replaced
@@ -735,7 +750,7 @@ async fn slot(ours: Ours, id: String, mut live: watch::Receiver<Vec<Column>>, tx
         let frame = serde_json::to_vec(&columns).ok().filter(|_| !columns.is_empty());
         let wrote = room::write(&ours, &id, &key, Write::Slot(frame.as_deref())).await.err();
         if wrote != said {
-            wrote.into_iter().for_each(|end| drop(tx.send(Msg::Say(code(end)))));
+            wrote.into_iter().for_each(|end| drop(tx.send(Msg::Say(code(end))))); // dropped: unbounded mailbox; fails only after the hub has stopped
             said = wrote;
         }
         tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
@@ -783,7 +798,7 @@ struct Task {
 
 impl Task {
     fn tell(&self, msg: Msg) {
-        let _ = self.tx.send(msg);
+        let _ = self.tx.send(msg); // dropped: unbounded mailbox; fails only after the hub has stopped
     }
 
     fn tape(&self) -> PathBuf {
@@ -831,17 +846,18 @@ impl Task {
             // Without the tape there is no recording: say so, and end it.
             if kept && tape.append(&block).is_err() {
                 kept = false;
-                let _ = tx.send(Msg::Say("tape"));
-                let _ = tx.send(Msg::Ended(id.clone()));
+                let _ = tx.send(Msg::Say("tape")); // dropped: unbounded mailbox; fails only after the hub has stopped
+                let _ = tx.send(Msg::Ended(id.clone())); // dropped: unbounded mailbox; fails only after the hub has stopped
             }
-            let _ = audio.send(Arc::new(block));
+            let _ = audio.send(Arc::new(block)); // dropped: broadcast fails only when no caption lanes are listening
         };
         let (tx, id) = (self.tx.clone(), self.id.clone());
         let notice = move |notice| {
-            let _ = tx.send(match notice {
+            let msg = match notice {
                 Notice::Ended => Msg::Ended(id.clone()),
                 Notice::Restarted(code) | Notice::Fatal(code) => Msg::Say(code),
-            });
+            };
+            let _ = tx.send(msg); // dropped: unbounded mailbox; fails only after the hub has stopped
         };
         let mut capture =
             Some((self.config.hear)(source, Box::new(sink), Box::new(notice)).map_err(code)?);

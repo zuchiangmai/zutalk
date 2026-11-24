@@ -30,7 +30,7 @@ fn dispatch(command: Command, core: State<Core>) {
 #[tauri::command]
 fn subscribe(channel: Channel<Event>, windows: State<Windows>) {
     let Ok(mut windows) = windows.lock() else { return };
-    windows.1.iter().for_each(|last| drop(channel.send(last.clone())));
+    windows.1.iter().for_each(|last| drop(channel.send(last.clone()))); // dropped: a closed channel is pruned on the next fan
     windows.0.push(channel);
 }
 
@@ -40,7 +40,7 @@ fn fan(app: &AppHandle, windows: &Windows, event: Event) {
     if let Event::State(state) = &event {
         let captions = app.get_webview_window("captions");
         if let Some(window) = captions.filter(|w| w.is_visible().ok() != Some(state.captions)) {
-            let _ = if state.captions { window.show() } else { window.hide() };
+            let _ = if state.captions { window.show() } else { window.hide() }; // dropped: OS window show/hide error ignored until P1-23
         }
         windows.1 = Some(event.clone());
     }

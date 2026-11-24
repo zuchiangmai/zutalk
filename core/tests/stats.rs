@@ -1,10 +1,13 @@
 //! Stats: counters, peaks, fixed-bucket spreads, limits, and diffs (`rt/stats.rs`).
 
 use std::thread;
+use std::time::Duration;
 use zutalk_core::rt::stats::{
     Count, PeakRow, QueueRow, SPREAD_EDGES, STATS_MOST_COUNTS, STATS_MOST_PEAKS, STATS_MOST_QUEUES,
-    STATS_MOST_SPREADS, STATS_NAME_MOST_BYTES, SpreadRow, Stats, Tally, bucket, moved, quantile,
+    STATS_MOST_SPREADS, STATS_NAME_MOST_BYTES, STATS_SUMMARY_EVERY_MS, SpreadRow, Stats, Tally,
+    bucket, moved, publish, quantile,
 };
+use zutalk_core::rt::supervise::Tree;
 use zutalk_log::{Level, capture};
 
 #[test]
@@ -229,4 +232,77 @@ fn two_stats_do_not_see_each_other() {
 
     assert_eq!(a.tally().counts, vec![Count { name: "hub.turns", n: 3 }]);
     assert_eq!(b.tally().counts, vec![Count { name: "hub.turns", n: 10 }]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn once_a_minute_what_moved_is_written() {
+    let seen = capture(Level::Debug);
+    let stats = Stats::new();
+    let runner = Tree::root("test", Stats::new());
+    runner.spawn("stats", publish(stats.clone()));
+    tokio::task::yield_now().await;
+
+    stats.counter("frame.made").add(7);
+    stats.counter("hub.turns").add(3);
+    let spread = stats.spread("hub.turn_us");
+    spread.note(4);
+    spread.note(12);
+    spread.note(80);
+
+    tokio::time::advance(Duration::from_millis(STATS_SUMMARY_EVERY_MS)).await;
+    tokio::task::yield_now().await;
+
+    let summaries = seen.of("stats.summary");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].level, Level::Info);
+    assert_eq!(summaries[0].u64("snap"), Some(0));
+    assert_eq!(summaries[0].u64("up_ms"), Some(STATS_SUMMARY_EVERY_MS));
+    assert_eq!(summaries[0].u64("rows"), Some(3));
+
+    let counts = seen.of("stat.count");
+    assert_eq!(counts.len(), 2);
+    assert_eq!(counts[0].u64("snap"), Some(0));
+    assert_eq!(counts[0].text("name"), Some("frame.made"));
+    assert_eq!(counts[0].u64("n"), Some(7));
+    assert_eq!(counts[1].u64("snap"), Some(0));
+    assert_eq!(counts[1].text("name"), Some("hub.turns"));
+    assert_eq!(counts[1].u64("n"), Some(3));
+
+    let spreads = seen.of("stat.spread");
+    assert_eq!(spreads.len(), 1);
+    assert_eq!(spreads[0].u64("snap"), Some(0));
+    assert_eq!(spreads[0].text("name"), Some("hub.turn_us"));
+    assert_eq!(spreads[0].u64("n"), Some(3));
+    assert_eq!(spreads[0].u64("p50"), Some(20));
+    assert_eq!(spreads[0].u64("p99"), Some(100));
+    assert_eq!(spreads[0].u64("most"), Some(80));
+
+    // Another minute with nothing moved: only stats.summary with rows = 0.
+    tokio::time::advance(Duration::from_millis(STATS_SUMMARY_EVERY_MS)).await;
+    tokio::task::yield_now().await;
+
+    let summaries = seen.of("stats.summary");
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[1].u64("up_ms"), Some(2 * STATS_SUMMARY_EVERY_MS));
+    assert_eq!(summaries[1].u64("rows"), Some(0));
+    assert_eq!(seen.count("stat.count"), 2);
+    assert_eq!(seen.count("stat.spread"), 1);
+
+    // Move one counter: the next minute writes only that one row.
+    stats.counter("frame.made").add(2);
+    tokio::time::advance(Duration::from_millis(STATS_SUMMARY_EVERY_MS)).await;
+    tokio::task::yield_now().await;
+
+    let summaries = seen.of("stats.summary");
+    assert_eq!(summaries.len(), 3);
+    assert_eq!(summaries[2].u64("up_ms"), Some(3 * STATS_SUMMARY_EVERY_MS));
+    assert_eq!(summaries[2].u64("rows"), Some(1));
+    let counts = seen.of("stat.count");
+    assert_eq!(counts.len(), 3);
+    assert_eq!(counts[2].text("name"), Some("frame.made"));
+    assert_eq!(counts[2].u64("n"), Some(9));
+
+    runner.cancel();
+    runner.wait().await;
+    assert_eq!(seen.refused(), 0);
 }

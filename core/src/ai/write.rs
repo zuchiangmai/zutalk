@@ -422,9 +422,9 @@ fn wav(dir: &Path, key: &[u8; 32], length_ms: u32, name: String) -> multipart::P
     spawn_blocking(move || {
         let pcm = |block: Block| Ok(block.pcm.into_iter().flat_map(i16::to_le_bytes).collect());
         // A send fails only once the upload has ended, and then nobody is listening.
-        let _ = tx.blocking_send(Ok(wav_header(samples)));
+        let _ = tx.blocking_send(Ok(wav_header(samples))); // dropped: send fails only after the upload ended
         let read = tape::read(&dir, &key, &Pass::Write, |block| _ = tx.blocking_send(pcm(block)));
-        let _ = read.map_err(|e| tx.blocking_send(Err(e)));
+        let _ = read.map_err(|e| tx.blocking_send(Err(e))); // dropped: send fails only after the upload ended
     });
     let body = Body::wrap_stream(stream::poll_fn(move |cx| rx.poll_recv(cx)));
     multipart::Part::stream_with_length(body, 44 + samples as u64 * 2).file_name(name)
@@ -443,7 +443,7 @@ impl<'a, K: Keys> Port<'a, K> {
     async fn open(keys: &'a K, service: Service, base: &'a str) -> Result<Self, End> {
         let lease = keys.lease(service).await?;
         // The app has one TLS provider. An error says only that it is installed already.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
         let http = Client::builder().build().map_err(|_| End::Fatal("tls"))?;
         Ok(Self { http, base, lease, keys, service })
     }
@@ -629,7 +629,7 @@ pub async fn write(
             .put(&plan.id, RECORDING, &[(plan.id.clone(), Some(about))], now())
             .map_err(shelved)?;
         // Nothing is owed: a journal left behind would only name a take already used.
-        let _ = fs::remove_file(dir.join(Journal::FILE));
+        let _ = fs::remove_file(dir.join(Journal::FILE)); // dropped: left behind if removal fails; the take is already recorded
         Ok(())
     };
     attempt.await.err().unwrap_or(End::Done)

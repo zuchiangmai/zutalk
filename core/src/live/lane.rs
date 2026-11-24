@@ -259,10 +259,10 @@ pub async fn run<K: Keys>(
     let lane = Lane { stream, kind, setup, keys, out, audio, mode, lines, tail, edge, why, paused };
     let lane = Arc::new(Mutex::new(lane));
     let stopped = async {
-        let _ = stop.wait_for(|mode| *mode == Mode::Stopped).await;
+        let _ = stop.wait_for(|mode| *mode == Mode::Stopped).await; // dropped: sender dropped means the recording has already stopped
         // A connection has this long to bring the last words. With none, there are none.
         let last_words_ms = TAIL_MS + PATIENCE_MS;
-        let _ = timeout(Duration::from_millis(last_words_ms), lane.lock()).await;
+        let _ = timeout(Duration::from_millis(last_words_ms), lane.lock()).await; // dropped: timeout expiry just means no last words arrived in time
     };
     // What `supervise` is given owns what it uses: borrowing here, the lane could not be
     // proved `Send`, and so could not run beside the rest of the app.
@@ -300,7 +300,7 @@ async fn open<K: Keys>(lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
 
 impl<K: Keys> Lane<K> {
     async fn tell(&self, event: Event) {
-        let _ = self.out.send(event).await; // nobody listening is not this lane's failure
+        let _ = self.out.send(event).await; // dropped: nobody listening is not this lane's failure
     }
 
     async fn say(&self, state: Health) {

@@ -159,7 +159,7 @@ pub fn run(
         if let Err(code) = shelve((old, data), shelf, &handed, &id, &now) {
             // Its sound stays where 0.8 has it; a tape of it here would belong to nothing.
             // One left behind is cleared by the next attempt, before anything else.
-            let _ = fs::remove_dir_all(data.join("tape").join(&id));
+            let _ = fs::remove_dir_all(data.join("tape").join(&id)); // dropped: if removal fails, the next migration attempt clears it first
             skipped.push((handed.about.title.clone(), code.into()));
         }
     }
