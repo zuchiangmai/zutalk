@@ -186,3 +186,50 @@ fn the_devices_identity_is_made_once_and_is_the_same_ever_after() {
         zu::Record::sign(&first.key, path, None, [], 1_800_000_000_000, None).expect("signed");
     assert_eq!(record.verify(|by, key, _| zu::did::local_key(by) == Some(*key), |_| None), Ok(()));
 }
+
+#[test]
+fn a_key_comes_from_the_person_from_a_grant_or_from_nowhere() {
+    use std::sync::Arc;
+    use zu::SecretKey;
+    use zutalk_core::id::keys::{Chain, From, Me, Ours, Service};
+
+    let table = [
+        (true, true, From::Own),
+        (true, false, From::Own),
+        (false, true, From::Granted),
+        (false, false, From::Nowhere),
+    ];
+    for (own, person, expected) in table {
+        assert_eq!(From::of(own, person), expected, "own={own} person={person}");
+    }
+
+    let _one = STORE.blocking_lock();
+    let dir = tempfile::tempdir().expect("a folder");
+    store(dir.path());
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let ours = Ours {
+        server: "https://127.0.0.1:9".into(),
+        me: Me {
+            did: "did:zu:ewvi7nxzyoun6zhxrhs64oiz".into(),
+            key: Arc::new(SecretKey::from_seed(&[5; 32])),
+        },
+        http: reqwest::Client::new(),
+    };
+    let alone = Chain::new(None);
+    let granted = Chain::new(Some(ours));
+
+    assert_eq!(alone.from(Service::Soniox), From::Nowhere);
+    assert_eq!(granted.from(Service::Soniox), From::Granted);
+
+    alone.own(Service::Soniox, Some("sk-own")).expect("own key set");
+    assert_eq!(alone.from(Service::Soniox), From::Own);
+    assert_eq!(granted.from(Service::Soniox), From::Own);
+    // Other services remain unaffected.
+    assert_eq!(alone.from(Service::OpenRouter), From::Nowhere);
+    assert_eq!(granted.from(Service::OpenRouter), From::Granted);
+
+    alone.own(Service::Soniox, None).expect("own key cleared");
+    assert_eq!(alone.from(Service::Soniox), From::Nowhere);
+    assert_eq!(granted.from(Service::Soniox), From::Granted);
+}

@@ -3,6 +3,7 @@
 //! nothing of its own but what is being typed. The TypeScript is written by `cargo test`.
 
 pub use crate::capture::audio::Device;
+pub use crate::id::keys::From;
 use crate::knowledge::glossary::Term;
 use crate::out::city::{Calendar, Filing};
 use crate::record::shelf::Said;
@@ -37,15 +38,6 @@ pub struct State {
     pub moving: Option<Writing>,        // the 0.8 library being moved in: which recording, how far
     pub unmoved: Vec<(String, String)>, // what 0.8 handed over that did not move: title, why
     pub captions: bool,                 // the captions window is on screen
-}
-
-/// Where a service's key comes from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
-pub enum From {
-    #[default]
-    Nowhere,
-    Own,
-    Granted,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]

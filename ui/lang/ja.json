@@ -140,6 +140,7 @@
  "code.migrate.key": "ZuTalk 0.8 の音声の鍵が見つかりません",
  "code.migrate.audio": "ZuTalk 0.8 の音声を開けません",
  "code.captions.off": "文字起こしなし",
+ "code.captions.no_key": "文字起こしのキーがありません",
  "code.disk": "ディスクに書き込めません",
  "code.journal": "文字起こしの進行記録が壊れています",
  "code.id.code": "サインインコードを作れませんでした",

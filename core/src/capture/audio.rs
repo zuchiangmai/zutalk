@@ -45,6 +45,18 @@ pub enum Source {
     File(PathBuf), // decoded as fast as it reads, with no wall clock
 }
 
+impl Source {
+    /// The stable name of this source kind, for records and logs.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Source::Mic { .. } => "mic",
+            Source::System => "system",
+            Source::Both { .. } => "both",
+            Source::File(_) => "file",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 pub struct Device {
     pub id: String,

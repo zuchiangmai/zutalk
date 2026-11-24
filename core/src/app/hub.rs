@@ -435,7 +435,12 @@ impl Hub {
             }
             Command::OwnKey { service, key } => {
                 let service = Service::ALL.into_iter().find(|s| s.name() == service);
-                self.keys.own(service.ok_or("keys.which")?, key.as_deref()).map_err(code)?;
+                let service = service.ok_or("keys.which")?;
+                self.keys.own(service, key.as_deref()).map_err(code)?;
+                self.refresh()?;
+                if service == Service::Soniox && self.has_key(Service::Soniox) {
+                    self.recover();
+                }
             }
             Command::Captions { show } => self.state.captions = show,
             Command::DestroyAudio { id } => {
@@ -491,6 +496,14 @@ impl Hub {
         self.under_way(id) || self.state.writing.iter().any(|w| w.id == id)
     }
 
+    fn has_key(&self, service: Service) -> bool {
+        self.state
+            .keys
+            .iter()
+            .find(|(name, _)| name == service.name())
+            .is_some_and(|(_, from)| *from != From::Nowhere)
+    }
+
     fn task(&self, id: &str, shelf: &Arc<Shelf>) -> Task {
         let (config, tx, keys, shelf) =
             (self.config.clone(), self.tx.clone(), self.keys.clone(), shelf.clone());
@@ -505,20 +518,28 @@ impl Hub {
         }
         let (shelf, started, setup) = (self.shelf()?, now(), self.state.setup.clone());
         let id = format!("{started:011x}{:08x}", getrandom::u32().map_err(|_| "random")?);
-        let (source_name, title) = match &source {
+        let file = matches!(source, Source::File(_));
+        let source_name = source.code().into();
+        let title = match &source {
             Source::File(path) => {
-                let name = path.file_stem().map(|name| name.to_string_lossy().into_owned());
-                ("file".into(), name.unwrap_or_default())
+                path.file_stem().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
             }
-            _ => (format!("{:?}", setup.sound).to_lowercase(), String::new()),
+            _ => String::new(),
         };
         let (spoken, shown) = (setup.spoken, setup.shown);
+        let captions = lane::captions(file, &shown, self.has_key(Service::Soniox));
+        let initial = match &captions {
+            Ok(_) => Status::Connecting,
+            Err(why) => Status::AudioOnly { why: (*why).into() },
+        };
         let about =
             About { started, title, spoken, shown, source: source_name, ..About::default() };
         shelf.put(&id, RECORDING, &[(id.clone(), Some(about.clone()))], started).map_err(fail)?;
         let (mode, watching) = watch::channel(Mode::Recording);
-        tokio::spawn(self.task(&id, &shelf).record(source, about, watching));
-        self.state.session = Some(Session { id: id.clone(), started, status: Status::Connecting });
+        tokio::spawn(zutalk_log::carry(
+            self.task(&id, &shelf).record(source, about, captions, watching),
+        ));
+        self.state.session = Some(Session { id: id.clone(), started, status: initial });
         self.recording = Some((id, mode));
         Ok(())
     }
@@ -705,17 +726,8 @@ impl Hub {
 
     /// The library and the open recording, read again after anything that may change them.
     fn refresh(&mut self) -> Result<(), &'static str> {
-        let from = |own| {
-            if own {
-                From::Own
-            } else if self.ours.is_some() {
-                From::Granted
-            } else {
-                From::Nowhere
-            }
-        };
         self.state.keys =
-            Service::ALL.iter().map(|s| (s.name().into(), from(self.keys.has_own(*s)))).collect();
+            Service::ALL.iter().map(|s| (s.name().into(), self.keys.from(*s))).collect();
         self.state.left = self.keys.left();
         let Some(shelf) = &self.shelf else {
             (self.state.library, self.state.open, self.state.hits) = Default::default();
@@ -738,21 +750,43 @@ impl Hub {
     /// earlier attempt left at the service has been deleted.
     fn recover(&mut self) {
         let (Some(shelf), tapes) = (&self.shelf, self.config.tapes()) else { return };
-        let owing = self.state.library.iter().filter(|row| row.draft && !self.busy(&row.id));
-        // Nothing is written again without its audio, nor for one moved from 0.8: it keeps the
-        // transcript it had there, or the lack of one, and its sound is not sent anywhere.
-        let owed = |id: &str| shelf.about(id).ok().flatten().is_some_and(|r| !r.about.moved);
-        let owing = owing.filter(|row| row.audio && owed(&row.id));
-        let owing: Vec<Task> = owing.map(|row| self.task(&row.id, shelf)).collect();
+        let key = self.has_key(Service::Soniox);
+        let (mut owing, mut skipped, mut why) = (Vec::new(), 0usize, "");
+        for row in &self.state.library {
+            if self.busy(&row.id) {
+                continue;
+            }
+            // Nothing is written again without its audio, nor for one moved from 0.8: it keeps the
+            // transcript it had there, or the lack of one, and its sound is not sent anywhere.
+            let moved = row.draft
+                && row.audio
+                && shelf.about(&row.id).ok().flatten().is_none_or(|r| r.about.moved);
+            match write::owed(row.draft, row.audio, moved, key) {
+                write::Owed::Yes => owing.push(self.task(&row.id, shelf)),
+                write::Owed::Waits(reason) => {
+                    skipped += 1;
+                    why = reason;
+                }
+                write::Owed::No => {}
+            }
+        }
+        if skipped > 0 {
+            info!("write.skipped", n = skipped, why = why);
+        }
+        if !key {
+            return;
+        }
         self.state.writing.extend(owing.iter().map(|task| writing(&task.id, "closing")));
         let (soniox, keys, tx) = (self.config.soniox.clone(), self.keys.clone(), self.tx.clone());
-        tokio::spawn(async move {
+        tokio::spawn(zutalk_log::carry(async move {
             if let End::Retry(code) | End::Fatal(code) = write::sweep(&tapes, &soniox, &*keys).await
             {
                 let _ = tx.send(Msg::Say(code)); // dropped: unbounded mailbox; fails only after the hub has stopped
             }
-            owing.into_iter().for_each(|task| drop(tokio::spawn(task.finish()))); // dropped: detached handle until P1-21 moves finishing onto the tree
-        });
+            for task in owing {
+                drop(tokio::spawn(zutalk_log::carry(task.finish()))); // dropped: detached handle until P1-21 moves finishing onto the tree
+            }
+        }));
     }
 }
 
@@ -831,9 +865,14 @@ impl Task {
         self.config.tapes().join(&self.id)
     }
 
-    async fn record(self, source: Source, about: About, mode: watch::Receiver<Mode>) {
-        let live = !matches!(source, Source::File(_));
-        if let Err(code) = self.listen(source, &about, live, mode).await {
+    async fn record(
+        self,
+        source: Source,
+        about: About,
+        captions: Result<Vec<Stream>, &'static str>,
+        mode: watch::Receiver<Mode>,
+    ) {
+        if let Err(code) = self.listen(source, &about, captions, mode).await {
             // Whatever ends the listening ends the recording; what was kept is kept.
             self.tell(Msg::Say(code));
             self.tell(Msg::Ended(self.id.clone()));
@@ -848,12 +887,15 @@ impl Task {
         &self,
         source: Source,
         about: &About,
-        live: bool,
+        captions: Result<Vec<Stream>, &'static str>,
         mut mode: watch::Receiver<Mode>,
     ) -> Result<(), &'static str> {
         let key = keys::derive("tape", &self.id).map_err(code)?;
         let mut tape = tape::Writer::create(&self.tape(), &key).map_err(|_| "tape")?;
-        let streams = if live { lane::plan(&about.shown) } else { Vec::new() };
+        let (streams, quiet) = match captions {
+            Ok(streams) => (streams, ""),
+            Err(why) => (Vec::new(), why),
+        };
         let ((audio, _), (lanes, mut heard)) = (broadcast::channel(64), mpsc::channel(64));
         let (endpoint, model, spoken) =
             (self.config.realtime.clone(), REALTIME.into(), about.spoken.clone());
@@ -889,8 +931,7 @@ impl Task {
             Some((self.config.hear)(source, Box::new(sink), Box::new(notice)).map_err(code)?);
         let (mut draft, mut n) = (self.shelf.open(&self.id, LINE).map_err(fail)?, 0);
         let (mut view, mut frame) = (View::new(&about.shown, streams), tick());
-        let (mut open, quiet) =
-            (!view.streams.is_empty(), if live { "captions.off" } else { "file" });
+        let mut open = !view.streams.is_empty();
         while capture.is_some() || open {
             tokio::select! {
                 changed = mode.changed(), if capture.is_some() => {
@@ -930,26 +971,35 @@ impl Task {
     /// transcript is written. A recording that kept no sound is nothing, and is removed.
     async fn finish(self) {
         match self.seal().await {
-            Ok(Some(0)) => drop(fs::remove_dir_all(self.tape())),
-            Ok(Some(_)) => self.write().await,
+            Ok(Some(about)) if about.length_ms == 0 => drop(fs::remove_dir_all(self.tape())),
+            Ok(Some(about)) => {
+                let audio = tape::kept(&self.tape());
+                let key = self.keys.from(Service::Soniox) != From::Nowhere;
+                match write::owed(about.take == 0, audio, about.moved, key) {
+                    write::Owed::Yes => self.write().await,
+                    write::Owed::Waits(why) => info!("write.skipped", n = 1usize, why = why),
+                    write::Owed::No => {}
+                }
+            }
             Ok(None) => {} // removed meanwhile: the tape stays for a restore
             Err(code) => self.tell(Msg::Say(code)),
         }
         self.tell(Msg::Wrote(self.id.clone()));
     }
 
-    async fn seal(&self) -> Result<Option<u32>, &'static str> {
+    async fn seal(&self) -> Result<Option<About>, &'static str> {
         let (dir, key) = (self.tape(), keys::derive("tape", &self.id).map_err(code)?);
         let length = tokio::task::spawn_blocking(move || tape::recover(&dir, &key)).await;
         let length_ms = length.map_err(|_| "tape")?.map_err(|_| "tape")?;
         let Some(recording) = self.shelf.about(&self.id).map_err(fail)? else { return Ok(None) };
+        let updated = About { length_ms, ..recording.about };
         if length_ms == 0 || recording.about.length_ms != length_ms {
-            let about = (length_ms > 0).then_some(About { length_ms, ..recording.about });
+            let about = (length_ms > 0).then_some(updated.clone());
             self.shelf
                 .put(&self.id, RECORDING, &[(self.id.clone(), about)], now())
                 .map_err(fail)?;
         }
-        Ok(Some(length_ms))
+        Ok(Some(updated))
     }
 
     async fn write(&self) {

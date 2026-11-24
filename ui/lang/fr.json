@@ -140,6 +140,7 @@
  "code.migrate.key": "Sa clé audio de ZuTalk 0.8 est introuvable",
  "code.migrate.audio": "Son audio de ZuTalk 0.8 ne s’ouvre pas",
  "code.captions.off": "Sans texte en direct",
+ "code.captions.no_key": "Aucune clé pour le texte en direct",
  "code.disk": "Écriture sur le disque impossible",
  "code.journal": "Le suivi de la transcription est endommagé",
  "code.id.code": "Impossible de créer le code de connexion",

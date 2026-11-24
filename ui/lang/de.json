@@ -140,6 +140,7 @@
  "code.migrate.key": "Ihr Audioschlüssel aus ZuTalk 0.8 fehlt",
  "code.migrate.audio": "Ihr Audio aus ZuTalk 0.8 lässt sich nicht öffnen",
  "code.captions.off": "Ohne Live-Text",
+ "code.captions.no_key": "Kein Schlüssel für Live-Text",
  "code.disk": "Schreiben auf die Festplatte fehlgeschlagen",
  "code.journal": "Das Fortschrittsprotokoll des Transkripts ist beschädigt",
  "code.id.code": "Anmeldecode konnte nicht erstellt werden",

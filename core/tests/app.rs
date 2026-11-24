@@ -1,4 +1,5 @@
 mod common;
+mod hub;
 
 use common::{Plc, Viewer, old_library, serve, serve_with};
 use futures_util::{SinkExt, StreamExt};
@@ -128,6 +129,7 @@ fn the_status_line_says_what_most_needs_saying() {
     let only = |why: &str| Status::AudioOnly { why: why.into() };
     assert_eq!(status(true, &[Connecting], "captions.off"), Status::Paused);
     assert_eq!(status(false, &[], "captions.off"), only("captions.off"));
+    assert_eq!(status(false, &[], "captions.no_key"), only("captions.no_key"));
     assert_eq!(status(false, &[Stopped("keys.none"), Stopped("done")], ""), only("keys.none"));
     assert_eq!(status(false, &[Live, Connecting], ""), Status::Connecting);
     assert_eq!(status(false, &[Behind, Live], ""), Status::Behind);
@@ -952,5 +954,276 @@ async fn the_core_runs_on_a_tree_with_a_name() {
     let tally = app.core.stats().tally();
     let started = tally.counts.iter().find(|row| row.name == "task.started").map(|row| row.n);
     assert_eq!(started, Some(2));
+    assert_eq!(seen.refused(), 0);
+}
+
+/// Waits for a `State` matching `holds`, failing if `"keys.none"` is ever noticed.
+async fn until_no_keys_none(app: &mut App, holds: impl Fn(&State) -> bool) -> State {
+    app.next(|event| match event {
+        Event::Notice(code) if code == "keys.none" => panic!("unexpected keys.none"),
+        Event::State(state) if holds(&state) => Some(*state),
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_key_sound_is_kept_and_the_status_says_why() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _store = STORE.lock().await;
+    store(false);
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+
+    // Local port that only counts connections: no live lane may connect without a key.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let realtime = format!("ws://{}", listener.local_addr().expect("an address"));
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    let accept_task = tokio::spawn(async move {
+        while let Ok((_stream, _)) = listener.accept().await {
+            counted.fetch_add(1, SeqCst);
+        }
+    });
+
+    // Whole-transcript stub expecting zero requests.
+    let soniox = MockServer::start().await;
+    Mock::given(any()).respond_with(ResponseTemplate::new(500)).expect(0).mount(&soniox).await;
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::with(Config {
+        realtime,
+        soniox: format!("{}/v1", soniox.uri()),
+        ..config(dir.path(), NOWHERE)
+    });
+    until_no_keys_none(&mut app, |s| s.me.is_none()).await;
+
+    let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+    app.send(Command::Setup { setup });
+    until_no_keys_none(&mut app, |s| s.setup.shown == ["en"]).await;
+
+    let no_key = |state: &State| {
+        state.session.as_ref().map(|session| &session.status)
+            == Some(&Status::AudioOnly { why: "captions.no_key".into() })
+    };
+    app.send(Command::Start);
+    until_no_keys_none(&mut app, no_key).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    app.send(Command::Pause);
+    until_no_keys_none(&mut app, |s| {
+        s.session.as_ref().is_some_and(|session| session.status == Status::Paused)
+    })
+    .await;
+    app.send(Command::Resume);
+    until_no_keys_none(&mut app, no_key).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    app.send(Command::Stop);
+
+    let state = until_no_keys_none(&mut app, |s| {
+        s.session.is_none()
+            && s.writing.is_empty()
+            && s.library.len() == 1
+            && s.library[0].length_ms > 0
+    })
+    .await;
+    let row = &state.library[0];
+    assert!(row.draft && row.audio && row.length_ms > 0, "{row:?}");
+    assert!(state.writing.is_empty());
+
+    // Drain any queued events and ensure `keys.none` was never noticed.
+    while let Ok(event) = app.events.try_recv() {
+        assert!(
+            !matches!(&event, Event::Notice(code) if code == "keys.none"),
+            "unexpected keys.none: {event:?}"
+        );
+    }
+
+    accept_task.abort();
+    assert_eq!(connections.load(SeqCst), 0, "no realtime lane may dial without a key");
+    soniox.verify().await;
+
+    let skipped = seen.of("write.skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].level, zutalk_log::Level::Info);
+    assert_eq!(skipped[0].u64("n"), Some(1));
+    assert_eq!(skipped[0].text("why"), Some("keys.none"));
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_their_own_key_captions_come_without_signing_in() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+
+    let server = MockServer::start().await;
+    Mock::given(any()).respond_with(ResponseTemplate::new(500)).expect(0).mount(&server).await;
+
+    let asked = hub::Asked::default();
+    let stt = hub::soniox(&asked).await;
+
+    let soniox_rt = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let realtime = format!("ws://{}", soniox_rt.local_addr().expect("an address"));
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::with(Config {
+        realtime,
+        soniox: format!("{}/v1", stt.uri()),
+        ..config(dir.path(), &server.uri())
+    });
+    let initial = app.until(|_| true).await;
+    assert!(initial.me.is_none());
+
+    let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+    app.send(Command::Setup { setup });
+    app.until(|s| s.setup.shown == ["en"]).await;
+
+    app.send(Command::Start);
+    let id = app.until(|s| s.session.is_some()).await.session.expect("session").id;
+
+    // Scripted realtime service verifies the own key and sends one line.
+    let (stream, _) = soniox_rt.accept().await.expect("a connection");
+    let mut ws = accept_async(stream).await.expect("a websocket");
+    let Some(Ok(Message::Text(cfg))) = ws.next().await else { panic!("no configuration") };
+    assert!(cfg.contains("sk-own-test-key"), "{cfg}");
+    let hello = json!({"text": "Hello", "start_ms": 120, "end_ms": 480, "is_final": true,
+                       "language": "en", "speaker": "1"});
+    let said =
+        json!({"tokens": [hello, {"text": "<end>", "is_final": true}], "total_audio_proc_ms": 500});
+    ws.send(Message::text(said.to_string())).await.expect("it is said");
+    tokio::spawn(async move {
+        while let Some(Ok(message)) = ws.next().await {
+            if matches!(&message, Message::Text(text) if text.is_empty()) {
+                _ = ws
+                    .send(Message::text(json!({"tokens": [], "finished": true}).to_string()))
+                    .await;
+            }
+        }
+    });
+
+    // Live captions show the word.
+    let columns = app
+        .next(|event| match event {
+            Event::Live(columns) if columns.iter().any(|c| !c.lines.is_empty()) => Some(columns),
+            _ => None,
+        })
+        .await;
+    assert_eq!(columns[0].lines[0].text, "Hello");
+
+    // Draft has the line before whole-transcript replaces it.
+    app.send(Command::Open { id: id.clone() });
+    app.until(|s| {
+        s.open.as_ref().is_some_and(|o| o.lines.iter().any(|(_, l)| l.line.text == "Hello"))
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+
+    // Whole transcript runs with the own key and turns the draft into a written record.
+    let state = app
+        .until(|s| {
+            s.session.is_none()
+                && s.writing.is_empty()
+                && s.library.iter().any(|r| r.id == id && !r.draft)
+        })
+        .await;
+    assert!(state.me.is_none());
+    assert_eq!(asked.lock().expect("one at a time").len(), 1);
+    let requests = stt.received_requests().await.expect("requests");
+    assert!(!requests.is_empty());
+    for req in &requests {
+        assert_eq!(
+            req.headers.get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer sk-own-test-key")
+        );
+    }
+
+    // All records live on the device's local identity shelf, including the draft take and take 1.
+    let expected_dir = hub::local_did().replace(':', "-");
+    assert_eq!(record_dirs(dir.path()), [expected_dir]);
+    let lines_pack = zu::Pack::read(
+        dir.path()
+            .join("records")
+            .join(hub::local_did().replace(':', "-"))
+            .join(&id)
+            .join("lines.jsonl"),
+    )
+    .expect("lines pack reads");
+    assert!(
+        lines_pack.records.iter().any(|r| r.path.key == format!("{id}.0.00000")),
+        "draft line must be kept in lines.jsonl"
+    );
+    let written = hub::local_shelf(dir.path()).read(&id).expect("reads").expect("exists");
+    assert_eq!(written.about.take, 1);
+    assert_eq!(written.lines[0].1.line.text, "Zuzalu is in Chiang Mai.");
+
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
+    use zutalk_core::live::lines::Line;
+    use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    keys::set("soniox", None).expect("key cleared");
+
+    let dir = tempfile::tempdir().expect("a folder");
+    let data = dir.path();
+    let now = wall_ms() as i64;
+    let shelf = hub::local_shelf(data);
+    for id in ["draft1", "draft2"] {
+        let line =
+            Line { language: "en".into(), text: format!("Said in {id}."), ..Line::default() };
+        let said = Said { line, via: [("text".to_string(), "stt-rt-v6".to_string())].into() };
+        shelf.put(id, LINE, &[(format!("{id}.0.00000"), Some(said))], now).expect("draft line");
+        let about =
+            About { started: now, length_ms: 1_000, spoken: vec!["en".into()], ..About::default() };
+        shelf.put(id, RECORDING, &[(id.to_string(), Some(about))], now).expect("draft record");
+        hub::tape(data, id, 1);
+    }
+
+    let asked = hub::Asked::default();
+    let stt = hub::soniox(&asked).await;
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let mut app =
+        App::with(Config { soniox: format!("{}/v1", stt.uri()), ..config(data, NOWHERE) });
+
+    let state = app.until(|s| s.library.len() == 2).await;
+    assert!(state.me.is_none());
+    assert!(state.writing.is_empty());
+    assert!(state.library.iter().all(|r| r.draft && r.audio));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(event) = app.events.try_recv() {
+        match event {
+            Event::Notice(code) => panic!("unexpected notice while waiting for key: {code}"),
+            Event::State(s) => assert!(s.writing.is_empty(), "unexpected writing: {:?}", s.writing),
+            Event::Live(_) => {}
+        }
+    }
+    assert!(stt.received_requests().await.expect("requests").is_empty());
+
+    let skipped = seen.of("write.skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].level, zutalk_log::Level::Info);
+    assert_eq!(skipped[0].u64("n"), Some(2));
+    assert_eq!(skipped[0].text("why"), Some("keys.none"));
+
+    // Setting an own Soniox key re-runs recover and writes both waiting drafts.
+    app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-own-test-key".into()) });
+    let state = app
+        .until(|s| {
+            s.writing.is_empty() && s.library.len() == 2 && s.library.iter().all(|r| !r.draft)
+        })
+        .await;
+    assert_eq!(state.library.len(), 2);
+    assert_eq!(asked.lock().expect("one at a time").len(), 2);
     assert_eq!(seen.refused(), 0);
 }

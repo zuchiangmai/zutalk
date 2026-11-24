@@ -33,6 +33,27 @@ pub struct Plan {
     pub openrouter: String, // `https://openrouter.ai/api/v1`
 }
 
+/// Whether a recording is owed its whole transcript now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owed {
+    Yes,
+    No,
+    /// It would be, but for the reason given.
+    Waits(&'static str),
+}
+
+/// Whether a recording is owed its whole transcript now: not a draft, without audio or moved
+/// from 0.8 -> No; no key to be had -> Waits("keys.none"); else Yes.
+pub fn owed(draft: bool, audio: bool, moved: bool, key: bool) -> Owed {
+    if !draft || !audio || moved {
+        Owed::No
+    } else if !key {
+        Owed::Waits("keys.none")
+    } else {
+        Owed::Yes
+    }
+}
+
 /// A translator, and how it is asked: with the least reasoning it allows, and only through
 /// providers that keep nothing and hold it to the schema. Tried in this order.
 pub struct Model {
@@ -583,11 +604,16 @@ pub async fn write(
 ) -> End {
     let attempt = async {
         let (dir, shelved) = (tape.0, |_| End::Retry("shelf"));
-        // Both keys first: without them nothing is uploaded, and nothing paid for twice.
+        // Both keys first when translation is expected: without them nothing is uploaded, and
+        // nothing paid for twice.
         let soniox = Port::open(keys, Service::Soniox, &plan.soniox).await?;
-        let translator = match plan.into.is_empty() {
-            false => Some(Port::open(keys, Service::OpenRouter, &plan.openrouter).await?),
-            true => None,
+        let expects_translation = !plan.into.is_empty()
+            && (plan.spoken.is_empty()
+                || plan.into.iter().any(|into| plan.spoken.iter().any(|spoken| spoken != into)));
+        let mut translator = if expects_translation {
+            Some(Port::open(keys, Service::OpenRouter, &plan.openrouter).await?)
+        } else {
+            None
         };
         let mut journal = Journal::load(dir)?;
         soniox.clear(dir, &mut journal).await?;
@@ -605,12 +631,17 @@ pub async fn write(
         let mut said: Vec<Said> = lines.map(|line| Said { line, via: via.clone() }).collect();
         let foreign = |said: &Said| plan.into.iter().any(|into| *into != said.line.language);
         let todo: Vec<usize> = (0..said.len()).filter(|&i| foreign(&said[i])).collect();
-        if let Some(port) = &translator {
-            for (n, batch) in todo.chunks(BATCH).enumerate() {
-                progress("translating", n * BATCH, todo.len());
-                // What did not pass is asked once more, alone; then it stays unclear.
-                for i in port.translate(plan, &mut said, batch).await? {
-                    port.translate(plan, &mut said, &[i]).await?;
+        if !todo.is_empty() {
+            if translator.is_none() {
+                translator = Some(Port::open(keys, Service::OpenRouter, &plan.openrouter).await?);
+            }
+            if let Some(port) = &translator {
+                for (n, batch) in todo.chunks(BATCH).enumerate() {
+                    progress("translating", n * BATCH, todo.len());
+                    // What did not pass is asked once more, alone; then it stays unclear.
+                    for i in port.translate(plan, &mut said, batch).await? {
+                        port.translate(plan, &mut said, &[i]).await?;
+                    }
                 }
             }
         }

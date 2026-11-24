@@ -140,6 +140,7 @@
  "code.migrate.key": "缺少它在 ZuTalk 0.8 里的音频钥匙",
  "code.migrate.audio": "它在 ZuTalk 0.8 里的音频打不开",
  "code.captions.off": "不出字",
+ "code.captions.no_key": "还没填出字的钥匙",
  "code.disk": "写不进磁盘",
  "code.journal": "文字稿的进度记录损坏了",
  "code.id.code": "生成不了登录码",

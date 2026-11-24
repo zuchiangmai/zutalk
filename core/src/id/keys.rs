@@ -9,6 +9,7 @@ use crate::rt::supervise::End;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use keyring_core::{Entry, Error};
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE};
+use serde::Serialize;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use std::io::{self, ErrorKind, Write};
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs, time::Duration};
+use ts_rs::TS;
 use zeroize::Zeroizing;
 use zu::{Cid, Codec, Record, SecretKey, Value, did, login};
 
@@ -458,6 +460,28 @@ impl Ours {
     }
 }
 
+/// Where a service's key comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+pub enum From {
+    #[default]
+    Nowhere,
+    Own,
+    Granted,
+}
+
+impl From {
+    /// Own key wins over a granted lease; with neither there is nowhere to get one.
+    pub fn of(own: bool, person: bool) -> From {
+        if own {
+            From::Own
+        } else if person {
+            From::Granted
+        } else {
+            From::Nowhere
+        }
+    }
+}
+
 /// The person's own key for a service if they set one, else the issuer's. A key the service
 /// refused is not handed out again until it is replaced.
 pub struct Chain {
@@ -480,6 +504,11 @@ impl Chain {
 
     pub fn has_own(&self, service: Service) -> bool {
         get(service.name()).is_ok_and(|key| key.is_some())
+    }
+
+    /// Where a key for `service` would come from right now.
+    pub fn from(&self, service: Service) -> From {
+        From::of(self.has_own(service), self.issuer.is_some())
     }
 
     pub fn left(&self) -> Option<u64> {

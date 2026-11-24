@@ -21,10 +21,9 @@ function coreCodes(root = new URL('../../core/src/', import.meta.url).pathname):
   return [...new Set([...found, ...verdicts, ...tables])].filter((c) => /^[a-z][a-z0-9_.]*$/.test(c)); // a sentence is not a code
 }
 // Read from core/src: the steps of writing a transcript, of filing it to a city and of moving the
-// 0.8 library in, why a recording has no text, the codes a key chain says without a literal, and
-// every status the core reports.
+// 0.8 library in, the codes a key chain says without a literal, and every status the core reports.
 const STEPS = ['closing', 'uploading', 'transcribing', 'translating', 'signing', 'filing', 'audio', 'moving'];
-const QUIET = ['captions.off', 'file', 'keys.none', 'keys.refused'];
+const QUIET = ['keys.none', 'keys.refused'];
 const STATUSES = ['Recording', 'Paused', 'AudioOnly', 'Connecting', 'Behind'];
 // The interface's own notices, and what the viewer says about a room it reads.
 const OWN = ['copied', 'remove', 'link', 'room.bad', 'room.gone', 'room.viewers'];

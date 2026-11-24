@@ -140,6 +140,7 @@
  "code.migrate.key": "ไม่พบกุญแจเสียงจาก ZuTalk 0.8",
  "code.migrate.audio": "เปิดเสียงจาก ZuTalk 0.8 ไม่ได้",
  "code.captions.off": "ไม่มีข้อความสด",
+ "code.captions.no_key": "ไม่มีคีย์สำหรับข้อความสด",
  "code.disk": "เขียนลงดิสก์ไม่ได้",
  "code.journal": "บันทึกความคืบหน้าของข้อความถอดเสียงเสียหาย",
  "code.id.code": "สร้างรหัสลงชื่อเข้าไม่ได้",

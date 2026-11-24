@@ -16,8 +16,8 @@ use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::id::keys::{Keys, Lease, Secret, Service};
 use zutalk_core::live::lane::{
-    Event, Frame, Health, Mode, Setup, Stream, config, failure, frame, hand_over, overlong, plan,
-    quiet, run,
+    Event, Frame, Health, Mode, Setup, Stream, captions, config, failure, frame, hand_over,
+    overlong, plan, quiet, run,
 };
 use zutalk_core::live::lines::{Line, Token};
 use zutalk_core::rt::supervise::End;
@@ -50,6 +50,30 @@ fn one_language_is_transcribed_two_are_translated_both_ways_each_further_one_one
         plan(&strings(&["en", "zh", "th", "ja"])),
         [two_way(), Stream::OneWay("th".into()), Stream::OneWay("ja".into())]
     );
+}
+
+#[test]
+fn a_recording_has_captions_or_one_reason_why_not() {
+    let en = strings(&["en"]);
+    let two = strings(&["en", "zh"]);
+    type Case<'a> = (bool, &'a [String], bool, Result<Vec<Stream>, &'static str>);
+    let table: [Case<'_>; 7] = [
+        // Row 1: from a file -> always "file", even with no shown language or no key.
+        (true, &en, true, Err("file")),
+        (true, &en, false, Err("file")),
+        (true, &[], false, Err("file")),
+        // Row 2: no caption languages chosen -> "captions.off", even without a key.
+        (false, &[], true, Err("captions.off")),
+        (false, &[], false, Err("captions.off")),
+        // Row 3: live with languages, but no key to be had -> "captions.no_key".
+        (false, &en, false, Err("captions.no_key")),
+        // Row 4: otherwise -> the planned streams.
+        (false, &two, true, Ok(plan(&two))),
+    ];
+    for (file, shown, key, expected) in table {
+        assert_eq!(captions(file, shown, key), expected, "file={file} shown={shown:?} key={key}");
+    }
+    assert_eq!(captions(false, &en, true), Ok(plan(&en)));
 }
 
 // ---- 2. the first message ----

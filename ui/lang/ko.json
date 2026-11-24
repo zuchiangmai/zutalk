@@ -140,6 +140,7 @@
  "code.migrate.key": "ZuTalk 0.8의 오디오 키가 없습니다",
  "code.migrate.audio": "ZuTalk 0.8의 오디오를 열 수 없습니다",
  "code.captions.off": "실시간 텍스트 없음",
+ "code.captions.no_key": "실시간 텍스트용 키가 없어요",
  "code.disk": "디스크에 쓸 수 없어요",
  "code.journal": "스크립트 진행 기록이 손상됐어요",
  "code.id.code": "로그인 코드를 만들 수 없어요",

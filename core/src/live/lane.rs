@@ -65,6 +65,23 @@ pub fn plan(shown: &[String]) -> Vec<Stream> {
     std::iter::once(both).chain(more.iter().cloned().map(Stream::OneWay)).collect()
 }
 
+/// The streams a recording opens for its captions, or the one reason it has none: the first
+/// row that holds. Known before the recording starts, so a recording without captions opens
+/// no connection and fails at nothing.
+pub fn captions(file: bool, shown: &[String], key: bool) -> Result<Vec<Stream>, &'static str> {
+    if file {
+        return Err("file");
+    }
+    let streams = plan(shown);
+    if streams.is_empty() {
+        return Err("captions.off");
+    }
+    if !key {
+        return Err("captions.no_key");
+    }
+    Ok(streams)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Recording,

@@ -7,8 +7,8 @@ use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
 use zutalk_core::ai::write::{
-    Answer, Draft, GUARDS, Journal, MODELS, Plan, answers, ends, judge, lines, numbers, request,
-    status, sweep, tokens, transcription, wav_header, write,
+    Answer, Draft, GUARDS, Journal, MODELS, Owed, Plan, answers, ends, judge, lines, numbers, owed,
+    request, status, sweep, tokens, transcription, wav_header, write,
 };
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::capture::tape::Writer;
@@ -71,6 +71,37 @@ fn plan(soniox: &str, openrouter: &str, into: &[&str]) -> Plan {
         model: "stt-async-v6".into(),
         soniox: format!("{soniox}/v1"),
         openrouter: format!("{openrouter}/api/v1"),
+    }
+}
+
+#[test]
+fn a_draft_is_owed_its_transcript_waits_for_a_key_or_is_owed_nothing() {
+    #[rustfmt::skip]
+    let table = [
+        // draft, audio, moved, key,   expected
+        (false, false, false, false, Owed::No),
+        (false, false, false, true,  Owed::No),
+        (false, false, true,  false, Owed::No),
+        (false, false, true,  true,  Owed::No),
+        (false, true,  false, false, Owed::No),
+        (false, true,  false, true,  Owed::No),
+        (false, true,  true,  false, Owed::No),
+        (false, true,  true,  true,  Owed::No),
+        (true,  false, false, false, Owed::No),
+        (true,  false, false, true,  Owed::No),
+        (true,  false, true,  false, Owed::No),
+        (true,  false, true,  true,  Owed::No),
+        (true,  true,  true,  false, Owed::No),
+        (true,  true,  true,  true,  Owed::No),
+        (true,  true,  false, false, Owed::Waits("keys.none")),
+        (true,  true,  false, true,  Owed::Yes),
+    ];
+    for (draft, audio, moved, key, expected) in table {
+        assert_eq!(
+            owed(draft, audio, moved, key),
+            expected,
+            "draft={draft} audio={audio} moved={moved} key={key}"
+        );
     }
 }
 
