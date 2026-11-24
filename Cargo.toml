@@ -8,6 +8,9 @@ edition = "2024"
 rust-version = "1.90"
 license = "GPL-3.0-or-later"
 
+[profile.dev.package."*"]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 strip = "debuginfo"

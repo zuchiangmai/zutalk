@@ -17,8 +17,8 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zutalk_core::ai::write::wav_header;
 use zutalk_core::app::hub::{Clip, Config, Core, Install, status};
 use zutalk_core::app::proto::{Change, Command, Event, Setup, State, Status};
-use zutalk_core::capture::audio::{Capture, Feed, Keep, Notice, Open, Source, offer};
-use zutalk_core::capture::clock::{Block, Gap, wall_ms};
+use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
+use zutalk_core::capture::clock::{Gap, wall_ms};
 use zutalk_core::id::keys;
 use zutalk_core::live::lane::Health;
 use zutalk_core::rt::supervise::End;
@@ -40,13 +40,10 @@ fn store(signed_in: bool) {
 }
 
 /// A microphone that hums, in real time, until it is closed. A file is read as it is.
-fn hum(
-    source: Source,
-    sink: Box<dyn FnMut(Block) + Send>,
-    notice: Box<dyn FnMut(Notice) + Send>,
-) -> Result<Capture, End> {
+fn hum(source: Source, sink: Sink, notice: Tell) -> Result<Box<dyn Hearing>, End> {
     if let Source::File(_) = source {
-        return Capture::start(source, |_| Gap::Keep, sink, notice);
+        let capture = Capture::start(source, |_| Gap::Keep, sink, notice)?;
+        return Ok(Box::new(capture));
     }
     let open: Open = Box::new(|_| {
         let (mut ring, feed) = Feed::new(16_000, 1)?;
@@ -58,7 +55,7 @@ fn hum(
         });
         Ok((feed, Box::new(|| None) as Keep))
     });
-    Ok(Capture::with(vec![open], |_| Gap::Keep, wall_ms, sink, notice))
+    Ok(Box::new(Capture::with(vec![open], |_| Gap::Keep, wall_ms, sink, notice)))
 }
 
 struct App {
@@ -114,7 +111,13 @@ impl App {
 /// With our server at `server`, nothing else in reach, and a microphone that hums.
 fn config(data: &Path, server: &str) -> Config {
     let (soniox, openrouter, directory) = (NOWHERE.into(), NOWHERE.into(), NOWHERE.into());
-    Config { soniox, openrouter, directory, hear: hum, ..Config::new(data.into(), server) }
+    Config {
+        soniox,
+        openrouter,
+        directory,
+        hear: Arc::new(hum),
+        ..Config::new(data.into(), server)
+    }
 }
 
 fn wav(path: &Path, ms: u32) {

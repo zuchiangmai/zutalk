@@ -6,14 +6,15 @@
 use crate::ai::write;
 use crate::app::proto::{Caption, Change, Column, Command, Event, From, Open, Room, Row, Session};
 use crate::app::proto::{Sound, State, Status, Writing};
-use crate::capture::audio::{self, Capture, Notice, Source};
+use crate::capture::audio::{self, Capture, Hear, Hearing, Notice, Source};
 use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
-use crate::capture::tape;
+use crate::capture::tape::{self, Reels};
 use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
 use crate::live::lane::{self, Health, Mode, Stream};
 use crate::live::lang::profile;
 use crate::live::lines::Line;
+use crate::live::wire::{self, Dial};
 use crate::out::city::{self, Calendar, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
@@ -38,10 +39,6 @@ const KEEP: usize = 12; // the finished lines a column keeps on screen
 /// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
 const SLOT_MS: u64 = 250;
 
-/// How sound is heard: the one port the tests replace.
-pub type Hear =
-    fn(Source, Box<dyn FnMut(Block) + Send>, Box<dyn FnMut(Notice) + Send>) -> Result<Capture, End>;
-
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
 pub struct Config {
@@ -59,8 +56,12 @@ pub struct Config {
     pub directory: String,
     /// Where the 0.8 app kept its data, if it ran here.
     pub old: Option<PathBuf>,
-    /// How sound is heard.
+    /// How sound is heard: real audio capture in production, fake microphone in tests.
     pub hear: Hear,
+    /// How a live caption lane connects to the realtime service.
+    pub dial: Dial,
+    /// How a recording's tape is opened for writing.
+    pub reels: Reels,
     /// Puts text on the clipboard.
     pub clip: Clip,
     /// Installs a newer version.
@@ -81,8 +82,11 @@ impl Config {
         let realtime = "wss://stt-rt.soniox.com/transcribe-websocket".into();
         let (soniox, openrouter) =
             ("https://api.soniox.com/v1".into(), "https://openrouter.ai/api/v1".into());
-        let hear: Hear =
-            |source, sink, notice| Capture::start(source, wall_clock_policy, sink, notice);
+        let hear: Hear = Arc::new(|source, sink, notice| {
+            let capture = Capture::start(source, wall_clock_policy, sink, notice)?;
+            Ok(Box::new(capture) as Box<dyn Hearing>)
+        });
+        let (dial, reels) = (wire::dial(), tape::reels());
         let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
         // Without a shell to give them, nothing can be put on the clipboard, nor installed.
         let (clip, install): (Clip, Install) = (Arc::new(|_| false), Arc::new(|| {}));
@@ -96,6 +100,8 @@ impl Config {
             directory,
             old,
             hear,
+            dial,
+            reels,
             clip,
             install,
             log,
@@ -891,7 +897,7 @@ impl Task {
         mut mode: watch::Receiver<Mode>,
     ) -> Result<(), &'static str> {
         let key = keys::derive("tape", &self.id).map_err(code)?;
-        let mut tape = tape::Writer::create(&self.tape(), &key).map_err(|_| "tape")?;
+        let mut tape = (self.config.reels)(&self.tape(), &key).map_err(|_| "tape")?;
         let (streams, quiet) = match captions {
             Ok(streams) => (streams, ""),
             Err(why) => (Vec::new(), why),
@@ -902,11 +908,16 @@ impl Task {
         let setup = lane::Setup { endpoint, model, spoken, ..lane::Setup::default() };
         for (n, stream) in streams.iter().cloned().enumerate() {
             let setup = glossary::live(&self.terms, &stream, setup.clone());
-            let (keys, lanes, audio, mode) =
-                (self.keys.clone(), lanes.clone(), audio.subscribe(), mode.clone());
-            tokio::spawn(
-                async move { lane::run(n, stream, &setup, keys, audio, mode, lanes).await },
+            let (keys, dial, lanes, audio, mode) = (
+                self.keys.clone(),
+                self.config.dial.clone(),
+                lanes.clone(),
+                audio.subscribe(),
+                mode.clone(),
             );
+            tokio::spawn(async move {
+                lane::run(n, stream, &setup, keys, dial, audio, mode, lanes).await
+            });
         }
         drop(lanes);
         let (tx, id, mut kept) = (self.tx.clone(), self.id.clone(), true);

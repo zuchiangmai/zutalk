@@ -11,6 +11,7 @@ use aes_gcm::aead::{Aead, KeyInit};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Bytes of one sealed block: the samples, plus the authentication tag.
 const SEALED: usize = BLOCK * 2 + 16;
@@ -81,6 +82,25 @@ impl Writer {
     pub fn sync(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
+}
+
+/// A tape being written. Dropped, it is on the disk.
+pub trait Reel: Send {
+    fn append(&mut self, block: &Block) -> io::Result<()>;
+}
+
+impl Reel for Writer {
+    fn append(&mut self, block: &Block) -> io::Result<()> {
+        Writer::append(self, block)
+    }
+}
+
+/// Opens a recording's tape for writing. Reading audio still goes only through `tape::Pass`.
+pub type Reels = Arc<dyn Fn(&Path, &[u8; 32]) -> io::Result<Box<dyn Reel>> + Send + Sync>;
+
+/// The real tape port: encrypted minute files on disk via [`Writer::create`].
+pub fn reels() -> Reels {
+    Arc::new(|dir, key| Ok(Box::new(Writer::create(dir, key)?) as Box<dyn Reel>))
 }
 
 /// A tape that is closed is on the disk.

@@ -6,18 +6,17 @@
 use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::id::keys::{Keys, Service};
 use crate::live::lines::{Assembler, Boundary, Line, Token};
+use crate::live::wire::{Dial, Wire};
 use crate::rt::supervise::{End, Part, supervise};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::{Error, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 const BLOCK_MS: u32 = (BLOCK as u64 * 1000 / RATE) as u32; // a block's length, worked out
 /// A dial or a write that takes longer than this is a dead connection. 0.8's, for both.
@@ -249,6 +248,7 @@ struct Lane<K> {
     kind: Stream,
     setup: Setup,
     keys: Arc<K>,
+    dial: Dial,
     out: mpsc::Sender<Event>,
     audio: Receiver<Arc<Block>>,
     mode: watch::Receiver<Mode>,
@@ -261,11 +261,13 @@ struct Lane<K> {
 
 /// Runs one stream until the recording stops or nothing can keep it going. Audio capture
 /// never waits on it: a lane that cannot keep up skips, and one that ends says so.
+#[allow(clippy::too_many_arguments)]
 pub async fn run<K: Keys>(
     stream: usize,
     kind: Stream,
     setup: &Setup,
     keys: Arc<K>,
+    dial: Dial,
     audio: Receiver<Arc<Block>>,
     mode: watch::Receiver<Mode>,
     out: mpsc::Sender<Event>,
@@ -273,7 +275,8 @@ pub async fn run<K: Keys>(
     let spoken: Vec<&str> = setup.spoken.iter().map(String::as_str).collect();
     let (lines, tail, mut stop) = (Assembler::new(&spoken), Vec::new(), mode.clone());
     let (setup, edge, why, paused) = (setup.clone(), 0, "start", *mode.borrow() == Mode::Paused);
-    let lane = Lane { stream, kind, setup, keys, out, audio, mode, lines, tail, edge, why, paused };
+    let lane =
+        Lane { stream, kind, setup, keys, dial, out, audio, mode, lines, tail, edge, why, paused };
     let lane = Arc::new(Mutex::new(lane));
     let stopped = async {
         let _ = stop.wait_for(|mode| *mode == Mode::Stopped).await; // dropped: sender dropped means the recording has already stopped
@@ -305,9 +308,13 @@ async fn open<K: Keys>(lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
     let lease = lane.keys.lease(Service::Soniox).await?;
     let dialed = Instant::now(); // before the socket opens: the service's count starts later
     let dial =
-        timeout(Duration::from_millis(PATIENCE_MS), connect_async(lane.setup.endpoint.as_str()))
+        timeout(Duration::from_millis(PATIENCE_MS), (lane.dial)(lane.setup.endpoint.as_str()))
             .await;
-    let Ok(Ok((ws, _))) = dial else { return Err(End::Retry("connect")) };
+    let ws = match dial {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(end)) => return Err(end),
+        Err(_) => return Err(End::Retry("connect")),
+    };
     let hello = config(lease.key.expose(), &lane.kind, &lane.setup).to_string();
     let (cap, feed) = (lease.session_cap, Feed::default());
     let mut conn = Conn { lane, ws, feed, dialed, cap, ending: None, wake: dialed };
@@ -347,7 +354,7 @@ impl<K: Keys> Lane<K> {
 
 struct Conn<K> {
     lane: OwnedMutexGuard<Lane<K>>,
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: Wire,
     feed: Feed,
     dialed: Instant,
     cap: Option<Duration>, // how long the key lets one connection last

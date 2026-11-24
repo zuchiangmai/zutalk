@@ -20,6 +20,7 @@ use zutalk_core::live::lane::{
     overlong, plan, quiet, run,
 };
 use zutalk_core::live::lines::{Line, Token};
+use zutalk_core::live::wire::dial;
 use zutalk_core::rt::supervise::End;
 
 fn strings(of: &[&str]) -> Vec<String> {
@@ -443,7 +444,9 @@ fn start(endpoint: &str, kind: Stream, keys: TestKeys) -> Lane {
     let lane_keys = keys.clone();
     // Spawned: the lane has to be `Send` to run beside the rest of the app.
     let task =
-        tokio::spawn(async move { run(0, kind, &setup, lane_keys, heard, mode_rx, out).await });
+        tokio::spawn(
+            async move { run(0, kind, &setup, lane_keys, dial(), heard, mode_rx, out).await },
+        );
     Lane { audio, mode, events, task, keys, t_ms: 0 }
 }
 
@@ -1072,7 +1075,7 @@ async fn real_soniox_hears_synthesized_speech_in_two_languages() {
     let (out, mut events) = mpsc::channel(64);
     let (setup, keys) = (Setup { terms: strings(&["ZuTalk"]), ..setup(&endpoint) }, OneKey(key));
     let lane = tokio::spawn(async move {
-        run(0, two_way(), &setup, Arc::new(keys), heard, mode_rx, out).await
+        run(0, two_way(), &setup, Arc::new(keys), dial(), heard, mode_rx, out).await
     });
     // Everything the lane says, with when it said it.
     let started = Instant::now();

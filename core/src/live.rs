@@ -4,3 +4,4 @@
 pub mod lane;
 pub mod lang;
 pub mod lines;
+pub mod wire;

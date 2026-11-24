@@ -480,6 +480,22 @@ impl Drop for Turner {
     }
 }
 
+/// A capture under way, as whoever started it holds it. Dropped, it stops.
+pub trait Hearing: Send {
+    fn pause(&self);
+    fn resume(&self);
+}
+
+/// Receives 100 ms blocks in order on the capture's clock.
+pub type Sink = Box<dyn FnMut(Block) + Send>;
+
+/// Receives lifecycle notices from a running capture.
+pub type Tell = Box<dyn FnMut(Notice) + Send>;
+
+/// How sound is heard: opens a capture for `Source`, delivering blocks to `Sink` and notices to
+/// `Tell`. Replaced by a fake microphone in tests.
+pub type Hear = Arc<dyn Fn(Source, Sink, Tell) -> Result<Box<dyn Hearing>, End> + Send + Sync>;
+
 /// A running capture: the pump, or the file's reader. Dropped, it delivers what is whole and
 /// joins that one thread; the sources' threads let their devices go on their own.
 pub struct Capture {
@@ -567,6 +583,16 @@ impl Capture {
 
     /// Delivers what is whole and joins the one thread. Nothing here waits for a device.
     pub fn stop(self) {}
+}
+
+impl Hearing for Capture {
+    fn pause(&self) {
+        Capture::pause(self);
+    }
+
+    fn resume(&self) {
+        Capture::resume(self);
+    }
 }
 
 impl Drop for Capture {
