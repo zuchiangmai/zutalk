@@ -95,3 +95,4 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `lane.link` | info；到 `Behind`、`Stopped`（不是 `done`）时 warn | lane 的连接状态变了 | `lane` `from` `to`（`Connecting` / `Live` / `Behind` / `Stopped`） `why` |
 | `lane.gap` | warn | lane 说了一段空缺 | `lane` `t0_ms` `t1_ms` `why` |
 | `frame.fit` | info | 一帧为了放得下而让掉的东西变了 | `from` `to`（`Whole` / `Lines` / `Units` / `Tail`） `bytes` |
+| `notice.said` | info | 一个代码被说给人听 | `code` |

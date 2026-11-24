@@ -4,6 +4,7 @@
 //! Acquiring a handle takes a lock once when a part starts; recording on the handle is atomic,
 //! lock-free and allocation-free so it is safe even in an audio callback.
 
+use crate::rt::signal::Register;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -11,6 +12,9 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 use ts_rs::TS;
 use zutalk_log::{info, warn};
+
+/// How often `publish` updates `Outlet.stats` when any row moved: at most 1 Hz (PLAN.md §4.5.2).
+pub const STATS_SIGNAL_EVERY_MS: u64 = 1_000;
 
 /// How often `publish` writes the rows that moved to the log: once a minute (PLAN.md §4.5.2).
 pub const STATS_SUMMARY_EVERY_MS: u64 = 60_000;
@@ -367,6 +371,7 @@ pub fn quantile(buckets: &[u64; SPREAD_EDGES.len() + 1], most: u64, pct: u8) -> 
 
 /// A point-in-time snapshot of one core's stats. Bounded in size so it travels as a signal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct Tally {
     pub counts: Vec<Count>,
     pub peaks: Vec<PeakRow>,
@@ -495,9 +500,10 @@ pub fn write(tally: &Tally, snap: u64) {
     }
 }
 
-/// Writes what moved in `stats` to the log once every `STATS_SUMMARY_EVERY_MS` and copies
-/// process log loss/refusal counts into `log.lost` and `log.refused`.
-pub async fn publish(stats: Stats) {
+/// Publishes `Tally` into `out` at most once every `STATS_SIGNAL_EVERY_MS` when any row moved,
+/// writes what moved to the log once every `STATS_SUMMARY_EVERY_MS`, and copies process log
+/// loss/refusal counts into `log.lost` and `log.refused`.
+pub async fn publish(stats: Stats, out: Register<Tally>) {
     let started = Instant::now();
     let log_lost = stats.counter("log.lost");
     let log_refused = stats.counter("log.refused");
@@ -512,10 +518,11 @@ pub async fn publish(stats: Stats) {
         ],
         ..Tally::default()
     };
+    let mut next_summary_ms = STATS_SUMMARY_EVERY_MS;
 
-    let mut tick = interval(Duration::from_millis(STATS_SUMMARY_EVERY_MS));
+    let mut tick = interval(Duration::from_millis(STATS_SIGNAL_EVERY_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    tick.tick().await; // skip the immediate first tick; the first summary is at one minute
+    tick.tick().await; // skip the immediate first tick; the first signal check is at one second
 
     loop {
         tick.tick().await;
@@ -527,10 +534,17 @@ pub async fn publish(stats: Stats) {
         prev_refused = now_refused;
 
         let now = stats.tally();
-        let diff = moved(&before, &now);
+        out.change(|current| (*current != now).then(|| now.clone()));
+
         let up_ms = started.elapsed().as_millis() as u64;
-        info!("stats.summary", snap = 0u64, up_ms = up_ms, rows = diff.len());
-        write(&diff, 0);
-        before = now;
+        if up_ms >= next_summary_ms {
+            let diff = moved(&before, &now);
+            info!("stats.summary", snap = 0u64, up_ms = up_ms, rows = diff.len());
+            write(&diff, 0);
+            before = now;
+            while next_summary_ms <= up_ms {
+                next_summary_ms += STATS_SUMMARY_EVERY_MS;
+            }
+        }
     }
 }

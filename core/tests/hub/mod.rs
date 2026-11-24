@@ -7,14 +7,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time::timeout;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
 use zutalk_core::ai::write::wav_header;
-use zutalk_core::app::hub::{Config, Core};
-use zutalk_core::app::proto::{Command, Event, State};
+use zutalk_core::app::hub::{Config, Core, Outlet};
+use zutalk_core::app::proto::{Command, Frame, State};
 use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
 use zutalk_core::capture::clock::{BLOCK, Block, Gap, wall_ms};
 use zutalk_core::capture::tape;
@@ -30,11 +29,18 @@ pub const NOWHERE: &str = "https://127.0.0.1:9";
 /// The key store is the process's: one test at a time has it.
 pub static STORE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// A mock key store, optionally with `ME` signed in and no service keys pre-installed.
+pub fn store(signed_in: bool) {
+    keyring_core::set_default_store(keyring_core::mock::Store::new().expect("a mock store"));
+    if signed_in {
+        let kept = [&[5; 32][..], ME.as_bytes()].concat();
+        keys::set("identity", Some(&kept)).expect("the identity is kept");
+    }
+}
+
 /// A key store with someone signed in, and their own Soniox key.
 pub fn signed_in() {
-    keyring_core::set_default_store(keyring_core::mock::Store::new().expect("a mock store"));
-    let kept = [&[5; 32][..], ME.as_bytes()].concat();
-    keys::set("identity", Some(&kept)).expect("the identity is kept");
+    store(true);
     keys::set("soniox", Some(b"sk-own-test-key")).expect("the key is kept");
 }
 
@@ -101,6 +107,11 @@ fn hum(source: Source, sink: Sink, notice: Tell) -> Result<Box<dyn Hearing>, End
 
 /// With nothing in reach, and a microphone that hums.
 pub fn config(data: &Path) -> Config {
+    config_on(data, NOWHERE)
+}
+
+/// With our server at `server`, nothing else in reach, and a microphone that hums.
+pub fn config_on(data: &Path, server: &str) -> Config {
     let (soniox, openrouter, directory) = (NOWHERE.into(), NOWHERE.into(), NOWHERE.into());
     let realtime = "ws://127.0.0.1:9".into();
     Config {
@@ -109,48 +120,92 @@ pub fn config(data: &Path) -> Config {
         directory,
         realtime,
         hear: Arc::new(hum),
-        ..Config::new(data.into(), NOWHERE)
+        ..Config::new(data.into(), server)
     }
 }
 
 pub struct App {
-    core: Core,
-    events: UnboundedReceiver<Event>,
+    pub core: Core,
+    pub outlet: Outlet,
+    pub seen: zutalk_log::Seen,
+    said_at: u64,
 }
 
 impl App {
+    pub fn start(data: &Path) -> App {
+        App::with(config(data))
+    }
+
+    /// With our server at `server`, and the realtime service at `realtime`.
+    pub fn on(data: &Path, server: &str, realtime: &str) -> App {
+        App::with(Config { realtime: realtime.into(), ..config_on(data, server) })
+    }
+
     pub fn with(config: Config) -> App {
-        let (tx, events) = unbounded_channel();
-        let core = Core::start(config, move |event| drop(tx.send(event))).expect("the core starts");
-        App { core, events }
+        App::with_log(config, zutalk_log::Level::Info)
+    }
+
+    pub fn with_log(config: Config, level: zutalk_log::Level) -> App {
+        let seen = zutalk_log::capture(level);
+        let (core, outlet) = Core::start(config).expect("the core starts");
+        App { core, outlet, seen, said_at: 0 }
     }
 
     pub fn send(&self, command: Command) {
         self.core.send(command);
     }
 
-    /// Waits for an event that `wanted` takes.
-    pub async fn next<T>(&mut self, mut wanted: impl FnMut(Event) -> Option<T>) -> T {
+    pub async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {
         let wait = async {
-            loop {
-                if let Some(found) = wanted(self.events.recv().await.expect("the core runs")) {
-                    return found;
+            let (seq, state) = self.outlet.state.now();
+            if seq > 0 && holds(&state) {
+                return (*state).clone();
+            }
+            while let Some((_, state)) = self.outlet.state.next().await {
+                if holds(&state) {
+                    return (*state).clone();
                 }
             }
+            panic!("the core stopped");
         };
         timeout(Duration::from_secs(20), wait).await.expect("it came in time")
     }
 
-    pub async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {
-        self.next(|event| match event {
-            Event::State(state) if holds(&state) => Some(*state),
-            _ => None,
-        })
-        .await
+    pub async fn frame(&mut self, holds: impl Fn(&Frame) -> bool) -> Frame {
+        let wait = async {
+            let (seq, frame) = self.outlet.frame.now();
+            if seq > 0 && holds(&frame) {
+                return (*frame).clone();
+            }
+            while let Some((_, frame)) = self.outlet.frame.next().await {
+                if holds(&frame) {
+                    return (*frame).clone();
+                }
+            }
+            panic!("the core stopped");
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("it came in time")
     }
 
     pub async fn notice(&mut self, code: &str) {
-        self.next(|event| matches!(event, Event::Notice(said) if said == code).then_some(())).await
+        let wait = async {
+            loop {
+                let (_, notices) = self.outlet.said.now();
+                let first = notices.next.saturating_sub(notices.codes.len() as u64);
+                if self.said_at < first {
+                    self.said_at = first;
+                }
+                while self.said_at < notices.next {
+                    let idx = (self.said_at - first) as usize;
+                    self.said_at += 1;
+                    if notices.codes[idx] == code {
+                        return;
+                    }
+                }
+                self.outlet.said.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("it came in time")
     }
 }
 

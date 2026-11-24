@@ -2,6 +2,7 @@
 
 use std::thread;
 use std::time::Duration;
+use zutalk_core::rt::signal::Register;
 use zutalk_core::rt::stats::{
     Count, PeakRow, QueueRow, SPREAD_EDGES, STATS_MOST_COUNTS, STATS_MOST_PEAKS, STATS_MOST_QUEUES,
     STATS_MOST_SPREADS, STATS_NAME_MOST_BYTES, STATS_SUMMARY_EVERY_MS, SpreadRow, Stats, Tally,
@@ -238,8 +239,9 @@ fn two_stats_do_not_see_each_other() {
 async fn once_a_minute_what_moved_is_written() {
     let seen = capture(Level::Debug);
     let stats = Stats::new();
+    let out = Register::new(Tally::default());
     let runner = Tree::root("test", Stats::new());
-    runner.spawn("stats", publish(stats.clone()));
+    runner.spawn("stats", publish(stats.clone(), out.clone()));
     tokio::task::yield_now().await;
 
     stats.counter("frame.made").add(7);

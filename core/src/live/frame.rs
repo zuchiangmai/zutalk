@@ -63,7 +63,7 @@ pub struct Column {
 }
 
 /// One bounded snapshot of live captions up to `t_audio` ms on the capture clock.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct Frame {
     pub t_audio: u32,

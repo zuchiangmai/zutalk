@@ -9,9 +9,10 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, RunEvent, State, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
-use zutalk_core::app::hub::{Clip, Config, Core, Install};
+use zutalk_core::app::hub::{Clip, Config, Core, Install, Outlet};
 use zutalk_core::app::proto::{Command, Event};
 use zutalk_core::id::keys;
+use zutalk_core::rt::supervise::Tree;
 use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
 
 /// The windows listening, and the last state: a window that opens late is sent it first.
@@ -45,6 +46,56 @@ fn fan(app: &AppHandle, windows: &Windows, event: Event) {
         windows.1 = Some(event.clone());
     }
     windows.0.retain(|channel| channel.send(event.clone()).is_ok());
+}
+
+/// Reads the core's registers and forwards changes to open windows until P1-23 replaces `fan`.
+async fn forward(app: AppHandle, windows: Windows, mut outlet: Outlet) {
+    let (mut state_seq, initial_state) = outlet.state.now();
+    if state_seq > 0 {
+        fan(&app, &windows, Event::State(Box::new((*initial_state).clone())));
+    }
+    let (mut frame_seq, initial_frame) = outlet.frame.now();
+    if frame_seq > 0 {
+        fan(&app, &windows, Event::Live(initial_frame.columns.clone()));
+    }
+    let (_, initial_said) = outlet.said.now();
+    let mut said_at = initial_said.next;
+    for code in &initial_said.codes {
+        fan(&app, &windows, Event::Notice(code.clone()));
+    }
+    loop {
+        tokio::select! {
+            next = outlet.state.next() => match next {
+                Some((seq, state)) => {
+                    if seq > state_seq {
+                        state_seq = seq;
+                        fan(&app, &windows, Event::State(Box::new((*state).clone())));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.frame.next() => match next {
+                Some((seq, frame)) => {
+                    if seq > frame_seq {
+                        frame_seq = seq;
+                        fan(&app, &windows, Event::Live(frame.columns.clone()));
+                    }
+                }
+                None => break,
+            },
+            next = outlet.said.next() => match next {
+                Some((_, notices)) => {
+                    let first = notices.next.saturating_sub(notices.codes.len() as u64);
+                    let start = said_at.max(first);
+                    for code in &notices.codes[(start - first) as usize..] {
+                        fan(&app, &windows, Event::Notice(code.clone()));
+                    }
+                    said_at = notices.next;
+                }
+                None => break,
+            },
+        }
+    }
 }
 
 /// Looks for a newer version at start-up and every `LOOK_MS` until one is downloaded, then tells
@@ -127,10 +178,16 @@ fn main() {
             let config = Config { old, clip, install, ..base };
             let (handle, windows) = (app.handle().clone(), Windows::default());
             let theirs = windows.clone();
-            let out = move |event| fan(&handle, &theirs, event);
-            // The core runs on the shell's runtime.
-            let core = tauri::async_runtime::block_on(async { Core::start(config, out) });
-            app.manage(core.map_err(|end| format!("{end:?}"))?);
+            // The core and the shell's forwarder run on the shell's runtime.
+            let started = tauri::async_runtime::block_on(async {
+                let (core, outlet) = Core::start(config)?;
+                let shell = Tree::root("shell", core.stats());
+                shell.spawn("shell.forward", forward(handle, theirs, outlet));
+                Ok::<_, zutalk_core::rt::supervise::End>((core, shell))
+            });
+            let (core, shell) = started.map_err(|end| format!("{end:?}"))?;
+            app.manage(core);
+            let _ = app.manage(shell); // dropped: `false` only if one was managed already
             app.manage(windows);
             // A build that is not a release has no installed app to put a version in place of.
             if !tauri::is_dev() {

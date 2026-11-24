@@ -87,6 +87,29 @@ pub struct Session {
     pub status: Status,
 }
 
+/// Peak and RMS amplitude of the latest 100 ms audio block, or zero while paused or idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct Level {
+    pub peak: u16,
+    pub rms: u16,
+}
+
+/// The codes said lately, oldest first, and the number the next one will have. At most
+/// [`Notices::KEEP_CODES`] are kept: a reader that falls further behind misses the oldest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct Notices {
+    #[ts(type = "number")]
+    pub next: u64,
+    pub codes: Vec<String>,
+}
+
+impl Notices {
+    /// Most notice codes retained at once: the interface shows no more at one time (`P1.md` §3.3).
+    pub const KEEP_CODES: usize = 16;
+}
+
 /// A recording in a list. A draft's text is still the live one.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct Row {

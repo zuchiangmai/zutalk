@@ -4,14 +4,17 @@
 //! to a room or to a city.
 
 use crate::ai::write;
-use crate::app::proto::{Change, Column, Command, Event, From, Open, Room, Row, Session};
-use crate::app::proto::{Sound, State, Status, Writing};
+pub use crate::app::proto::Notices;
+use crate::app::proto::{
+    Change, Command, From, Level as SoundLevel, Open, Room, Row, Session, Sound, State, Status,
+    Writing,
+};
 use crate::capture::audio::{self, Capture, Hear, Hearing, Notice, Source};
 use crate::capture::clock::{Block, wall_clock_policy, wall_ms};
 use crate::capture::tape::{self, Reels};
 use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
-use crate::live::frame::{Composer, Fit, status};
+use crate::live::frame::{Composer, Fit, Frame, status};
 use crate::live::lane::{self, Mode, Stream};
 use crate::live::lines::Line;
 use crate::live::wire::{self, Dial};
@@ -23,8 +26,10 @@ use crate::record::shelf::{
 };
 use crate::record::shelf::{Shelf, Words};
 use crate::record::{migrate, retain};
-use crate::rt::stats::{self, Stats};
+use crate::rt::signal::{Reading, Register};
+use crate::rt::stats::{self, Counter, Stats, Tally};
 use crate::rt::supervise::{End, Tree, again};
+use crate::rt::water::Water;
 use std::path::{Path, PathBuf};
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -127,7 +132,7 @@ impl Config {
 
 enum Msg {
     Do(Command),
-    Live(String, Vec<Column>),
+    Live(String, Frame),
     Status(String, Status),
     Ended(String),
     Writing(Writing),
@@ -144,7 +149,49 @@ enum Msg {
     Say(&'static str),
 }
 
-/// The core, running. Commands go in; events come out through the function it was given.
+/// Everything the core says outward: latest-value registers readable at once or on change,
+/// cloneable across the shell's pump, a live room's slot, and tests (`P1.md` §3.3).
+#[derive(Clone, Debug)]
+pub struct Outlet {
+    pub state: Reading<State>,
+    pub frame: Reading<Frame>,
+    pub session: Reading<Option<Session>>,
+    pub level: Reading<SoundLevel>,
+    pub water: Reading<Water>,
+    pub stats: Reading<Tally>,
+    pub said: Reading<Notices>,
+}
+
+/// Writer half for [`Notices`]: appends a code, trims past [`Notices::KEEP_CODES`], emits
+/// `notice.said`, and increments `notices.said`.
+#[derive(Clone)]
+pub(crate) struct Voice {
+    reg: Register<Notices>,
+    counted: Counter,
+}
+
+impl Voice {
+    fn new(stats: &Stats) -> (Self, Reading<Notices>) {
+        let reg = Register::new(Notices::default());
+        let reading = reg.read();
+        (Self { reg, counted: stats.counter("notices.said") }, reading)
+    }
+
+    pub(crate) fn say(&self, code: &'static str) {
+        self.reg.change(|notices| {
+            let mut codes = notices.codes.clone();
+            codes.push(code.into());
+            if codes.len() > Notices::KEEP_CODES {
+                codes.drain(..codes.len() - Notices::KEEP_CODES);
+            }
+            Some(Notices { next: notices.next + 1, codes })
+        });
+        self.counted.add(1);
+        info!("notice.said", code = code);
+    }
+}
+
+/// The core, running. Commands go in; latest values are read from [`Outlet`].
 pub struct Core {
     tx: mpsc::UnboundedSender<Msg>,
     stats: Stats,
@@ -152,21 +199,43 @@ pub struct Core {
 
 impl Core {
     /// Starts on the current runtime. The key store must be open (`keys::open_store`).
-    pub fn start(config: Config, out: impl Fn(Event) + Send + 'static) -> Result<Core, End> {
+    pub fn start(config: Config) -> Result<(Core, Outlet), End> {
         let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
         let http = reqwest::Client::builder().build().map_err(|_| End::Fatal("tls"))?;
         let (tx, mail) = mpsc::unbounded_channel();
         let stats = Stats::new();
         let root = Tree::root("core", stats.clone());
-        let (config, out, keys) = (Arc::new(config), Box::new(out), Arc::new(Chain::new(None)));
+        let (config, keys) = (Arc::new(config), Arc::new(Chain::new(None)));
+        let state_reg = Register::new(State::default());
+        let frame_reg = Register::new(Frame::default());
+        let session_reg = Register::new(None);
+        let level_reg = Register::new(SoundLevel::default());
+        let water_reg = Register::new(Water::default());
+        let stats_reg = Register::new(Tally::default());
+        let (said, said_reading) = Voice::new(&stats);
+        let outlet = Outlet {
+            state: state_reg.read(),
+            frame: frame_reg.read(),
+            session: session_reg.read(),
+            level: level_reg.read(),
+            water: water_reg.read(),
+            stats: stats_reg.read(),
+            said: said_reading,
+        };
+        let state_sent = stats.counter("state.sent");
         let (state, sent, ours, shelf, recording, opened, signing, slot, invite, moving) =
             Default::default();
-        let live = watch::Sender::new(Vec::new());
         let hub = Hub {
             config,
             tx: tx.clone(),
             tree: root.clone(),
-            out,
+            state_reg,
+            state_sent,
+            frame_reg,
+            _session_reg: session_reg,
+            _level_reg: level_reg,
+            _water_reg: water_reg,
+            said,
             http,
             who: Who::Nobody("starting"),
             keys,
@@ -178,13 +247,12 @@ impl Core {
             opened,
             signing,
             invite,
-            live,
             slot,
             moving,
         };
         root.spawn("hub", hub.run(mail));
-        root.spawn("stats", stats::publish(stats.clone()));
-        Ok(Core { tx, stats })
+        root.spawn("stats", stats::publish(stats.clone(), stats_reg));
+        Ok((Core { tx, stats }, outlet))
     }
 
     pub fn send(&self, command: Command) {
@@ -229,7 +297,13 @@ struct Hub {
     config: Arc<Config>,
     tx: Sender,
     tree: Tree,
-    out: Box<dyn Fn(Event) + Send>,
+    state_reg: Register<State>,
+    state_sent: Counter,
+    frame_reg: Register<Frame>,
+    _session_reg: Register<Option<Session>>,
+    _level_reg: Register<SoundLevel>,
+    _water_reg: Register<Water>,
+    said: Voice,
     http: reqwest::Client,
     who: Who,
     keys: Arc<Chain>,
@@ -241,7 +315,6 @@ struct Hub {
     opened: Option<String>,
     signing: Option<AbortHandle>, // a sign-in, an identity being made, or an invite carried
     invite: Option<Secret>,       // a 0.8 community invite not carried over yet
-    live: watch::Sender<Vec<Column>>, // the captions under way; none between recordings
     slot: Option<(String, AbortHandle)>, // the live room, and what keeps its slot
     moving: bool,                 // the 0.8 library is being moved in
 }
@@ -252,7 +325,7 @@ impl Hub {
         if let Ok(json) = fs::read(self.config.data.join("settings.json")) {
             match serde_json::from_slice(&json) {
                 Ok(setup) => self.state.setup = setup,
-                Err(_) => (self.out)(Event::Notice("settings".into())),
+                Err(_) => self.said.say("settings"),
             }
         }
         self.state.languages =
@@ -262,10 +335,10 @@ impl Hub {
         let kept = keys::kept();
         // An identity that does not read is said, not replaced by one made for an invite.
         if let Err(code) = self.carry(matches!(kept, Ok(None))) {
-            (self.out)(Event::Notice(code.into()));
+            self.said.say(code);
         }
         let kept = kept.unwrap_or_else(|end| {
-            (self.out)(Event::Notice(code(end).into()));
+            self.said.say(code(end));
             None
         });
         // Always read or make the device's own identity at boot so SignOut can return to it.
@@ -277,7 +350,7 @@ impl Hub {
         self.publish();
         while let Some(msg) = mail.recv().await {
             if let Err(code) = self.take(msg) {
-                (self.out)(Event::Notice(code.into()));
+                self.said.say(code);
             }
             self.publish();
         }
@@ -287,7 +360,8 @@ impl Hub {
     fn publish(&mut self) {
         if self.sent.as_ref() != Some(&self.state) {
             self.sent = Some(self.state.clone());
-            (self.out)(Event::State(Box::new(self.state.clone())));
+            self.state_reg.set(self.state.clone());
+            self.state_sent.add(1);
         }
     }
 
@@ -295,10 +369,7 @@ impl Hub {
         let reread = !matches!(msg, Msg::Live(..) | Msg::Status(..));
         match msg {
             Msg::Do(command) => self.command(command)?,
-            Msg::Live(id, columns) if self.under_way(&id) => {
-                self.live.send_replace(columns.clone());
-                (self.out)(Event::Live(columns));
-            }
+            Msg::Live(id, frame) if self.under_way(&id) => self.frame_reg.set(frame),
             Msg::Status(id, status) => {
                 let session = self.state.session.as_mut().filter(|s| s.id == id);
                 session.into_iter().for_each(|session| session.status = status.clone());
@@ -326,7 +397,7 @@ impl Hub {
             }
             Msg::Filed(id, said) => {
                 self.state.filing.retain(|w| w.id != id);
-                (self.out)(Event::Notice(said.into()));
+                self.said.say(said);
             }
             Msg::Claimed(done) => {
                 self.invite = None;
@@ -432,7 +503,7 @@ impl Hub {
                 if !(self.config.clip)(&key) {
                     return Err("clip");
                 }
-                (self.out)(Event::Notice("copied".into()));
+                self.said.say("copied");
             }
             Command::RotationSaved => {
                 keys::saved().map_err(code)?;
@@ -562,7 +633,7 @@ impl Hub {
     fn stop(&mut self) {
         if let Some((id, mode)) = self.recording.take() {
             mode.send_replace(Mode::Stopped);
-            self.live.send_replace(Vec::new());
+            self.frame_reg.set(Frame::default());
             self.state.session = None;
             self.state.writing.push(writing(&id, "closing"));
         }
@@ -574,7 +645,7 @@ impl Hub {
         let (from, to) = (self.who.code(), who.code());
         if let Who::Nobody(code) = &who {
             warn!("identity.who", from = from, to = to, why = why, made = made);
-            (self.out)(Event::Notice((*code).into()));
+            self.said.say(code);
         } else {
             info!("identity.who", from = from, to = to, why = why, made = made);
         }
@@ -604,7 +675,7 @@ impl Hub {
         }
         let swept = self.refresh().and_then(|()| self.retain());
         if let Err(code) = swept.and(self.rooms()).and(self.resume()) {
-            (self.out)(Event::Notice(code.into()));
+            self.said.say(code);
         }
         self.recover();
         self.migrate();
@@ -677,7 +748,7 @@ impl Hub {
             self.slot.take().into_iter().for_each(|(_, task)| task.abort());
             if let (Some(id), Some(ours)) = (live, self.ours.clone()) {
                 let task =
-                    tokio::spawn(slot(ours, id.clone(), self.live.subscribe(), self.tx.clone()));
+                    tokio::spawn(slot(ours, id.clone(), self.frame_reg.read(), self.tx.clone()));
                 self.slot = Some((id, task.abort_handle()));
             }
         }
@@ -808,22 +879,24 @@ fn open(recording: Recording, tapes: &Path) -> Open {
 
 /// Keeps a live room's slot showing what the captions show: the latest, at most every
 /// `SLOT_MS`, and nothing between recordings. Its trouble is said once, when it changes.
-async fn slot(ours: Ours, id: String, mut live: watch::Receiver<Vec<Column>>, tx: Sender) {
+async fn slot(ours: Ours, id: String, mut live: Reading<Frame>, tx: Sender) {
     let key = match keys::derive("room", &id) {
         Ok(key) => key,
         Err(end) => return drop(tx.send(Msg::Say(code(end)))), // dropped: unbounded mailbox; fails only after the hub has stopped
     };
     let mut said = None;
-    live.mark_changed(); // whatever the slot held before is replaced
-    while live.changed().await.is_ok() {
-        let columns = live.borrow_and_update().clone();
-        let frame = serde_json::to_vec(&columns).ok().filter(|_| !columns.is_empty());
-        let wrote = room::write(&ours, &id, &key, Write::Slot(frame.as_deref())).await.err();
+    let (_, mut current) = live.now();
+    loop {
+        let bytes =
+            serde_json::to_vec(&current.columns).ok().filter(|_| !current.columns.is_empty());
+        let wrote = room::write(&ours, &id, &key, Write::Slot(bytes.as_deref())).await.err();
         if wrote != said {
             wrote.into_iter().for_each(|end| drop(tx.send(Msg::Say(code(end))))); // dropped: unbounded mailbox; fails only after the hub has stopped
             said = wrote;
         }
         tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
+        let Some((_, next)) = live.next().await else { break };
+        current = next;
     }
 }
 
@@ -994,7 +1067,7 @@ impl Task {
                             );
                             last_fit = fit;
                         }
-                        self.tell(Msg::Live(self.id.clone(), frame.columns));
+                        self.tell(Msg::Live(self.id.clone(), frame));
                         let status = status(composer.paused(), composer.links(), quiet);
                         if told.replace(status.clone()) != Some(status.clone()) {
                             self.tell(Msg::Status(self.id.clone(), status));

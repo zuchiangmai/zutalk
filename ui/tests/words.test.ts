@@ -13,7 +13,7 @@ const holes = (s: string) => [...s.matchAll(/\{\d\}/g)].map((m) => m[0]).sort();
 function coreCodes(root = new URL('../../core/src/', import.meta.url).pathname): string[] {
   const files = readdirSync(root, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.rs'));
   const text = files.map((f) => readFileSync(join(root, f), 'utf8')).join('\n');
-  const said = /(?:End::(?:Fatal|Retry)|Notice::(?:Fatal|Restarted)|Msg::Say|Err|ok_or)\("([^"]+)"\)|map_err\(\|_\| "([^"]+)"\)/g;
+  const said = /(?:End::(?:Fatal|Retry)|Notice::(?:Fatal|Restarted)|Msg::Say|Err|ok_or|\.say)\("([^"]+)"\)|map_err\(\|_\| "([^"]+)"\)/g;
   const found = [...text.matchAll(said)].map((m) => m[1] ?? m[2]);
   const verdicts = [...text.matchAll(/Some\("([a-z]+\.[a-z0-9_.]+)"\)/g)].map((m) => m[1]);
   const tables = [...text.matchAll(/const (?:CODES|REFUSED|BUDGETS)[^=]*=([\s\S]*?\]);/g)]

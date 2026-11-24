@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tape::{CountingTape, GatedTape};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 use tokio::time::Instant;
-use zutalk_core::app::hub::{Config, Core};
-use zutalk_core::app::proto::{Column, Command, Event, Setup, State, Status};
+use zutalk_core::app::hub::{Config, Core, Outlet};
+use zutalk_core::app::proto::{Column, Command, Frame, Setup, State, Status};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::Shelf;
 use zutalk_core::rt::stats::{PeakRow, QueueRow, Tally};
@@ -33,8 +33,6 @@ use zutalk_log::{Level, Seen};
 
 /// Maximum JSON size of one live caption frame (`P1.md` §3.4).
 pub const MAX_FRAME_BYTES: usize = 8 * 1024;
-/// Bounded protocol event queue from `Core::start`'s callback to the probe; full panics.
-const EVENT_QUEUE_EVENTS: usize = 1024;
 /// Fixed per-frame JSON overhead used in the cheap byte-size upper bound.
 const FRAME_OVERHEAD_BYTES: usize = 64;
 /// Fixed per-column JSON overhead used in the cheap byte-size upper bound.
@@ -139,7 +137,8 @@ impl ProbeState {
         }
     }
 
-    fn take_live(&mut self, at: Instant, columns: &[Column]) {
+    fn take_live(&mut self, at: Instant, frame: &Frame) {
+        let columns = &frame.columns;
         self.frames += 1;
         if !columns.is_empty() {
             self.non_empty_column_frames += 1;
@@ -151,7 +150,7 @@ impl ProbeState {
         let bound = cheap_frame_bound(columns);
         if bound > self.max_bound_bytes {
             self.max_bound_bytes = bound;
-            let actual = serde_json::to_vec(columns).expect("serialize columns").len();
+            let actual = serde_json::to_vec(frame).expect("serialize frame").len();
             self.max_frame_bytes = self.max_frame_bytes.max(actual);
         }
 
@@ -238,7 +237,7 @@ fn scan_word_ids(text: &str, at: Instant, seen: &mut [Option<Instant>]) {
     }
 }
 
-/// One running simulation bench holding `Core`, fake ports, probe, and log capture.
+/// One running simulation bench holding `Core`, `Outlet`, fake ports, probe, and log capture.
 pub struct Bench {
     _tempdir: Option<tempfile::TempDir>,
     data: PathBuf,
@@ -249,6 +248,7 @@ pub struct Bench {
     pub counting_tape: CountingTape,
     pub gated_tape: GatedTape,
     core: Core,
+    outlet: Outlet,
     probe: Arc<Mutex<ProbeState>>,
     notify: Arc<Notify>,
     drain_task: tokio::task::JoinHandle<()>,
@@ -303,28 +303,72 @@ impl Bench {
         };
 
         let seen = opts.capture_log.then(|| zutalk_log::capture(Level::Info));
-
-        let (tx, mut rx) = mpsc::channel::<(Instant, Event)>(EVENT_QUEUE_EVENTS);
-        let core = Core::start(config, move |event| {
-            let at = Instant::now();
-            tx.try_send((at, event)).expect("bench event queue full");
-        })
-        .expect("core starts");
+        let (core, outlet) = Core::start(config).expect("core starts");
 
         let probe = Arc::new(Mutex::new(ProbeState::new(speech.words.len())));
         let notify = Arc::new(Notify::new());
         let drain_probe = probe.clone();
         let drain_notify = notify.clone();
+        let mut drain_outlet = outlet.clone();
         let drain_task = tokio::spawn(async move {
-            while let Some((at, event)) = rx.recv().await {
+            let (mut state_seq, initial_state) = drain_outlet.state.now();
+            let (mut frame_seq, initial_frame) = drain_outlet.frame.now();
+            let (_, initial_said) = drain_outlet.said.now();
+            let mut said_at = initial_said.next;
+            if state_seq > 0 || frame_seq > 0 || initial_said.next > 0 {
                 let mut state = drain_probe.lock().expect("probe lock");
-                match event {
-                    Event::Live(columns) => state.take_live(at, &columns),
-                    Event::State(s) => state.take_state(*s),
-                    Event::Notice(code) => state.take_notice(code),
+                if state_seq > 0 {
+                    state.take_state((*initial_state).clone());
+                }
+                if frame_seq > 0 {
+                    state.take_live(Instant::now(), &initial_frame);
+                }
+                for code in &initial_said.codes {
+                    state.take_notice(code.clone());
                 }
                 drop(state);
                 drain_notify.notify_waiters();
+            }
+            loop {
+                tokio::select! {
+                    next = drain_outlet.frame.next() => match next {
+                        Some((seq, frame)) => {
+                            if seq > frame_seq {
+                                frame_seq = seq;
+                                let at = Instant::now();
+                                drain_probe.lock().expect("probe lock").take_live(at, &frame);
+                                drain_notify.notify_waiters();
+                            }
+                        }
+                        None => break,
+                    },
+                    next = drain_outlet.state.next() => match next {
+                        Some((seq, s)) => {
+                            if seq > state_seq {
+                                state_seq = seq;
+                                drain_probe.lock().expect("probe lock").take_state((*s).clone());
+                                drain_notify.notify_waiters();
+                            }
+                        }
+                        None => break,
+                    },
+                    next = drain_outlet.said.next() => match next {
+                        Some((_, notices)) => {
+                            let first = notices.next.saturating_sub(notices.codes.len() as u64);
+                            let start = said_at.max(first);
+                            if notices.next > start {
+                                let mut state = drain_probe.lock().expect("probe lock");
+                                for code in &notices.codes[(start - first) as usize..] {
+                                    state.take_notice(code.clone());
+                                }
+                                drop(state);
+                                said_at = notices.next;
+                                drain_notify.notify_waiters();
+                            }
+                        }
+                        None => break,
+                    },
+                }
             }
         });
 
@@ -338,6 +382,7 @@ impl Bench {
             counting_tape,
             gated_tape,
             core,
+            outlet,
             probe,
             notify,
             drain_task,
@@ -349,6 +394,10 @@ impl Bench {
             .await
             .expect("initial core state arrives");
         bench
+    }
+
+    pub fn outlet(&self) -> &Outlet {
+        &self.outlet
     }
 
     pub fn data(&self) -> &Path {

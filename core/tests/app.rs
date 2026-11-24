@@ -3,127 +3,19 @@ mod hub;
 
 use common::{Plc, Viewer, old_library, serve, serve_with};
 use futures_util::{SinkExt, StreamExt};
+use hub::{App, ME, NOWHERE, STORE, config_on as config, store, wav};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use zutalk_core::ai::write::wav_header;
-use zutalk_core::app::hub::{Clip, Config, Core, Install};
-use zutalk_core::app::proto::{Change, Command, Event, Setup, State, Status};
-use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
-use zutalk_core::capture::clock::{Gap, wall_ms};
+use zutalk_core::app::hub::{Clip, Config, Install, Notices};
+use zutalk_core::app::proto::{Change, Command, Setup, State, Status};
+use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::id::keys;
-use zutalk_core::rt::supervise::End;
 use zutalk_server::Invites;
-
-const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
-/// Nothing listens here: every service is out of reach.
-const NOWHERE: &str = "https://127.0.0.1:9";
-
-/// The key store is the process's: one test at a time has it.
-static STORE: Mutex<()> = Mutex::const_new(());
-
-fn store(signed_in: bool) {
-    keyring_core::set_default_store(keyring_core::mock::Store::new().expect("a mock store"));
-    if signed_in {
-        let kept = [&[5; 32][..], ME.as_bytes()].concat();
-        keys::set("identity", Some(&kept)).expect("the identity is kept");
-    }
-}
-
-/// A microphone that hums, in real time, until it is closed. A file is read as it is.
-fn hum(source: Source, sink: Sink, notice: Tell) -> Result<Box<dyn Hearing>, End> {
-    if let Source::File(_) = source {
-        let capture = Capture::start(source, |_| Gap::Keep, sink, notice)?;
-        return Ok(Box::new(capture));
-    }
-    let open: Open = Box::new(|_| {
-        let (mut ring, feed) = Feed::new(16_000, 1)?;
-        thread::spawn(move || {
-            while !ring.is_abandoned() {
-                offer(&mut ring, (0..320).map(|i| (i as f32 * 0.17).sin() * 0.3));
-                thread::sleep(Duration::from_millis(20));
-            }
-        });
-        Ok((feed, Box::new(|| None) as Keep))
-    });
-    Ok(Box::new(Capture::with(vec![open], |_| Gap::Keep, wall_ms, sink, notice)))
-}
-
-struct App {
-    core: Core,
-    events: UnboundedReceiver<Event>,
-}
-
-impl App {
-    fn start(data: &Path) -> App {
-        App::on(data, NOWHERE, "ws://127.0.0.1:9")
-    }
-
-    /// With our server at `server`, and the realtime service at `realtime`.
-    fn on(data: &Path, server: &str, realtime: &str) -> App {
-        App::with(Config { realtime: realtime.into(), ..config(data, server) })
-    }
-
-    fn with(config: Config) -> App {
-        let (tx, events) = unbounded_channel();
-        let core = Core::start(config, move |event| drop(tx.send(event))).expect("the core starts");
-        App { core, events }
-    }
-
-    fn send(&self, command: Command) {
-        self.core.send(command);
-    }
-
-    /// Waits for an event that `wanted` takes.
-    async fn next<T>(&mut self, mut wanted: impl FnMut(Event) -> Option<T>) -> T {
-        let wait = async {
-            loop {
-                if let Some(found) = wanted(self.events.recv().await.expect("the core runs")) {
-                    return found;
-                }
-            }
-        };
-        timeout(Duration::from_secs(20), wait).await.expect("it came in time")
-    }
-
-    async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {
-        self.next(|event| match event {
-            Event::State(state) if holds(&state) => Some(*state),
-            _ => None,
-        })
-        .await
-    }
-
-    async fn notice(&mut self, code: &str) {
-        self.next(|event| matches!(event, Event::Notice(said) if said == code).then_some(())).await
-    }
-}
-
-/// With our server at `server`, nothing else in reach, and a microphone that hums.
-fn config(data: &Path, server: &str) -> Config {
-    let (soniox, openrouter, directory) = (NOWHERE.into(), NOWHERE.into(), NOWHERE.into());
-    Config {
-        soniox,
-        openrouter,
-        directory,
-        hear: Arc::new(hum),
-        ..Config::new(data.into(), server)
-    }
-}
-
-fn wav(path: &Path, ms: u32) {
-    let samples = ms * 16;
-    let pcm = (0..samples).flat_map(|i| (((i as f32 * 0.05).sin() * 8_000.0) as i16).to_le_bytes());
-    fs::write(path, [wav_header(samples), pcm.collect()].concat()).expect("the file is written");
-}
 
 /// Names of identity directories under `data/records`, sorted.
 fn record_dirs(data: &Path) -> Vec<String> {
@@ -156,14 +48,15 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// Waits for a `State` matching `holds`, failing if `"sign_in.first"` is noticed along the way.
+/// Waits for a `State` matching `holds`, failing if `"sign_in.first"` was ever said.
 async fn until_no_sign_in_first(app: &mut App, holds: impl Fn(&State) -> bool) -> State {
-    app.next(|event| match event {
-        Event::Notice(code) if code == "sign_in.first" => panic!("unexpected sign_in.first"),
-        Event::State(state) if holds(&state) => Some(*state),
-        _ => None,
-    })
-    .await
+    let state = app.until(holds).await;
+    assert!(
+        !app.outlet.said.now().1.codes.iter().any(|c| c == "sign_in.first")
+            && !app.seen.of("notice.said").iter().any(|l| l.text("code") == Some("sign_in.first")),
+        "unexpected sign_in.first"
+    );
+    state
 }
 
 #[test]
@@ -211,10 +104,113 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn whoever_reads_late_gets_what_is_there_now() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    let first = app.until(|_| true).await;
+    assert!(first.me.is_none());
+    assert_eq!(first.languages.len(), 8);
+
+    let late = app.outlet.clone();
+    let (seq, now) = late.state.now();
+    assert!(seq >= 1, "expected published state seq >= 1, got {seq}");
+    assert_eq!(*now, first);
+
+    let state_sent = app
+        .core
+        .stats()
+        .tally()
+        .counts
+        .into_iter()
+        .find(|row| row.name == "state.sent")
+        .map(|row| row.n);
+    assert_eq!(state_sent, Some(seq));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn more_codes_than_are_kept_lose_the_oldest() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    for _ in 0..20 {
+        app.send(Command::Pause);
+    }
+    // Fence via the same FIFO mailbox without reading `said` beforehand.
+    app.send(Command::Captions { show: true });
+    app.until(|s| s.captions).await;
+
+    let (_, said) = app.outlet.said.now();
+    assert_eq!(said.next, 20);
+    assert_eq!(said.codes.len(), Notices::KEEP_CODES);
+    assert!(said.codes.iter().all(|c| c == "recording.none"), "{:?}", said.codes);
+
+    let events = app.seen.of("notice.said");
+    assert_eq!(events.len(), 20);
+    assert!(
+        events.iter().all(
+            |l| l.level == zutalk_log::Level::Info && l.text("code") == Some("recording.none")
+        ),
+        "{events:?}"
+    );
+
+    let counted = app
+        .core
+        .stats()
+        .tally()
+        .counts
+        .into_iter()
+        .find(|row| row.name == "notices.said")
+        .map(|row| row.n);
+    assert_eq!(counted, Some(20));
+
+    // One more distinct code pushes out the oldest and keeps the newest at the tail.
+    app.send(Command::CopyRotation);
+    app.send(Command::Captions { show: false });
+    app.until(|s| !s.captions).await;
+    let (_, after) = app.outlet.said.now();
+    assert_eq!(after.next, 21);
+    assert_eq!(after.codes.len(), Notices::KEEP_CODES);
+    assert_eq!(after.codes[..15], vec!["recording.none".to_string(); 15]);
+    assert_eq!(after.codes[15], "rotation.none");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_tally_comes_once_a_second_while_something_moves() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    let (seq_start, _) = app.outlet.stats.now();
+    for _ in 0..5 {
+        app.send(Command::Pause);
+        app.notice("recording.none").await;
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+    }
+    // Settle past the 5th-second boundary so its tick has run before we snapshot.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let (seq_active, tally) = app.outlet.stats.now();
+    let delta = seq_active - seq_start;
+    assert!((4..=6).contains(&delta), "expected stats seq delta in 4..=6, got {delta}");
+    let notices_said = tally.counts.iter().find(|r| r.name == "notices.said").map(|r| r.n);
+    assert_eq!(notices_said, Some(5));
+
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    let (seq_idle, _) = app.outlet.stats.now();
+    assert_eq!(seq_idle, seq_active, "stats seq must not advance while nothing moves");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_recording_needs_nobody_signed_in() {
     let _store = STORE.lock().await;
     store(false);
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
     let state = until_no_sign_in_first(&mut app, |_| true).await;
@@ -272,7 +268,7 @@ async fn a_recording_needs_nobody_signed_in() {
     assert!(exported.starts_with("# Local note"), "{exported}");
 
     // Observable: one `identity.who` event, and no `did:key` anywhere in the captured log.
-    let who = seen.of("identity.who");
+    let who = app.seen.of("identity.who");
     assert_eq!(who.len(), 1, "{who:?}");
     assert_eq!(who[0].level, zutalk_log::Level::Info);
     assert_eq!(who[0].text("from"), Some("nobody"));
@@ -280,7 +276,7 @@ async fn a_recording_needs_nobody_signed_in() {
     assert_eq!(who[0].text("why"), Some("boot"));
     assert_eq!(who[0].bool("made"), Some(true));
     let multikey = local_did.strip_prefix("did:key:").expect("did:key prefix");
-    for line in seen.all() {
+    for line in app.seen.all() {
         for (_, value) in &line.fields {
             if let zutalk_log::Value::Text(text) = value {
                 assert!(
@@ -292,18 +288,23 @@ async fn a_recording_needs_nobody_signed_in() {
             }
         }
     }
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sign_in_shows_its_code_and_says_when_the_relay_is_out_of_reach() {
     let _store = STORE.lock().await;
     store(false);
+    let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let server = format!("https://{}", relay.local_addr().expect("an address"));
     let dir = tempfile::tempdir().expect("a folder");
-    let mut app = App::start(dir.path());
+    let mut app = App::with(config(dir.path(), &server));
     app.until(|_| true).await;
     app.send(Command::SignIn);
-    app.until(|state| state.login.is_some()).await;
+    let (stream, _) = relay.accept().await.expect("a connection");
+    let code = app.until(|state| state.login.is_some()).await.login.expect("a code");
+    assert!(code.starts_with(&format!("{server}/.well-known/zu-relay/")));
+    drop((stream, relay));
     app.notice("offline").await;
     app.until(|state| state.login.is_none()).await;
 }
@@ -329,19 +330,18 @@ async fn the_same_device_is_the_same_identity_the_next_time() {
         .clone();
     drop(app);
 
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
     let mut again = App::start(dir.path());
     let state = again.until(|s| s.library.len() == 1).await;
     assert_eq!(state.library[0].id, id);
     assert_eq!(record_dirs(dir.path()).len(), 1);
 
-    let who = seen.of("identity.who");
+    let who = again.seen.of("identity.who");
     assert_eq!(who.len(), 1, "{who:?}");
     assert_eq!(who[0].text("from"), Some("nobody"));
     assert_eq!(who[0].text("to"), Some("local"));
     assert_eq!(who[0].text("why"), Some("boot"));
     assert_eq!(who[0].bool("made"), Some(false));
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(again.seen.refused(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -375,7 +375,6 @@ async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
     let kept = [&[5; 32][..], ME.as_bytes()].concat();
     keys::set("identity", Some(&kept)).expect("the identity is kept");
 
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
     let mut app = App::start(dir.path());
     let signed = app.until(|s| s.me.as_deref() == Some(ME)).await;
     assert!(signed.library.is_empty());
@@ -385,16 +384,17 @@ async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
     assert_eq!(back.library[0].id, id);
     assert_eq!(snapshot(&local_dir), before, "local shelf changed across sign-in and sign-out");
 
-    let sign_out: Vec<_> = seen
+    let sign_out: Vec<_> = app
+        .seen
         .of("identity.who")
         .into_iter()
         .filter(|line| line.text("why") == Some("sign_out"))
         .collect();
-    assert_eq!(sign_out.len(), 1, "{:?}", seen.of("identity.who"));
+    assert_eq!(sign_out.len(), 1, "{:?}", app.seen.of("identity.who"));
     assert_eq!(sign_out[0].text("from"), Some("person"));
     assert_eq!(sign_out[0].text("to"), Some("local"));
     assert_eq!(sign_out[0].bool("made"), Some(false));
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -533,7 +533,6 @@ async fn secrets_that_cannot_be_read_mean_nobody_signs_and_it_is_said() {
     let mock: &keyring_core::mock::Cred = entry.as_any().downcast_ref().expect("mock cred");
     mock.set_error(keyring_core::Error::Invalid("mock".into(), "unreadable".into()));
 
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
     app.notice("keys.store").await;
@@ -543,14 +542,14 @@ async fn secrets_that_cannot_be_read_mean_nobody_signs_and_it_is_said() {
     app.send(Command::Start);
     app.notice("keys.store").await;
 
-    let who = seen.of("identity.who");
+    let who = app.seen.of("identity.who");
     assert_eq!(who.len(), 1, "{who:?}");
     assert_eq!(who[0].level, zutalk_log::Level::Warn);
     assert_eq!(who[0].text("from"), Some("nobody"));
     assert_eq!(who[0].text("to"), Some("nobody"));
     assert_eq!(who[0].text("why"), Some("boot"));
     assert_eq!(who[0].bool("made"), Some(false));
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }
 
 /// Someone who had a community invite in the 0.8 app starts the new one and is, with nothing
@@ -632,10 +631,11 @@ async fn the_old_library_moves_in_on_its_own_and_nothing_of_it_leaves() {
     let mut app = start();
     let again = app.until(|state| !state.library.is_empty()).await;
     assert_eq!((again.library, again.writing), (state.library, vec![]));
+    let (seq_before, _) = app.outlet.state.now();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let rest: Vec<Event> = std::iter::from_fn(|| app.events.try_recv().ok()).collect();
-    let writes = |event: &Event| matches!(event, Event::State(s) if !s.writing.is_empty());
-    assert!(!rest.iter().any(writes), "{rest:?}");
+    let (seq_after, latest) = app.outlet.state.now();
+    assert_eq!(seq_after, seq_before, "{:?}", latest.writing);
+    assert!(latest.writing.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -662,7 +662,11 @@ async fn a_recording_stops_at_once_and_is_kept_whole() {
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     app.send(Command::Stop);
     let state = app.until(|state| state.session.is_none()).await;
-    assert_eq!(state.writing.first().map(|w| w.step.as_str()), Some("closing"));
+    assert!(
+        matches!(state.writing.first().map(|w| w.step.as_str()), Some("closing" | "offline")),
+        "{:?}",
+        state.writing
+    );
     // The tape is sealed behind the stop, and the transcript waits for a key.
     let waits = |state: &State| state.writing.iter().any(|w| w.step == "offline");
     let row = app.until(waits).await.library[0].clone();
@@ -771,11 +775,8 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
         }
     });
     // The captions show it, and so does the room, sealed.
-    let columns = app.next(|event| match event {
-        Event::Live(columns) if columns.iter().any(|c| !c.lines.is_empty()) => Some(columns),
-        _ => None,
-    });
-    let column = columns.await.remove(0);
+    let frame = app.frame(|f| f.columns.iter().any(|c| !c.lines.is_empty())).await;
+    let column = &frame.columns[0];
     assert_eq!((column.lines[0].text.as_str(), &column.lines[0].units[..]), ("Hello", &[][..]));
     assert_eq!(column.rate, 4.0);
     let shown = |event: &str, plain: Option<&[u8]>| {
@@ -860,21 +861,42 @@ async fn the_recovery_key_goes_to_the_clipboard_and_through_nothing_else() {
     });
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::with(Config { clip, ..config(dir.path(), NOWHERE) });
-    app.until(|state| state.rotation_unsaved).await;
-    app.send(Command::CopyRotation);
-    let mut seen = Vec::new();
-    app.next(|event| {
-        seen.push(serde_json::to_string(&event).expect("an event is JSON"));
-        matches!(event, Event::Notice(ref said) if said == "copied").then_some(())
-    })
-    .await;
-    assert_eq!(*clipped.lock().expect("one at a time"), [written.to_string()]);
-    assert!(seen.iter().all(|json| !json.contains(&written[1..])), "the key reached the page");
-    // Saved, it is no longer asked for, and can still be copied.
-    app.send(Command::RotationSaved);
-    app.until(|state| !state.rotation_unsaved).await;
+    let first = app.until(|state| state.rotation_unsaved).await;
+    let seen = Arc::new(std::sync::Mutex::new(vec![
+        serde_json::to_string(&first).expect("state is JSON"),
+        serde_json::to_string(&*app.outlet.said.now().1).expect("notices are JSON"),
+    ]));
+    let into = seen.clone();
+    let mut watch_state = app.outlet.state.clone();
+    let mut watch_said = app.outlet.said.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some((_, s)) = watch_state.next() => {
+                    into.lock().expect("one at a time")
+                        .push(serde_json::to_string(&*s).expect("state is JSON"));
+                }
+                Some((_, n)) = watch_said.next() => {
+                    into.lock().expect("one at a time")
+                        .push(serde_json::to_string(&*n).expect("notices are JSON"));
+                }
+                else => break,
+            }
+        }
+    });
     app.send(Command::CopyRotation);
     app.notice("copied").await;
+    assert_eq!(*clipped.lock().expect("one at a time"), [written.to_string()]);
+    // Saved, it is no longer asked for, and can still be copied.
+    app.send(Command::RotationSaved);
+    let saved = app.until(|state| !state.rotation_unsaved).await;
+    app.send(Command::CopyRotation);
+    app.notice("copied").await;
+    watcher.abort();
+    let mut checked = seen.lock().expect("one at a time").clone();
+    checked.push(serde_json::to_string(&saved).expect("state is JSON"));
+    checked.push(serde_json::to_string(&*app.outlet.said.now().1).expect("notices are JSON"));
+    assert!(checked.iter().all(|json| !json.contains(&written[1..])), "the key reached the page");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -922,10 +944,9 @@ async fn the_core_runs_on_a_tree_with_a_name() {
     let _store = STORE.lock().await;
     store(false);
     let dir = tempfile::tempdir().expect("a folder");
-    let seen = zutalk_log::capture(zutalk_log::Level::Debug);
-    let app = App::start(dir.path());
+    let app = App::with_log(hub::config(dir.path()), zutalk_log::Level::Debug);
 
-    let starts = seen.of("task.start");
+    let starts = app.seen.of("task.start");
     assert_eq!(starts.len(), 2);
     assert!(
         starts
@@ -943,17 +964,18 @@ async fn the_core_runs_on_a_tree_with_a_name() {
     let tally = app.core.stats().tally();
     let started = tally.counts.iter().find(|row| row.name == "task.started").map(|row| row.n);
     assert_eq!(started, Some(2));
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }
 
-/// Waits for a `State` matching `holds`, failing if `"keys.none"` is ever noticed.
+/// Waits for a `State` matching `holds`, failing if `"keys.none"` was ever said.
 async fn until_no_keys_none(app: &mut App, holds: impl Fn(&State) -> bool) -> State {
-    app.next(|event| match event {
-        Event::Notice(code) if code == "keys.none" => panic!("unexpected keys.none"),
-        Event::State(state) if holds(&state) => Some(*state),
-        _ => None,
-    })
-    .await
+    let state = app.until(holds).await;
+    assert!(
+        !app.outlet.said.now().1.codes.iter().any(|c| c == "keys.none")
+            && !app.seen.of("notice.said").iter().any(|l| l.text("code") == Some("keys.none")),
+        "unexpected keys.none"
+    );
+    state
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -964,7 +986,6 @@ async fn without_a_key_sound_is_kept_and_the_status_says_why() {
 
     let _store = STORE.lock().await;
     store(false);
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
 
     // Local port that only counts connections: no live lane may connect without a key.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
@@ -1021,24 +1042,23 @@ async fn without_a_key_sound_is_kept_and_the_status_says_why() {
     assert!(row.draft && row.audio && row.length_ms > 0, "{row:?}");
     assert!(state.writing.is_empty());
 
-    // Drain any queued events and ensure `keys.none` was never noticed.
-    while let Ok(event) = app.events.try_recv() {
-        assert!(
-            !matches!(&event, Event::Notice(code) if code == "keys.none"),
-            "unexpected keys.none: {event:?}"
-        );
-    }
+    // Ensure `keys.none` was never said in either `Outlet.said` or `notice.said`.
+    assert!(
+        !app.outlet.said.now().1.codes.iter().any(|c| c == "keys.none")
+            && !app.seen.of("notice.said").iter().any(|l| l.text("code") == Some("keys.none")),
+        "unexpected keys.none"
+    );
 
     accept_task.abort();
     assert_eq!(connections.load(SeqCst), 0, "no realtime lane may dial without a key");
     soniox.verify().await;
 
-    let skipped = seen.of("write.skipped");
+    let skipped = app.seen.of("write.skipped");
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert_eq!(skipped[0].level, zutalk_log::Level::Info);
     assert_eq!(skipped[0].u64("n"), Some(1));
     assert_eq!(skipped[0].text("why"), Some("keys.none"));
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1095,13 +1115,8 @@ async fn with_their_own_key_captions_come_without_signing_in() {
     });
 
     // Live captions show the word.
-    let columns = app
-        .next(|event| match event {
-            Event::Live(columns) if columns.iter().any(|c| !c.lines.is_empty()) => Some(columns),
-            _ => None,
-        })
-        .await;
-    assert_eq!(columns[0].lines[0].text, "Hello");
+    let frame = app.frame(|f| f.columns.iter().any(|c| !c.lines.is_empty())).await;
+    assert_eq!(frame.columns[0].lines[0].text, "Hello");
 
     // Draft has the line before whole-transcript replaces it.
     app.send(Command::Open { id: id.clone() });
@@ -1180,7 +1195,6 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
 
     let asked = hub::Asked::default();
     let stt = hub::soniox(&asked).await;
-    let seen = zutalk_log::capture(zutalk_log::Level::Info);
     let mut app =
         App::with(Config { soniox: format!("{}/v1", stt.uri()), ..config(data, NOWHERE) });
 
@@ -1189,17 +1203,15 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
     assert!(state.writing.is_empty());
     assert!(state.library.iter().all(|r| r.draft && r.audio));
 
+    let (state_seq, _) = app.outlet.state.now();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    while let Ok(event) = app.events.try_recv() {
-        match event {
-            Event::Notice(code) => panic!("unexpected notice while waiting for key: {code}"),
-            Event::State(s) => assert!(s.writing.is_empty(), "unexpected writing: {:?}", s.writing),
-            Event::Live(_) => {}
-        }
-    }
+    assert_eq!(app.outlet.said.now().1.next, 0, "unexpected notice: {:?}", app.outlet.said.now().1);
+    let (state_seq_after, latest) = app.outlet.state.now();
+    assert_eq!(state_seq_after, state_seq, "unexpected writing: {:?}", latest.writing);
+    assert!(latest.writing.is_empty());
     assert!(stt.received_requests().await.expect("requests").is_empty());
 
-    let skipped = seen.of("write.skipped");
+    let skipped = app.seen.of("write.skipped");
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert_eq!(skipped[0].level, zutalk_log::Level::Info);
     assert_eq!(skipped[0].u64("n"), Some(2));
@@ -1214,5 +1226,5 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
         .await;
     assert_eq!(state.library.len(), 2);
     assert_eq!(asked.lock().expect("one at a time").len(), 2);
-    assert_eq!(seen.refused(), 0);
+    assert_eq!(app.seen.refused(), 0);
 }

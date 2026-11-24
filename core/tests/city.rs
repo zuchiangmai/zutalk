@@ -80,6 +80,17 @@ struct Hold {
     held: Held,
     files: BTreeMap<Cid, Vec<u8>>,
     refuse: Option<(&'static str, &'static str)>,
+    gate: Option<Arc<(Mutex<bool>, std::sync::Condvar)>>,
+}
+
+struct PostGate(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl Drop for PostGate {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.0;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
 }
 
 impl Hold {
@@ -96,6 +107,15 @@ impl Hold {
 
 impl Respond for City {
     fn respond(&self, request: &Request) -> ResponseTemplate {
+        if request.method.as_str() == "POST"
+            && let Some(gate) = self.0.lock().unwrap().gate.take()
+        {
+            let (lock, cvar) = &*gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = cvar.wait(open).unwrap();
+            }
+        }
         let mut hold = self.0.lock().unwrap();
         let (method, path) = (request.method.as_str(), request.url.path());
         let param = |name: &str| {
@@ -169,6 +189,14 @@ impl City {
         let (city, server) = (City::default(), MockServer::start().await);
         Mock::given(any()).respond_with(city.clone()).mount(&server).await;
         (city, server)
+    }
+
+    /// Holds the next `POST` in flight until the returned guard is dropped, so transient
+    /// `State.filing` progress is deterministically observable on `Outlet.state`.
+    fn hold_next_post(&self) -> PostGate {
+        let pair = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        self.0.lock().unwrap().gate = Some(pair.clone());
+        PostGate(pair)
     }
 
     /// An event in its calendar, by its organizer: its path.
@@ -283,9 +311,11 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
         (event.as_str(), "Quarterly review")
     );
     // Filed with its audio: the records first, then two files, each part of the audio as WAV.
+    let release = city.hold_next_post();
     app.send(Command::Open { id: id.clone() });
     app.send(Command::File { id: id.clone(), event: event.clone(), audio: true });
     app.until(|s| s.filing.iter().any(|w| w.id == id)).await;
+    drop(release);
     app.notice("city.filed").await;
     let state = app.until(|s| filed(s).is_some() && s.filing.is_empty()).await;
     let filing = filed(&state).unwrap().clone();
