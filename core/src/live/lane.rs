@@ -295,6 +295,7 @@ struct Lane<K> {
     out: Tx<Event>,
     audio: FanoutRx<Arc<Block>>,
     mode: watch::Receiver<Mode>,
+    kick: watch::Receiver<u64>,
     lines: Assembler,
     tail: Vec<Line>,   // the open lines, as last told
     edge: u32,         // the capture time text is accounted for up to
@@ -316,6 +317,7 @@ pub async fn run<K: Keys>(
     gauges: Gauges,
     audio: FanoutRx<Arc<Block>>,
     mode: watch::Receiver<Mode>,
+    kick: watch::Receiver<u64>,
     out: Tx<Event>,
 ) -> End {
     let spoken: Vec<&str> = setup.spoken.iter().map(String::as_str).collect();
@@ -335,6 +337,7 @@ pub async fn run<K: Keys>(
         out,
         audio,
         mode,
+        kick,
         lines,
         tail,
         edge,
@@ -487,9 +490,12 @@ impl<K: Keys> Part for Conn<K> {
 
 impl<K: Keys> Conn<K> {
     async fn live(&mut self) -> Result<Infallible, End> {
+        // Ignore any kick issued before this connection opened.
+        self.lane.kick.mark_unchanged();
+        let mut kick_open = true;
         loop {
             let asleep = self.lane.paused || self.ending.is_some();
-            let Lane { audio, mode, .. } = &mut *self.lane;
+            let Lane { audio, mode, kick, .. } = &mut *self.lane;
             tokio::select! {
                 biased;
                 // Responses before audio: they say how far the service has got. Audio before
@@ -497,6 +503,15 @@ impl<K: Keys> Conn<K> {
                 // the capture records nothing while paused.
                 message = self.ws.next() => self.hear(message).await?,
                 block = audio.recv(), if self.ending.is_none() => self.take(block).await?,
+                changed = kick.changed(), if kick_open && self.ending.is_none() => {
+                    match changed {
+                        Ok(()) => {
+                            kick.mark_unchanged();
+                            return Err(End::Retry("silent"));
+                        }
+                        Err(_) => kick_open = false,
+                    }
+                }
                 changed = mode.changed(), if self.ending != Some(End::Done) => {
                     let mode = changed.map_or(Mode::Stopped, |()| *mode.borrow_and_update());
                     self.lane.paused = mode == Mode::Paused;

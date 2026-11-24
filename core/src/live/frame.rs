@@ -112,41 +112,32 @@ impl Fit {
     }
 }
 
-/// Maps a lane's self-reported [`Link`] to a column's [`Health`] until watcher verdicts wire in (`P1-17`).
-fn link_health(link: Link) -> Health {
-    match link {
-        Link::Live | Link::Stopped("done") => Health::Live,
-        Link::Behind | Link::Connecting => Health::Slow,
-        Link::Stopped(code) => Health::Dead { why: code.into() },
-    }
-}
-
-/// The sentence the interface says about a recording under way.
-pub fn status(paused: bool, links: &[Link], quiet: &str) -> Status {
-    let why = links.iter().find_map(|l| if let Link::Stopped(why) = l { Some(*why) } else { None });
+/// The sentence the interface says about a recording under way (`P1.md` §3.4, `P1-17`).
+pub fn status(paused: bool, columns: &[Health], links: &[Link], quiet: &str) -> Status {
     if paused {
-        Status::Paused
-    } else if links.iter().all(|l| matches!(l, Link::Stopped(_))) {
-        Status::AudioOnly { why: why.unwrap_or(quiet).into() }
-    } else if links.contains(&Link::Connecting) {
-        Status::Connecting
-    } else if links.contains(&Link::Behind) {
-        Status::Behind
-    } else {
-        Status::Recording
+        return Status::Paused;
     }
-}
-
-/// Static reason code for [`status`]: non-empty only when the status is `AudioOnly`.
-pub fn status_reason(paused: bool, links: &[Link], quiet: &'static str) -> &'static str {
-    if !paused && links.iter().all(|l| matches!(l, Link::Stopped(_))) {
-        links
+    if columns.is_empty()
+        || columns.iter().all(|h| matches!(h, Health::Stalled { .. } | Health::Dead { .. }))
+    {
+        let why = columns
             .iter()
-            .find_map(|l| if let Link::Stopped(why) = l { Some(*why) } else { None })
-            .unwrap_or(quiet)
-    } else {
-        ""
+            .find_map(|h| match h {
+                Health::Stalled { why } | Health::Dead { why } if !why.is_empty() => {
+                    Some(why.as_str())
+                }
+                _ => None,
+            })
+            .unwrap_or(quiet);
+        return Status::AudioOnly { why: why.into() };
     }
+    if links.contains(&Link::Connecting) {
+        return Status::Connecting;
+    }
+    if columns.iter().any(|h| matches!(h, Health::Slow)) {
+        return Status::Behind;
+    }
+    Status::Recording
 }
 
 #[derive(Clone)]
@@ -262,7 +253,7 @@ impl ColState {
 pub struct Composer {
     cols: Vec<ColState>,
     links: Vec<Link>,
-    judged: Option<Vec<Health>>,
+    judged: Vec<Health>,
     t_audio: u32,
     paused: bool,
     dirty: bool,
@@ -272,7 +263,7 @@ pub struct Composer {
 impl Composer {
     pub fn new(shown: &[String], streams: Vec<Stream>) -> Self {
         let n = streams.len();
-        let cols = if streams.is_empty() {
+        let cols: Vec<ColState> = if streams.is_empty() {
             Vec::new()
         } else {
             shown
@@ -286,10 +277,11 @@ impl Composer {
                 })
                 .collect()
         };
+        let col_count = cols.len();
         Self {
             cols,
             links: vec![Link::Connecting; n],
-            judged: None,
+            judged: vec![Health::Live; col_count],
             t_audio: 0,
             paused: false,
             dirty: true,
@@ -358,10 +350,15 @@ impl Composer {
 
     /// Supplies per-column health judged by the watcher (`P1-17`).
     pub fn judged(&mut self, health: Vec<Health>) {
-        if self.judged.as_ref() != Some(&health) {
-            self.judged = Some(health);
+        if self.judged != health {
+            self.judged = health;
             self.dirty = true;
         }
+    }
+
+    /// Current per-column health as judged by the watcher.
+    pub fn health(&self) -> &[Health] {
+        &self.judged
     }
 
     /// Emits the next bounded [`Frame`] and its [`Fit`], or `None` when nothing changed.
@@ -375,12 +372,7 @@ impl Composer {
             .iter()
             .enumerate()
             .map(|(j, col)| {
-                let health = self
-                    .judged
-                    .as_ref()
-                    .and_then(|h| h.get(j))
-                    .cloned()
-                    .unwrap_or_else(|| link_health(self.links[col.stream]));
+                let health = self.judged.get(j).cloned().unwrap_or(Health::Live);
                 col.build(health)
             })
             .collect();

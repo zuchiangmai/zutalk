@@ -166,6 +166,21 @@ impl Health {
             Health::Live | Health::Slow => "",
         }
     }
+
+    /// Severity rank (`Live < Slow < Stalled < Dead`) for combining column health (`P1-17`).
+    pub const fn rank(&self) -> u8 {
+        match self {
+            Health::Live => 0,
+            Health::Slow => 1,
+            Health::Stalled { .. } => 2,
+            Health::Dead { .. } => 3,
+        }
+    }
+
+    /// Returns the worse of two health verdicts (`Dead` > `Stalled` > `Slow` > `Live`).
+    pub fn worst(a: &Health, b: &Health) -> Health {
+        if b.rank() > a.rank() { b.clone() } else { a.clone() }
+    }
 }
 
 /// Recovery or reporting action attached to a [`Verdict`].
@@ -413,6 +428,24 @@ pub fn sample(
 fn find_budget(stage: Stage, budgets: &[Budget]) -> Option<&Budget> {
     let code = stage.code();
     budgets.iter().find(|b| b.stage.code() == code)
+}
+
+/// Static reason code for `stage`'s judged `health`, drawn from `BUDGETS` and `water.marks`.
+pub fn verdict_why(water: &Water, stage: Stage, health: &Health) -> &'static str {
+    match health {
+        Health::Live | Health::Slow => "",
+        Health::Dead { .. } => {
+            water.marks.iter().find(|m| m.stage == stage).and_then(|m| m.ended).unwrap_or("")
+        }
+        Health::Stalled { .. } => {
+            let budget_why = find_budget(stage, BUDGETS).map_or("", |b| b.why);
+            if !budget_why.is_empty() {
+                budget_why
+            } else {
+                water.marks.iter().find(|m| m.stage == stage).map_or("", |m| m.why)
+            }
+        }
+    }
 }
 
 fn upstream_at(water: &Water, stage: Stage, upstream: Upstream) -> Option<u64> {

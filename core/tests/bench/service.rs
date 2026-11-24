@@ -331,15 +331,9 @@ async fn serve_conn(
     let fault_snapshot = inner.fault.lock().expect("service fault lock").clone();
     let mut silent_conn =
         matches!(fault_snapshot, Fault::Silent { connections } if conn_num <= connections);
-    let extra_ms = match fault_snapshot {
-        Fault::Slow { extra_ms } => extra_ms,
-        _ => 0,
-    };
 
     let stagger_ms = (conn_num as u64) * CONN_STAGGER_MS;
-    let guess_delay = Duration::from_millis(inner.delays.guess_ms + extra_ms + stagger_ms);
-    let final_delay = Duration::from_millis(inner.delays.final_ms + extra_ms + stagger_ms);
-    let end_delay = Duration::from_millis(inner.delays.end_ms + extra_ms + stagger_ms);
+    let end_delay = Duration::from_millis(inner.delays.end_ms + stagger_ms);
     let silence_interval = Duration::from_millis(inner.delays.silence_progress_ms + stagger_ms);
 
     let mut conn_audio_ms: u32 = 0;
@@ -349,6 +343,11 @@ async fn serve_conn(
     let mut pending_end: Option<Instant> = None;
 
     loop {
+        let cur_extra_ms = match *inner.fault.lock().expect("service fault lock") {
+            Fault::Slow { extra_ms } => extra_ms,
+            _ => 0,
+        };
+        let target_proc_ms = conn_audio_ms.saturating_sub(cur_extra_ms as u32);
         let next_wake = if silent_conn {
             None
         } else {
@@ -365,7 +364,7 @@ async fn serve_conn(
             if let Some(end_at) = pending_end {
                 take(end_at);
             }
-            if conn_audio_ms > last_proc_ms {
+            if target_proc_ms > last_proc_ms {
                 take(last_sent_at + silence_interval);
             }
             due
@@ -423,6 +422,10 @@ async fn serve_conn(
                         let conn_start_ms = block_conn_start + offset;
                         let conn_end_ms = conn_start_ms + (word.end_ms - word.start_ms);
                         let now = Instant::now();
+                        let guess_delay =
+                            Duration::from_millis(inner.delays.guess_ms + cur_extra_ms + stagger_ms);
+                        let final_delay =
+                            Duration::from_millis(inner.delays.final_ms + cur_extra_ms + stagger_ms);
                         pending.push_back(PendingWord {
                             word_idx,
                             conn_start_ms,
@@ -529,7 +532,7 @@ async fn serve_conn(
 
                 if emit_end_now {
                     tokens.push(boundary_token("<end>"));
-                    last_proc_ms = conn_audio_ms;
+                    last_proc_ms = last_proc_ms.max(target_proc_ms);
                 } else {
                     for p in &mut pending {
                         if p.guess_at <= now {
@@ -546,10 +549,10 @@ async fn serve_conn(
                 }
 
                 let progress_due = tokens.is_empty()
-                    && conn_audio_ms > last_proc_ms
+                    && target_proc_ms > last_proc_ms
                     && now >= last_sent_at + silence_interval;
                 if progress_due {
-                    last_proc_ms = conn_audio_ms;
+                    last_proc_ms = target_proc_ms;
                 }
 
                 if !tokens.is_empty() || progress_due {

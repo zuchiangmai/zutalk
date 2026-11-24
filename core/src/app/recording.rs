@@ -12,16 +12,18 @@ use crate::capture::clock::{Block, wall_ms};
 use crate::capture::tape;
 use crate::id::keys::{self, Chain};
 use crate::knowledge::glossary::{self, Term};
-use crate::live::frame::{Composer, Fit, Frame, MAX_COLUMNS, status, status_reason};
+use crate::live::frame::{Composer, Fit, Frame, MAX_COLUMNS, status};
 use crate::live::lane::{self, LANE_NAMES, Mode, Stream};
 use crate::live::lines::Line;
 use crate::record::shelf::{About, DraftGap, DraftStep, RECORDING, Said, Shelf};
 use crate::rt::keep;
 use crate::rt::queue::{self, Full, Rx, Tx};
 use crate::rt::signal::Register;
-use crate::rt::stats::{Counter, Peak, Spread};
+use crate::rt::stats::{self, Counter, Peak, Spread};
 use crate::rt::supervise::{End, Kept, Part, Restarts, Tree};
-use crate::rt::water::{Gauge, Stage, Water, sample};
+use crate::rt::water::{
+    Action, BUDGETS, Due, Gauge, Health, Stage, Verdict, Water, due, judge, sample, verdict_why,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -312,6 +314,7 @@ pub(crate) struct Start {
     pub said: Voice,
     pub shell: Arc<Gauge>,
     pub screen: Arc<Gauge>,
+    pub next_snap: Arc<AtomicU64>,
     pub root: Tree,
     pub results: Tx<Msg>,
 }
@@ -342,7 +345,6 @@ fn report_status(
     id: &str,
     told: &mut Option<Status>,
     next: Status,
-    why: &'static str,
 ) {
     if told.as_ref() == Some(&next) {
         return;
@@ -358,8 +360,10 @@ fn report_status(
         return;
     }
     let from = told.as_ref().map_or("", Status::code);
-    *told = Some(next.clone());
-    info!("session.status", rec = Id(id), from = from, to = next.code(), why = why);
+    let to = next.code();
+    let why = next.why().to_owned();
+    *told = Some(next);
+    info!("session.status", rec = Id(id), from = from, to = to, why = Id(&why));
 }
 
 fn end_once(ended: &watch::Sender<Option<&'static str>>, why: &'static str) {
@@ -439,6 +443,7 @@ struct FrameShared {
     events: Arc<Mutex<Rx<lane::Event>>>,
     relay: Arc<Mutex<DraftRelay>>,
     mode: watch::Receiver<Mode>,
+    health: watch::Receiver<Vec<Health>>,
     frame_reg: Register<Frame>,
     session: Register<Option<Session>>,
     said: Voice,
@@ -455,6 +460,7 @@ struct FramePart {
     shared: Arc<FrameShared>,
     composer: Composer,
     mode: watch::Receiver<Mode>,
+    health: watch::Receiver<Vec<Health>>,
     last_fit: Fit,
 }
 
@@ -463,11 +469,27 @@ impl Part for FramePart {
         let mut frame_tick = tick();
         let events = self.shared.events.clone();
         let mut rx = events.lock().await;
+        let mut mode_open = true;
+        let mut health_open = true;
         loop {
             tokio::select! {
-                changed = self.mode.changed() => {
-                    let mode = changed.map_or(Mode::Stopped, |()| *self.mode.borrow_and_update());
-                    self.composer.pause(mode == Mode::Paused);
+                changed = self.mode.changed(), if mode_open => {
+                    match changed {
+                        Ok(()) => {
+                            let mode = *self.mode.borrow_and_update();
+                            self.composer.pause(mode == Mode::Paused);
+                        }
+                        Err(_) => mode_open = false,
+                    }
+                }
+                changed = self.health.changed(), if health_open => {
+                    match changed {
+                        Ok(()) => {
+                            let judged = self.health.borrow_and_update().clone();
+                            self.composer.judged(judged);
+                        }
+                        Err(_) => health_open = false,
+                    }
                 }
                 event = rx.recv() => match event {
                     None => {
@@ -593,10 +615,14 @@ impl FramePart {
             self.shared.frame_reg.set(frame);
             self.shared.frame_gauge.set(self.shared.frame_reg.seq());
         }
-        let next = status(self.composer.paused(), self.composer.links(), self.shared.quiet);
-        let why = status_reason(self.composer.paused(), self.composer.links(), self.shared.quiet);
+        let next = status(
+            self.composer.paused(),
+            self.composer.health(),
+            self.composer.links(),
+            self.shared.quiet,
+        );
         let mut relay = self.shared.relay.lock().await;
-        report_status(&self.shared.session, &self.shared.id, &mut relay.told, next, why);
+        report_status(&self.shared.session, &self.shared.id, &mut relay.told, next);
     }
 }
 
@@ -608,13 +634,149 @@ fn start_frame(tree: &Tree, shared: Arc<FrameShared>) -> Kept {
             async move {
                 let mut composer = Composer::new(&shared.shown, shared.streams.clone());
                 let mode = shared.mode.clone();
+                let health = shared.health.clone();
                 composer.pause(*mode.borrow() == Mode::Paused);
-                Ok(FramePart { shared, composer, mode, last_fit: Fit::Whole })
+                composer.judged(health.borrow().clone());
+                Ok(FramePart { shared, composer, mode, health, last_fit: Fit::Whole })
             }
         },
         |_| {},
         Restarts::default(),
     )
+}
+
+/// Derives each caption column's health from `verdicts`: column `j` uses lane `max(j, 1) - 1`,
+/// taking the worse of its `Sent` and `Heard` verdicts (`P1-17`).
+fn column_health(columns: usize, verdicts: &[Verdict]) -> Vec<Health> {
+    (0..columns)
+        .map(|j| {
+            let lane = j.saturating_sub(1) as u8;
+            let sent = verdicts
+                .iter()
+                .find(|v| v.stage == Stage::Sent(lane))
+                .map_or(&Health::Live, |v| &v.health);
+            let heard = verdicts
+                .iter()
+                .find(|v| v.stage == Stage::Heard(lane))
+                .map_or(&Health::Live, |v| &v.health);
+            Health::worst(sent, heard)
+        })
+        .collect()
+}
+
+fn emit_verdict(
+    water: &Water,
+    verdicts: &[Verdict],
+    stage: Stage,
+    from: &Health,
+    to: &Health,
+    judge_stalled: &Counter,
+    judge_dead: &Counter,
+) {
+    let lane = stage.lane().map_or(-1i32, i32::from);
+    let why = verdict_why(water, stage, to);
+    let action = verdicts.iter().find(|v| v.stage == stage).map_or(Action::None, |v| v.action);
+    match to {
+        Health::Live => info!(
+            "judge.verdict",
+            stage = stage.code(),
+            lane = lane,
+            from = from.code(),
+            to = to.code(),
+            why = why,
+            action = action.code(),
+        ),
+        Health::Slow => warn!(
+            "judge.verdict",
+            stage = stage.code(),
+            lane = lane,
+            from = from.code(),
+            to = to.code(),
+            why = why,
+            action = action.code(),
+        ),
+        Health::Stalled { .. } => {
+            judge_stalled.add(1);
+            warn!(
+                "judge.verdict",
+                stage = stage.code(),
+                lane = lane,
+                from = from.code(),
+                to = to.code(),
+                why = why,
+                action = action.code(),
+            );
+        }
+        Health::Dead { .. } => {
+            judge_dead.add(1);
+            error!(
+                "judge.verdict",
+                stage = stage.code(),
+                lane = lane,
+                from = from.code(),
+                to = to.code(),
+                why = why,
+                action = action.code(),
+            );
+        }
+    }
+}
+
+/// Writes one `stall.snapshot` bundle (`P1.md` §3.13.5): header, every `water.mark`, every
+/// `stat.*`, every `task.running` on the root tree, and `stall.snapshot.end` with exact line count.
+fn write_snapshot(snap: u64, rec: &str, stage: Stage, water: &Water, root: &Tree) {
+    let health = water.health.iter().find(|(s, _)| *s == stage).map_or(&Health::Live, |(_, h)| h);
+    let why = verdict_why(water, stage, health);
+    let idle_ms = water
+        .marks
+        .iter()
+        .find(|m| m.stage == stage)
+        .map_or(0, |m| water.now_ms.saturating_sub(m.moved_ms));
+    let lane = stage.lane().map_or(-1i32, i32::from);
+    let tally = root.stats().tally();
+    let running = root.running();
+    let lines = 1 + water.marks.len() + tally.len() + running.len() + 1;
+
+    if matches!(health, Health::Dead { .. }) {
+        error!(
+            "stall.snapshot",
+            snap = snap,
+            rec = Id(rec),
+            stage = stage.code(),
+            lane = lane,
+            health = health.code(),
+            why = why,
+            idle_ms = idle_ms,
+        );
+    } else {
+        warn!(
+            "stall.snapshot",
+            snap = snap,
+            rec = Id(rec),
+            stage = stage.code(),
+            lane = lane,
+            health = health.code(),
+            why = why,
+            idle_ms = idle_ms,
+        );
+    }
+    write_water(water, snap);
+    stats::write(&tally, snap);
+    for row in &running {
+        warn!(
+            "task.running",
+            snap = snap,
+            tree = row.tree,
+            task = row.task,
+            kind = row.kind,
+            for_ms = row.for_ms,
+        );
+    }
+    if matches!(health, Health::Dead { .. }) {
+        error!("stall.snapshot.end", snap = snap, lines = lines);
+    } else {
+        warn!("stall.snapshot.end", snap = snap, lines = lines);
+    }
 }
 
 fn advance_clock(
@@ -635,63 +797,133 @@ fn advance_clock(
     *clock_since = Some(now_ms);
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn watch_task(
+struct WatchArgs {
     id: String,
     origin: Instant,
+    columns: usize,
     first_block_ms: Arc<AtomicU64>,
     gauges: Gauges,
-    mut mode: watch::Receiver<Mode>,
-    mut stop: watch::Receiver<bool>,
+    mode: watch::Receiver<Mode>,
+    stop: watch::Receiver<bool>,
+    health_tx: watch::Sender<Vec<Health>>,
+    kicks: Vec<watch::Sender<u64>>,
+    ended_tx: watch::Sender<Option<&'static str>>,
+    said: Voice,
     session: Register<Option<Session>>,
     water_reg: Register<Water>,
-) {
+    next_snap: Arc<AtomicU64>,
+    root: Tree,
+}
+
+async fn watch_task(mut args: WatchArgs) {
     let mut tick = interval(Duration::from_millis(WATCH_EVERY_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tick.tick().await; // first sample is at 1 s
 
-    let mut paused = *mode.borrow() == Mode::Paused;
+    let judge_stalled = args.root.stats().counter("judge.stalled");
+    let judge_dead = args.root.stats().counter("judge.dead");
+    let lane_kicks = args.root.stats().counter("lane.kicks");
+
+    let mut paused = *args.mode.borrow() == Mode::Paused;
     let mut clock_ms = 0u64;
     let mut clock_since: Option<u64> = None;
-    let mut before = Water::default();
+    // Seed initial marks at t = 0 so a stage that never advances reaches its budget on time.
+    let mut before = sample(&Water::default(), &args.gauges.read_positions(), 0, 0, paused);
 
     loop {
-        if *stop.borrow() {
+        if *args.stop.borrow() {
             break;
         }
         tokio::select! {
             biased;
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() {
+            changed = args.stop.changed() => {
+                if changed.is_err() || *args.stop.borrow() {
                     break;
                 }
             }
-            changed = mode.changed() => {
-                let next_mode = changed.map_or(Mode::Stopped, |()| *mode.borrow_and_update());
+            changed = args.mode.changed() => {
+                let next_mode = changed.map_or(Mode::Stopped, |()| *args.mode.borrow_and_update());
                 if next_mode == Mode::Stopped {
                     break;
                 }
-                let now_ms = origin.elapsed().as_millis() as u64;
-                advance_clock(&mut clock_ms, &mut clock_since, &first_block_ms, now_ms, paused);
+                let now_ms = args.origin.elapsed().as_millis() as u64;
+                advance_clock(&mut clock_ms, &mut clock_since, &args.first_block_ms, now_ms, paused);
                 paused = next_mode == Mode::Paused;
             }
             _ = tick.tick() => {
-                if *stop.borrow() || *mode.borrow() == Mode::Stopped || !is_active(&session, &id) {
+                if *args.stop.borrow()
+                    || *args.mode.borrow() == Mode::Stopped
+                    || !is_active(&args.session, &args.id)
+                {
                     break;
                 }
-                let now_ms = origin.elapsed().as_millis() as u64;
-                advance_clock(&mut clock_ms, &mut clock_since, &first_block_ms, now_ms, paused);
-                let positions = gauges.read_positions();
-                let next = sample(&before, &positions, now_ms, clock_ms, paused);
+                let now_ms = args.origin.elapsed().as_millis() as u64;
+                advance_clock(&mut clock_ms, &mut clock_since, &args.first_block_ms, now_ms, paused);
+                let positions = args.gauges.read_positions();
+                let mut next = sample(&before, &positions, now_ms, clock_ms, paused);
+                let verdicts = judge(&next, BUDGETS);
+                let due_items = due(&before, &mut next, &verdicts);
+
                 write_water(&next, 0);
-                if *mode.borrow() != Mode::Stopped && is_active(&session, &id) {
-                    water_reg.set(next.clone());
+                if *args.mode.borrow() != Mode::Stopped && is_active(&args.session, &args.id) {
+                    args.water_reg.set(next.clone());
                 }
+
+                let cols = column_health(args.columns, &verdicts);
+                args.health_tx.send_if_modified(|current| {
+                    if *current != cols {
+                        *current = cols;
+                        true
+                    } else {
+                        false
+                    }
+                });
+
+                let mut ending_recording = false;
+                for item in due_items {
+                    match item {
+                        Due::Changed { stage, from, to } => {
+                            emit_verdict(
+                                &next,
+                                &verdicts,
+                                stage,
+                                &from,
+                                &to,
+                                &judge_stalled,
+                                &judge_dead,
+                            );
+                        }
+                        Due::Snapshot { stage } => {
+                            let snap = args.next_snap.fetch_add(1, Ordering::Relaxed);
+                            write_snapshot(snap, &args.id, stage, &next, &args.root);
+                        }
+                        Due::Action(Action::Reopen(Stage::Heard(n))) => {
+                            if let Some(kick) = args.kicks.get(usize::from(n)) {
+                                kick.send_modify(|c| *c += 1);
+                                lane_kicks.add(1);
+                                warn!("lane.kick", lane = n, why = "silent");
+                            }
+                        }
+                        Due::Action(Action::Tell(code)) => {
+                            args.said.say(code);
+                        }
+                        Due::Action(Action::End(code)) => {
+                            end_once(&args.ended_tx, code);
+                            ending_recording = true;
+                        }
+                        Due::Action(Action::None | Action::Reopen(_)) => {}
+                    }
+                }
+
                 before = next;
+                if ending_recording {
+                    // Leave the Stalled Water in `water_reg` until `Closing(Capture)` clears it.
+                    return;
+                }
             }
         }
     }
-    clear_water(&water_reg);
+    clear_water(&args.water_reg);
 }
 
 /// Runs one recording from `recording.start` through `Phase::Opening`, `Recording`/`Paused`,
@@ -878,6 +1110,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
             |writer| writer.sync().map_err(shelf_err),
         ));
 
+        let mut kicks = Vec::with_capacity(streams.len());
         let base_setup = lane::Setup {
             endpoint: start.config.realtime.clone(),
             model: REALTIME.into(),
@@ -886,6 +1119,8 @@ pub(crate) async fn run(mut start: Start) -> Done {
         };
         for (n, stream) in streams.iter().cloned().enumerate() {
             let setup = glossary::live(&start.terms, &stream, base_setup.clone());
+            let (kick_tx, kick_rx) = watch::channel(0u64);
+            kicks.push(kick_tx);
             let (keys, dial, lane_stats, lane_gauges, lane_audio, lane_mode, lane_out) = (
                 start.keys.clone(),
                 start.config.dial.clone(),
@@ -908,6 +1143,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     lane_gauges,
                     lane_audio,
                     lane_mode,
+                    kick_rx,
                     lane_out,
                 );
                 let _ = running.await; // dropped: lane records its own end code in Link and Gauge
@@ -917,6 +1153,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
         audio_fanout = Some(audio);
         lane_tx_hold = Some(lane_tx);
 
+        let (health_tx, health_rx) = watch::channel(vec![Health::Live; columns]);
         let frame_shared = Arc::new(FrameShared {
             id: start.id.clone(),
             shown: start.about.shown.clone(),
@@ -931,6 +1168,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
                 last_t1: vec![0; lane_count],
             })),
             mode: internal_mode_rx.clone(),
+            health: health_rx,
             frame_reg: start.frame.clone(),
             session: start.session.clone(),
             said: start.said.clone(),
@@ -946,16 +1184,23 @@ pub(crate) async fn run(mut start: Start) -> Done {
 
         recording.spawn(
             "watch",
-            watch_task(
-                start.id.clone(),
-                started_at,
-                first_block_ms.clone(),
-                gauges.clone(),
-                internal_mode_rx.clone(),
-                watch_stop_rx,
-                start.session.clone(),
-                start.water.clone(),
-            ),
+            watch_task(WatchArgs {
+                id: start.id.clone(),
+                origin: started_at,
+                columns,
+                first_block_ms: first_block_ms.clone(),
+                gauges: gauges.clone(),
+                mode: internal_mode_rx.clone(),
+                stop: watch_stop_rx,
+                health_tx,
+                kicks,
+                ended_tx: ended_tx.clone(),
+                said: start.said.clone(),
+                session: start.session.clone(),
+                water_reg: start.water.clone(),
+                next_snap: start.next_snap.clone(),
+                root: start.root.clone(),
+            }),
         );
         Ok(())
     })();

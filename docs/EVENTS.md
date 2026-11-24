@@ -114,3 +114,18 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `draft.gap` | warn | 草稿补了一行空缺 | `t0_ms` `t1_ms` `lines`（丢了几行） |
 | `recording.phase` | info；到 `Ended` 带失败代码时 error | 录音的状态机转换 | `rec` `from` `to`（`Opening` / `Recording` / `Paused` / `Closing.Capture` / `Closing.Tape` / `Closing.Lanes` / `Closing.Frame` / `Closing.Draft` / `Sealing` / `Ended`） `why` `ms`（上一个状态待了多久） |
 | `water.mark` | debug；在快照里是 warn | 看守每秒采样时每格一行（`snap = 0`）；停滞快照里每格一行（`snap > 0`） | `snap` `stage` `lane`（无 lane 的格为 `-1`） `at` `moved_ms` `why` `ended` |
+| `judge.verdict` | 到 `Live` info；`Slow`、`Stalled` warn；`Dead` error | 一格的健康变了 | `stage` `lane` `from` `to` `why` `action`（`none` / `reopen` / `tell` / `end`） |
+| `stall.snapshot` | `Stalled` warn；`Dead` error | 一格刚变成停滞或停了：一组现场行的开头 | `snap` `rec` `stage` `lane` `health` `why` `idle_ms` |
+| `stall.snapshot.end` | `Stalled` warn；`Dead` error | 一组停滞快照的结尾 | `snap` `lines`（这一组一共几行，含头尾） |
+| `task.running` | warn | 快照里：整棵根树上此刻跑着的每个任务一行 | `snap` `tree` `task` `kind`（`task` / `kept` / `blocking`） `for_ms` |
+| `lane.kick` | warn | 看守因服务不回话踢了一条 lane | `lane` `why`（`silent`） |
+
+## 怎么读一组快照
+
+当某一格刚变成 `Stalled` 或 `Dead` 时，看守会用同一个递增的 `snap` 号（从 1 起，同一核心跨场不重号）写出一组平铺的日志行。排查一次停滞只需按编号过滤：
+
+```sh
+grep '"snap":1' <数据目录>/logs/zutalk.jsonl
+```
+
+同一 `snap` 号下依次包含：`stall.snapshot`（触发的那一格、健康、原因、已不动毫秒数）→ 当秒整份水位（每格一行 `water.mark`）→ 当秒整份统计（`stat.count` / `stat.peak` / `stat.spread` / `stat.queue`）→ 根树上正在运行的所有任务与阻塞调用（`task.running`）→ `stall.snapshot.end`（核对总行数 `lines`）。同一格、同一个原因在一场录音里只留一组快照，日志不会被长停滞灌满。

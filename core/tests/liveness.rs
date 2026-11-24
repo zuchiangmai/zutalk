@@ -31,7 +31,7 @@ use zutalk_core::record::shelf::{
     About, DraftGap, DraftStep, GapSpan, LINE, Missed, RECORDING, Said, Shelf,
 };
 use zutalk_core::rt::supervise::End;
-use zutalk_core::rt::water::Stage;
+use zutalk_core::rt::water::{Health, Stage};
 use zutalk_log::{Level, Limits};
 
 /// 8 virtual hours in milliseconds for I1.
@@ -46,8 +46,8 @@ const I1_P99_LIMIT_MS: u64 = 1_000;
 const I1_DRIFT_LIMIT_MS: u64 = 100;
 /// Recovery budget for a killed caption lane (`P1.md` §2 I6).
 const I6_LANE_RECOVER_MS: u64 = 5_000;
-/// Recovery budget for a silent service connection (`P1-08-bench.md` I7).
-const I7_SILENT_RECOVER_MS: u64 = 20_000;
+/// Recovery budget for a silent service connection (`P1-17-watch.md` I7: tightened to 12 s).
+const I7_SILENT_RECOVER_MS: u64 = 12_000;
 /// Burst size exceeding the 600-block tape queue capacity (`P1.md` §3.7).
 const TAPE_OVERFLOW_BLOCKS: usize = 700;
 
@@ -2042,7 +2042,9 @@ async fn a_recording_without_a_key_has_no_lanes_and_stops_the_same_way() {
 
 // ---- 5. I7: stalls are seen and acted on ----
 
-async fn run_i7_silent_service(check_observability: bool) {
+#[tokio::test(start_paused = true)]
+async fn i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection() {
+    let _store = STORE.lock().await;
     let speech = Speech::build(SpeechSpec::standard(35_000));
     let mut opts = BenchOptions::new(speech);
     opts.tape = TapeMode::Gated;
@@ -2053,13 +2055,18 @@ async fn run_i7_silent_service(check_observability: bool) {
     let rec_id = bench.start_recording().await;
     let started_at = bench.mic.started_at().expect("mic started");
 
-    tokio::time::sleep(Duration::from_millis(30_000)).await;
+    // Within 12 virtual seconds, the watcher kicks the silent connection and a new one dials.
+    let dial_deadline = Instant::now() + Duration::from_millis(I7_SILENT_RECOVER_MS);
+    while bench.service.dials() < 2 {
+        assert!(
+            Instant::now() < dial_deadline,
+            "lane did not switch off silent connection within {I7_SILENT_RECOVER_MS} ms (dials={})",
+            bench.service.dials()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    assert!(
-        bench.service.dials() >= 2,
-        "lane must abandon the silent connection and dial a fresh one (dials={})",
-        bench.service.dials()
-    );
+    tokio::time::sleep(Duration::from_millis(10_000)).await;
 
     let first_seen = bench
         .word_seen()
@@ -2069,9 +2076,25 @@ async fn run_i7_silent_service(check_observability: bool) {
         .expect("words must appear after switching off the silent connection");
     let elapsed_ms = first_seen.saturating_duration_since(started_at).as_millis() as u64;
     assert!(
-        elapsed_ms <= I7_SILENT_RECOVER_MS,
-        "first word after silent service arrived at {elapsed_ms} ms > {I7_SILENT_RECOVER_MS} ms"
+        elapsed_ms <= I7_SILENT_RECOVER_MS + 1_500,
+        "first word after silent service arrived too late: {elapsed_ms} ms"
     );
+
+    // Column health must have progressed Slow -> Stalled(silent) -> Live.
+    let col_healths = bench.col0_healths();
+    let idx_slow = col_healths.iter().position(|h| *h == Health::Slow);
+    let idx_stalled =
+        col_healths.iter().position(|h| *h == Health::Stalled { why: "silent".into() });
+    let idx_back_live = idx_stalled.and_then(|s| {
+        col_healths[s + 1..].iter().position(|h| *h == Health::Live).map(|o| s + 1 + o)
+    });
+    assert!(
+        idx_slow.is_some() && idx_stalled > idx_slow && idx_back_live > idx_stalled,
+        "expected column health Slow -> Stalled(silent) -> Live, got {col_healths:?}"
+    );
+
+    let mark_count_at_snap = bench.outlet().water.now().1.marks.len();
+    assert_eq!(mark_count_at_snap, 7);
 
     bench.stop_recording().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2079,52 +2102,297 @@ async fn run_i7_silent_service(check_observability: bool) {
     let recorded = bench.shelf().read(&rec_id).expect("read shelf").expect("recording on shelf");
     let has_gap = recorded.lines.iter().any(|(_, s)| s.line.text == "…" && s.line.incomplete);
     assert!(has_gap, "draft must contain a gap line covering the silent connection");
+    assert!(
+        bench.seen().of("lane.gap").iter().any(|l| l.text("why") == Some("silent")),
+        "expected lane.gap(why = silent)"
+    );
 
-    if check_observability {
-        let verdicts = bench.seen().of("judge.verdict");
-        let heard_states: Vec<&str> = verdicts
+    // Observability (`P1.md` §2 table 2, `P1-17-watch.md` #1).
+    let verdicts = bench.seen().of("judge.verdict");
+    let heard_verdicts: Vec<_> = verdicts
+        .iter()
+        .filter(|l| l.text("stage") == Some("Heard") && l.u64("lane") == Some(0))
+        .collect();
+    let heard_to: Vec<&str> = heard_verdicts.iter().filter_map(|l| l.text("to")).collect();
+    assert_eq!(
+        heard_to,
+        ["Slow", "Stalled", "Live"],
+        "unexpected Heard(0) verdicts: {heard_verdicts:?}"
+    );
+    assert_eq!(heard_verdicts[1].text("why"), Some("silent"));
+    assert_eq!(heard_verdicts[1].text("action"), Some("reopen"));
+    assert_eq!(heard_verdicts[1].level, Level::Warn);
+    assert_eq!(heard_verdicts[2].level, Level::Info);
+
+    let snaps = bench.seen().of("stall.snapshot");
+    assert_eq!(snaps.len(), 1, "expected exactly one stall.snapshot, got {snaps:?}");
+    let snap_id = snaps[0].u64("snap").expect("stall.snapshot snap");
+    assert!(snap_id >= 1);
+    assert_eq!(snaps[0].text("stage"), Some("Heard"));
+    assert_eq!(snaps[0].u64("lane"), Some(0));
+    assert_eq!(snaps[0].text("why"), Some("silent"));
+
+    let snap_lines: Vec<_> =
+        bench.seen().all().into_iter().filter(|l| l.u64("snap") == Some(snap_id)).collect();
+    let snap_marks = snap_lines.iter().filter(|l| l.code == "water.mark").count();
+    let snap_queues = snap_lines.iter().filter(|l| l.code == "stat.queue").count();
+    let snap_tasks: Vec<_> = snap_lines.iter().filter(|l| l.code == "task.running").collect();
+    let snap_end =
+        snap_lines.iter().find(|l| l.code == "stall.snapshot.end").expect("stall.snapshot.end");
+
+    assert_eq!(snap_marks, mark_count_at_snap);
+    assert!(snap_queues >= 1, "expected at least one stat.queue in snapshot");
+    assert!(
+        snap_tasks.len() >= 5,
+        "expected at least 5 task.running lines, got {}",
+        snap_tasks.len()
+    );
+    assert!(snap_tasks.iter().any(|l| l.text("task") == Some("lane.0")));
+    assert!(snap_tasks.iter().any(|l| l.text("task") == Some("watch")));
+    assert_eq!(snap_end.u64("lines"), Some(snap_lines.len() as u64));
+
+    assert_eq!(bench.seen().count("lane.kick"), 1);
+    assert_eq!(
+        bench
+            .seen()
+            .of("part.state")
             .iter()
-            .filter(|l| l.text("stage") == Some("Heard") && l.u64("lane") == Some(0))
-            .filter_map(|l| l.text("to"))
-            .collect();
-        assert!(
-            heard_states.contains(&"Slow")
-                && heard_states.contains(&"Stalled")
-                && heard_states.contains(&"Live"),
-            "expected Heard(0) verdicts Slow -> Stalled -> Live, saw {heard_states:?}"
-        );
-        assert!(
-            verdicts.iter().any(|l| {
-                l.text("stage") == Some("Heard")
-                    && l.text("to") == Some("Stalled")
-                    && l.text("why") == Some("silent")
-                    && l.text("action") == Some("reopen")
-            }),
-            "expected Stalled(why=silent, action=reopen)"
-        );
-        assert_eq!(bench.seen().count("stall.snapshot"), 1, "expected exactly one stall.snapshot");
-        assert_eq!(bench.seen().count("lane.kick"), 1, "expected exactly one lane.kick");
-        assert!(
-            bench.seen().of("part.state").iter().any(|l| l.text("why") == Some("silent")),
-            "expected part.state(why=silent)"
-        );
-    }
+            .filter(|l| l.text("part") == Some("lane.0") && l.text("why") == Some("silent"))
+            .count(),
+        1
+    );
+    assert_eq!(bench.count("judge.stalled"), 1);
+    assert_eq!(bench.count("lane.kicks"), 1);
 
     bench.finish();
 }
 
 #[tokio::test(start_paused = true)]
-async fn i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection() {
+async fn i7_a_capture_that_stops_delivering_ends_the_recording_out_loud() {
     let _store = STORE.lock().await;
-    run_i7_silent_service(false).await;
+    let speech = Speech::build(SpeechSpec::standard(40_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    // Speak for 5 s so draft lines and tape blocks are written, then stall capture.
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    let stalled_at = Instant::now();
+    bench.mic.stall(true);
+
+    bench
+        .wait_session(|s| s.is_none(), Duration::from_secs(11))
+        .await
+        .expect("stalled capture must end recording within 11 virtual seconds");
+    assert!(
+        stalled_at.elapsed() <= Duration::from_secs(11),
+        "took {:?} > 11 s to end stalled capture",
+        stalled_at.elapsed()
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while bench.seen().of("recording.end").is_empty() {
+        assert!(Instant::now() < deadline, "recording.end did not arrive after audio.stalled");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(bench.notices().iter().any(|c| c == "audio.stalled"), "notices: {:?}", bench.notices());
+    assert!(bench.outlet().session.now().1.is_none());
+
+    // Tape and draft spoken before the stall must remain.
+    let recorded = bench.shelf().read(&rec_id).expect("read shelf").expect("draft must remain");
+    assert!(!recorded.lines.is_empty(), "draft lines before stall must remain");
+    let key = keys::derive("tape", &rec_id).expect("tape key");
+    let len_ms = tape::read(&bench.data().join("tape").join(&rec_id), &key, &Pass::Export, |_| {})
+        .expect("tape reads back");
+    assert!(len_ms >= 4_000, "tape length before stall too short: {len_ms} ms");
+
+    // Observability (`P1-17-watch.md` #2).
+    let cap_verdicts: Vec<_> = bench
+        .seen()
+        .of("judge.verdict")
+        .into_iter()
+        .filter(|l| l.text("stage") == Some("Capture"))
+        .collect();
+    let cap_to: Vec<&str> = cap_verdicts.iter().filter_map(|l| l.text("to")).collect();
+    assert_eq!(cap_to, ["Slow", "Stalled"], "unexpected Capture verdicts: {cap_verdicts:?}");
+    assert_eq!(cap_verdicts[1].text("why"), Some("audio.stalled"));
+    assert_eq!(cap_verdicts[1].text("action"), Some("end"));
+
+    assert_eq!(bench.seen().count("stall.snapshot"), 1);
+    assert!(
+        bench.seen().of("recording.phase").iter().any(|l| {
+            l.text("from") == Some("Recording")
+                && l.text("to") == Some("Closing.Capture")
+                && l.text("why") == Some("audio.stalled")
+        }),
+        "expected Recording -> Closing.Capture (why = audio.stalled)"
+    );
+    let ends = bench.seen().of("recording.end");
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].text("code"), Some("audio.stalled"));
+    assert_eq!(ends[0].level, Level::Error);
+
+    bench.finish();
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "P1-17：看守判断停滞并发出事件与快照"]
-async fn i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection_and_it_shows()
-{
+async fn a_service_that_lags_is_behind_not_dead() {
     let _store = STORE.lock().await;
-    run_i7_silent_service(true).await;
+    let speech = Speech::build(SpeechSpec::standard(40_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    // Steady healthy recording first.
+    tokio::time::sleep(Duration::from_millis(5_000)).await;
+    assert_eq!(bench.status(), Some(Status::Recording));
+
+    // Inject 4 s service lag: column becomes Slow, status becomes Behind, no reconnect.
+    bench.service.set_fault(Fault::Slow { extra_ms: 4_000 });
+    tokio::time::sleep(Duration::from_millis(7_000)).await;
+    assert_eq!(bench.status(), Some(Status::Behind));
+    let (_, frame) = bench.outlet().frame.now();
+    assert_eq!(frame.columns[0].health, Health::Slow);
+
+    // Clear lag: column returns to Live, status returns to Recording, still 1 dial.
+    bench.service.set_fault(Fault::None);
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+    assert_eq!(bench.status(), Some(Status::Recording));
+    let (_, frame) = bench.outlet().frame.now();
+    assert_eq!(frame.columns[0].health, Health::Live);
+    assert_eq!(bench.service.dials(), 1, "lagging service must not be reconnected");
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let verdicts = bench.seen().of("judge.verdict");
+    let heard_to: Vec<&str> = verdicts
+        .iter()
+        .filter(|l| l.text("stage") == Some("Heard") && l.u64("lane") == Some(0))
+        .filter_map(|l| l.text("to"))
+        .collect();
+    assert_eq!(heard_to, ["Slow", "Live"]);
+    assert_eq!(bench.seen().count("stall.snapshot"), 0);
+    assert_eq!(bench.seen().count("lane.kick"), 0);
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_is_done_twice_for_one_stall() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(45_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+    opts.fault = Fault::Silent { connections: 100 };
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(35_000)).await;
+
+    // Reopen fires around 10 s, 20 s, 30 s (3 kicks total, not once per second).
+    assert_eq!(bench.seen().count("lane.kick"), 3, "expected 3 kicks in 35 s");
+    assert_eq!(bench.count("lane.kicks"), 3);
+    assert!(
+        !bench.notices().iter().any(|c| c == "silent"),
+        "Reopen must not emit a `silent` notice: {:?}",
+        bench.notices()
+    );
+    assert_eq!(bench.seen().count("stall.snapshot"), 1, "same stage + reason snaps only once");
+
+    let heard_stalled = bench
+        .seen()
+        .of("judge.verdict")
+        .into_iter()
+        .filter(|l| l.text("stage") == Some("Heard") && l.text("to") == Some("Stalled"))
+        .count();
+    assert_eq!(
+        heard_stalled, 1,
+        "judge.verdict to Stalled fires on transition only, not every 1 s"
+    );
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recording_with_nothing_wrong_leaves_no_verdict_behind() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(5 * 60 * 1_000 + 5_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(60_000)).await;
+    }
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let verdicts = bench.seen().of("judge.verdict");
+    assert!(
+        !verdicts.iter().any(|l| matches!(l.text("to"), Some("Stalled" | "Dead"))),
+        "healthy 5 min recording must have no Stalled/Dead verdicts: {verdicts:?}"
+    );
+    assert_eq!(bench.seen().count("stall.snapshot"), 0);
+    assert_eq!(bench.count("judge.stalled"), 0);
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recording_without_a_key_is_quiet_from_start_to_stop() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(5 * 60 * 1_000 + 5_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.with_key = false;
+    opts.tape = TapeMode::Counting;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(60_000)).await;
+    }
+
+    let (_, water) = bench.outlet().water.now();
+    assert_eq!(water.health.len(), 4, "expected 4 health entries without key: {:?}", water.health);
+    assert!(
+        water.health.iter().all(|(_, h)| *h == Health::Live),
+        "all 4 marks must be Live without key: {:?}",
+        water.health
+    );
+    let expected = Status::AudioOnly { why: "captions.no_key".into() };
+    assert!(
+        bench.statuses().iter().all(|s| *s == expected),
+        "status must stay AudioOnly(captions.no_key): {:?}",
+        bench.statuses()
+    );
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(bench.seen().count("judge.verdict"), 0, "no verdicts without key");
+    assert_eq!(bench.seen().count("stall.snapshot"), 0, "no snapshots without key");
+    assert_eq!(bench.seen().count("lane.kick"), 0, "no kicks without key");
+    assert_eq!(bench.seen().count("notice.said"), 0, "no notices without key");
+
+    bench.finish();
 }
 
 // ---- 6. I8: cost of one update does not grow with library size (P2) ----

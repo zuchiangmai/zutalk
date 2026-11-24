@@ -30,6 +30,7 @@ use zutalk_core::app::proto::{Column, Command, Frame, Session, Setup, State, Sta
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::{Draft, Drafts, LINE, Said, Shelf, Writer as ShelfWriter};
 use zutalk_core::rt::stats::{PeakRow, QueueRow, SpreadRow, Tally};
+use zutalk_core::rt::water::{Health, Water};
 use zutalk_log::{Level, Seen};
 
 /// Maximum JSON size of one live caption frame (`P1.md` §3.4).
@@ -123,6 +124,10 @@ struct ProbeState {
     last_state_bytes: usize,
     /// Distinct session statuses seen since the last reset.
     statuses: Vec<Status>,
+    /// Distinct column-0 health values seen in live frames since the last reset.
+    col0_healths: Vec<Health>,
+    /// Last non-empty `Water` sample observed before the recording cleared it.
+    last_water: Option<Water>,
     /// All notice codes received in order.
     notices: Vec<String>,
 }
@@ -140,6 +145,8 @@ impl ProbeState {
             session: None,
             last_state_bytes: 0,
             statuses: Vec::new(),
+            col0_healths: Vec::new(),
+            last_water: None,
             notices: Vec::new(),
         }
     }
@@ -149,6 +156,11 @@ impl ProbeState {
         self.frames += 1;
         if !columns.is_empty() {
             self.non_empty_column_frames += 1;
+        }
+        if let Some(first) = columns.first()
+            && self.col0_healths.last() != Some(&first.health)
+        {
+            self.col0_healths.push(first.health.clone());
         }
         if self.column_active.len() < columns.len() {
             self.column_active.resize(columns.len(), false);
@@ -427,6 +439,7 @@ impl Bench {
             let (mut state_seq, initial_state) = drain_outlet.state.now();
             let (mut frame_seq, initial_frame) = drain_outlet.frame.now();
             let (mut session_seq, initial_session) = drain_outlet.session.now();
+            let (mut water_seq, _) = drain_outlet.water.now();
             let (_, initial_said) = drain_outlet.said.now();
             let mut said_at = initial_said.next;
             if state_seq > 0 || frame_seq > 0 || session_seq > 0 || initial_said.next > 0 {
@@ -474,6 +487,19 @@ impl Bench {
                             if seq > state_seq {
                                 state_seq = seq;
                                 drain_probe.lock().expect("probe lock").take_state((*s).clone());
+                                drain_notify.notify_waiters();
+                            }
+                        }
+                        None => break,
+                    },
+                    next = drain_outlet.water.next() => match next {
+                        Some((seq, w)) => {
+                            if seq > water_seq {
+                                water_seq = seq;
+                                if !w.marks.is_empty() {
+                                    drain_probe.lock().expect("probe lock").last_water =
+                                        Some((*w).clone());
+                                }
                                 drain_notify.notify_waiters();
                             }
                         }
@@ -585,7 +611,12 @@ impl Bench {
 
     /// Starts a recording and waits until the session and microphone are both active.
     pub async fn start_recording(&self) -> String {
-        self.probe.lock().expect("probe lock").statuses.clear();
+        {
+            let mut probe = self.probe.lock().expect("probe lock");
+            probe.statuses.clear();
+            probe.col0_healths.clear();
+            probe.last_water = None;
+        }
         self.mic.reset_for_next();
         self.send(Command::Start);
         let session = self
@@ -731,6 +762,14 @@ impl Bench {
 
     pub fn statuses(&self) -> Vec<Status> {
         self.probe.lock().expect("probe lock").statuses.clone()
+    }
+
+    pub fn col0_healths(&self) -> Vec<Health> {
+        self.probe.lock().expect("probe lock").col0_healths.clone()
+    }
+
+    pub fn last_water(&self) -> Option<Water> {
+        self.probe.lock().expect("probe lock").last_water.clone()
     }
 
     pub fn notices(&self) -> Vec<String> {

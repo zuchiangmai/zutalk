@@ -256,30 +256,41 @@ fn what_gives_way_first_is_the_oldest_line_of_the_fullest_column() {
 }
 
 #[test]
-fn a_columns_health_is_its_links() {
+fn a_columns_health_comes_only_from_judge() {
     let shown = strings(&["en"]);
     let mut c = Composer::new(&shown, plan(&shown));
-    let _ = c.frame();
+    let (initial, _) = c.frame().expect("initial frame");
+    assert_eq!(initial.columns[0].health, Health::Live);
 
-    let table = [
-        (Link::Live, Health::Live),
-        (Link::Behind, Health::Slow),
-        (Link::Connecting, Health::Slow),
-        (Link::Stopped("done"), Health::Live),
-        (Link::Stopped("key"), Health::Dead { why: "key".into() }),
-        (Link::Stopped("quota"), Health::Dead { why: "quota".into() }),
-    ];
-    for (link, expected) in table {
+    // Link changes alone never alter Column.health (single source of truth: judge).
+    for link in [Link::Connecting, Link::Behind, Link::Stopped("key"), Link::Live] {
         c.take(Event::Link { stream: 0, state: link });
         let (frame, _) = c.frame().expect("frame after Link event");
-        assert_eq!(frame.columns[0].health, expected, "link={link:?}");
+        assert_eq!(frame.columns[0].health, Health::Live, "link={link:?} must not set health");
+    }
+
+    // Watcher verdicts via `Composer::judged` drive Column.health directly.
+    let table = [
+        Health::Slow,
+        Health::Stalled { why: "silent".into() },
+        Health::Dead { why: "connect".into() },
+        Health::Live,
+    ];
+    for expected in table {
+        c.judged(vec![expected.clone()]);
+        let (frame, _) = c.frame().expect("frame after judged update");
+        assert_eq!(frame.columns[0].health, expected);
     }
 }
 
 #[test]
 fn the_status_line_says_what_most_needs_saying() {
-    use Link::{Behind, Connecting, Live, Stopped};
+    use Health::{Dead, Live as HLive, Slow, Stalled};
+    use Link::{Behind, Connecting, Live as LLive, Stopped};
     let only = |why: &str| Status::AudioOnly { why: why.into() };
+    let stalled = |why: &str| Stalled { why: why.into() };
+    let dead = |why: &str| Dead { why: why.into() };
+
     assert_eq!(
         [
             Status::Recording.code(),
@@ -292,13 +303,41 @@ fn the_status_line_says_what_most_needs_saying() {
     );
     assert_eq!(Status::Recording.why(), "");
     assert_eq!(only("captions.no_key").why(), "captions.no_key");
-    assert_eq!(status(true, &[Connecting], "captions.off"), Status::Paused);
-    assert_eq!(status(false, &[], "captions.off"), only("captions.off"));
-    assert_eq!(status(false, &[], "captions.no_key"), only("captions.no_key"));
-    assert_eq!(status(false, &[Stopped("keys.none"), Stopped("done")], ""), only("keys.none"));
-    assert_eq!(status(false, &[Live, Connecting], ""), Status::Connecting);
-    assert_eq!(status(false, &[Behind, Live], ""), Status::Behind);
-    assert_eq!(status(false, &[Live, Stopped("key")], ""), Status::Recording);
+
+    // 1. Paused wins over every health and link state.
+    assert_eq!(status(true, &[dead("connect")], &[Connecting], "captions.off"), Status::Paused);
+    assert_eq!(status(true, &[], &[], "captions.no_key"), Status::Paused);
+
+    // 2. No columns -> AudioOnly with `quiet`.
+    assert_eq!(status(false, &[], &[], "captions.off"), only("captions.off"));
+    assert_eq!(status(false, &[], &[], "captions.no_key"), only("captions.no_key"));
+
+    // 3. Every column Stalled or Dead -> AudioOnly with the first reason.
+    assert_eq!(status(false, &[stalled("silent")], &[LLive], ""), only("silent"));
+    assert_eq!(
+        status(false, &[dead("connect"), stalled("silent")], &[Stopped("connect"), LLive], ""),
+        only("connect")
+    );
+    assert_eq!(
+        status(false, &[stalled("keys"), dead("quota")], &[Connecting, Stopped("quota")], ""),
+        only("keys")
+    );
+
+    // 4. Not all columns stalled/dead, and some lane is still Connecting -> Connecting.
+    assert_eq!(status(false, &[HLive, Slow], &[LLive, Connecting], ""), Status::Connecting);
+    assert_eq!(status(false, &[HLive], &[Connecting], ""), Status::Connecting);
+
+    // 5. No lane Connecting, and at least one column is Slow -> Behind.
+    assert_eq!(status(false, &[Slow, HLive], &[LLive, LLive], ""), Status::Behind);
+    assert_eq!(status(false, &[Slow, dead("key")], &[LLive, Stopped("key")], ""), Status::Behind);
+
+    // 6. Otherwise (at least one column Live, none Connecting or Slow) -> Recording.
+    assert_eq!(
+        status(false, &[HLive, dead("key")], &[LLive, Stopped("key")], ""),
+        Status::Recording
+    );
+    assert_eq!(status(false, &[HLive], &[Behind], ""), Status::Recording);
+    assert_eq!(status(false, &[HLive], &[LLive], ""), Status::Recording);
 }
 
 #[test]

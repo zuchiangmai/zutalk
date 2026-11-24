@@ -34,6 +34,7 @@ use crate::rt::stats::{self, Counter, Spread, Stats, Tally};
 use crate::rt::supervise::{End, Tree, again};
 use crate::rt::water::{Gauge, Water};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::{fs, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
@@ -279,6 +280,7 @@ impl Core {
             water_reg,
             shell: shell.clone(),
             screen: screen.clone(),
+            next_snap: Arc::new(AtomicU64::new(1)),
             said,
             http,
             who: Who::Nobody("starting"),
@@ -372,6 +374,7 @@ struct Hub {
     water_reg: Register<Water>,
     shell: Arc<Gauge>,
     screen: Arc<Gauge>,
+    next_snap: Arc<AtomicU64>,
     said: Voice,
     http: reqwest::Client,
     who: Who,
@@ -726,6 +729,7 @@ impl Hub {
             said: self.said.clone(),
             shell: self.shell.clone(),
             screen: self.screen.clone(),
+            next_snap: self.next_snap.clone(),
             root: self.tree.clone(),
             results: self.results.clone(),
         };
