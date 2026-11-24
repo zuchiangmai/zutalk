@@ -575,6 +575,10 @@ impl Bench {
         self.core.stats().tally()
     }
 
+    pub fn running(&self) -> Vec<zutalk_core::rt::supervise::Running> {
+        self.core.running()
+    }
+
     pub fn count(&self, name: &str) -> u64 {
         self.tally().counts.iter().find(|r| r.name == name).map_or(0, |r| r.n)
     }

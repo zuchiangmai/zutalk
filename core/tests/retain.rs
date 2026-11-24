@@ -144,7 +144,7 @@ async fn audio_destroyed_at_the_persons_word_is_gone_for_good_and_its_text_stays
     drop(app);
     // Started again, the draft without its audio is not written again: its text stays.
     let mut app = App::with(config(data));
-    let state = app.until(|state| state.library.len() == 3).await;
+    let state = app.until(|state| state.library.iter().any(|row| row.id == "draft")).await;
     let draft = state.library.iter().find(|row| row.id == "draft").expect("still there");
     assert!(draft.draft && !draft.audio);
     assert!(state.writing.iter().all(|w| w.id != "draft"), "{:?}", state.writing);

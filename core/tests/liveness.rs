@@ -950,7 +950,6 @@ impl Drop for FifoGuard {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "P1-19：hub 不阻塞在导出上"]
 async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
     let _store = STORE.lock().await;
     let data = tempfile::tempdir().expect("data tempdir");
@@ -1016,13 +1015,26 @@ async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
         .expect("Change/Open did not complete while export was blocked");
 
     // Observability while blocked (P1.md §2).
+    let export_starts: Vec<_> = bench
+        .seen()
+        .of("job.start")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("export.write"))
+        .collect();
+    assert_eq!(export_starts.len(), 1, "expected one job.start(export.write) while blocked");
+    let export_seq = export_starts[0].u64("job").expect("export.write job");
     assert!(
-        bench.seen().of("job.start").iter().any(|l| l.text("kind") == Some("export.write")),
-        "expected job.start(export.write) while blocked"
-    );
-    assert!(
-        !bench.seen().of("job.done").iter().any(|l| l.text("kind") == Some("export.write")),
+        !bench
+            .seen()
+            .of("job.done")
+            .iter()
+            .any(|l| l.text("kind") == Some("export.write") && l.u64("job") == Some(export_seq)),
         "export.write should still be running while FIFO is unopened"
+    );
+    let running = bench.running();
+    assert!(
+        running.iter().any(|r| r.task == "export.write"),
+        "expected export.write in Tree::running(), got {running:?}"
     );
     for kind in ["Pause", "Resume", "Change"] {
         assert!(
@@ -1041,13 +1053,12 @@ async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
 
     // Observability after unblocking.
     let deadline = Instant::now() + Duration::from_secs(4);
-    while !bench
-        .seen()
-        .of("job.done")
-        .iter()
-        .any(|l| l.text("kind") == Some("export.write") && l.text("code") == Some("ok"))
-    {
-        assert!(Instant::now() < deadline, "expected job.done(export.write, ok)");
+    while !bench.seen().of("job.done").iter().any(|l| {
+        l.text("kind") == Some("export.write")
+            && l.u64("job") == Some(export_seq)
+            && l.text("code") == Some("ok")
+    }) {
+        assert!(Instant::now() < deadline, "expected job.done(export.write, seq={export_seq}, ok)");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 

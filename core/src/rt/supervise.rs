@@ -688,6 +688,11 @@ impl Tree {
         self.token.cancel();
     }
 
+    /// Whether this tree (or an ancestor) has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
     /// Resolves once this tree (or an ancestor) has been cancelled.
     pub async fn cancelled(&self) {
         self.token.cancelled().await;

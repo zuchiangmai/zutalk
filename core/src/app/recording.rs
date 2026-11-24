@@ -425,20 +425,24 @@ fn emit_phase(id: &str, from: Phase, to: Phase, why: &'static str, ms: u64) {
 /// and removes empty recordings from the shelf.
 pub(crate) async fn seal(
     tree: &Tree,
-    shelf: &Shelf,
+    shelf: Arc<Shelf>,
     tape_dir: PathBuf,
     id: &str,
 ) -> Result<Option<About>, &'static str> {
-    let key = keys::derive("tape", id).map_err(end_code)?;
-    let length = tree.blocking("recording.seal", move || tape::recover(&tape_dir, &key)).await;
-    let length_ms = length.map_err(|_| "tape")?.map_err(|_| "tape")?;
-    let Some(recording) = shelf.about(id).map_err(shelf_err)? else { return Ok(None) };
-    let updated = About { length_ms, ..recording.about };
-    if length_ms == 0 || recording.about.length_ms != length_ms {
-        let about = (length_ms > 0).then_some(updated.clone());
-        shelf.put(id, RECORDING, &[(id.into(), about)], now()).map_err(shelf_err)?;
-    }
-    Ok(Some(updated))
+    let id = id.to_owned();
+    tree.blocking("recording.seal", move || {
+        let key = keys::derive("tape", &id).map_err(end_code)?;
+        let length_ms = tape::recover(&tape_dir, &key).map_err(|_| "tape")?;
+        let Some(recording) = shelf.about(&id).map_err(shelf_err)? else { return Ok(None) };
+        let updated = About { length_ms, ..recording.about };
+        if length_ms == 0 || recording.about.length_ms != length_ms {
+            let about = (length_ms > 0).then_some(updated.clone());
+            shelf.put(&id, RECORDING, &[(id.clone(), about)], now()).map_err(shelf_err)?;
+        }
+        Ok(Some(updated))
+    })
+    .await
+    .map_err(|_| "tape")?
 }
 
 struct DraftRelay {
@@ -1004,222 +1008,245 @@ pub(crate) async fn run(mut start: Start) -> Done {
     let mut draft_done: Option<Kept> = None;
     let mut sealed: Result<Option<About>, &'static str> = Ok(None);
 
-    // Phase::Opening — wire queues, parts, capture, and watch.
+    // Phase::Opening — write the recording's initial About record first on a blocking thread.
+    let open_about = {
+        let (shelf, id, about, started) =
+            (start.shelf.clone(), start.id.clone(), start.about.clone(), start.about.started);
+        recording
+            .blocking("recording.open", move || {
+                shelf.put(&id, RECORDING, &[(id.clone(), Some(about))], started).map_err(shelf_err)
+            })
+            .await
+            .map_err(|_| "shelf")
+            .and_then(|res| res)
+    };
+    let mut about_written = false;
     let source = start.source;
-    let open_result: Result<(), &'static str> = (|| {
-        let key = keys::derive("tape", &start.id).map_err(end_code)?;
-        let (tape_tx, tape_rx) = queue::bounded(&stats, "tape", TAPE_QUEUE_BLOCKS, Full::End);
-        let (streams, quiet) = match &start.captions {
-            Ok(streams) => (streams.clone(), ""),
-            Err(why) => (Vec::new(), *why),
-        };
-        let audio = queue::fanout(&stats, "audio", AUDIO_FANOUT_BLOCKS);
-        let (lane_tx, lane_rx) =
-            queue::bounded(&stats, "lane.events", LANE_QUEUE_EVENTS, Full::Wait);
-
-        let file = matches!(source, Source::File(_));
-        let tape_wait = file.then(|| tape_tx.with(Full::Wait));
-        let sink_ended = ended_tx.clone();
-        let sink_level = start.level.clone();
-        let sink_mode = internal_mode_rx.clone();
-        let sink_audio = audio.clone();
-        let sink_capture_gauge = gauges.capture.clone();
-        let sink_first_block = first_block_ms.clone();
-        let mut kept = true;
-        let sink = move |block: Block| {
-            let block = Arc::new(block);
-            let elapsed = started_at.elapsed().as_millis() as u64;
-            let stamped = sink_first_block.compare_exchange(
-                u64::MAX,
-                elapsed,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            let _ = stamped; // dropped: only the first block stamps the recording clock origin
-            sink_capture_gauge.set(u64::from(block.t_ms) + BLOCK_MS);
-            if *sink_mode.borrow() == Mode::Recording {
-                sink_level.set(SoundLevel::of(&block.pcm));
-            }
-            if kept {
-                let ok = match &tape_wait {
-                    Some(tx) => tx.send_blocking(block.clone()).is_ok(),
-                    None => tape_tx.offer(block.clone()).is_ok(),
+    let open_result: Result<(), &'static str> = match open_about {
+        Err(code) => Err(code),
+        Ok(()) => {
+            about_written = true;
+            let _ = start.results.send(Msg::RecordingOpened).await; // dropped: the hub has ended
+            (|| {
+                let key = keys::derive("tape", &start.id).map_err(end_code)?;
+                let (tape_tx, tape_rx) =
+                    queue::bounded(&stats, "tape", TAPE_QUEUE_BLOCKS, Full::End);
+                let (streams, quiet) = match &start.captions {
+                    Ok(streams) => (streams.clone(), ""),
+                    Err(why) => (Vec::new(), *why),
                 };
-                if !ok {
-                    kept = false;
-                    end_once(&sink_ended, "tape");
-                }
-            }
-            let _ = sink_audio.send(block); // dropped: fanout returns 0 when no caption lanes are listening
-        };
+                let audio = queue::fanout(&stats, "audio", AUDIO_FANOUT_BLOCKS);
+                let (lane_tx, lane_rx) =
+                    queue::bounded(&stats, "lane.events", LANE_QUEUE_EVENTS, Full::Wait);
 
-        let notice_ended = ended_tx.clone();
-        let notice_said = start.said.clone();
-        let notice = move |notice| match notice {
-            Notice::Ended => end_once(&notice_ended, if file { "done" } else { "audio.closed" }),
-            Notice::Fatal(code) if file => end_once(&notice_ended, code),
-            Notice::Restarted(code) | Notice::Fatal(code) => notice_said.say(code),
-        };
-
-        let hearing = (start.config.hear)(source, Box::new(sink), Box::new(notice), &stats)
-            .map_err(end_code)?;
-        capture = Some(hearing);
-
-        let tape_dir = start.config.data.join("tape").join(&start.id);
-        let reels = start.config.reels.clone();
-        let tape_blocks = stats.counter("tape.blocks");
-        let tape_padded = stats.counter("tape.padded_blocks");
-        let tape_batch_ms = stats.spread("tape.batch_ms");
-        let tape_gauge = gauges.tape.clone();
-        tape_done = Some(keep::start(
-            &recording,
-            "tape",
-            "tape.batch",
-            tape_rx,
-            tape_batch_ms,
-            Restarts::default(),
-            move || (reels)(&tape_dir, &key).map_err(|_| "tape"),
-            move |writer, batch: &[Arc<Block>]| {
-                for block in batch {
-                    let res = writer.append(block);
-                    let padded = writer.take_padded();
-                    if padded > 0 {
-                        tape_padded.add(padded);
+                let file = matches!(source, Source::File(_));
+                let tape_wait = file.then(|| tape_tx.with(Full::Wait));
+                let sink_ended = ended_tx.clone();
+                let sink_level = start.level.clone();
+                let sink_mode = internal_mode_rx.clone();
+                let sink_audio = audio.clone();
+                let sink_capture_gauge = gauges.capture.clone();
+                let sink_first_block = first_block_ms.clone();
+                let mut kept = true;
+                let sink = move |block: Block| {
+                    let block = Arc::new(block);
+                    let elapsed = started_at.elapsed().as_millis() as u64;
+                    let stamped = sink_first_block.compare_exchange(
+                        u64::MAX,
+                        elapsed,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    let _ = stamped; // dropped: only the first block stamps the recording clock origin
+                    sink_capture_gauge.set(u64::from(block.t_ms) + BLOCK_MS);
+                    if *sink_mode.borrow() == Mode::Recording {
+                        sink_level.set(SoundLevel::of(&block.pcm));
                     }
-                    res.map_err(|_| "tape")?;
-                }
-                if let Some(last) = batch.last() {
-                    tape_gauge.set(u64::from(last.t_ms) + BLOCK_MS);
-                }
-                tape_blocks.add(batch.len() as u64);
-                Ok(())
-            },
-            |writer| writer.sync().map_err(|_| "tape"),
-        ));
+                    if kept {
+                        let ok = match &tape_wait {
+                            Some(tx) => tx.send_blocking(block.clone()).is_ok(),
+                            None => tape_tx.offer(block.clone()).is_ok(),
+                        };
+                        if !ok {
+                            kept = false;
+                            end_once(&sink_ended, "tape");
+                        }
+                    }
+                    let _ = sink_audio.send(block); // dropped: fanout returns 0 when no caption lanes are listening
+                };
 
-        let (draft_tx, draft_rx) = queue::bounded(&stats, "draft", DRAFT_QUEUE_LINES, Full::Drop);
-        let draft_shelf = start.shelf.clone();
-        let draft_id = start.id.clone();
-        let drafts = start.config.drafts.clone();
-        let draft_lines = stats.counter("draft.lines");
-        let draft_batch_ms = stats.spread("draft.batch_ms");
-        let draft_gauge = gauges.draft.clone();
-        draft_done = Some(keep::start(
-            &recording,
-            "draft",
-            "draft.batch",
-            draft_rx,
-            draft_batch_ms,
-            Restarts::default(),
-            move || (drafts)(&draft_shelf, &draft_id).map_err(shelf_err),
-            move |writer, batch: &[(String, Said, i64)]| {
-                for (key, said, at) in batch {
-                    writer.put(key, said, *at).map_err(shelf_err)?;
-                }
-                if let Some((_, last_said, _)) = batch.last() {
-                    draft_gauge.set(u64::from(last_said.line.t1));
-                }
-                draft_lines.add(batch.len() as u64);
-                Ok(())
-            },
-            |writer| writer.sync().map_err(shelf_err),
-        ));
+                let notice_ended = ended_tx.clone();
+                let notice_said = start.said.clone();
+                let notice = move |notice| match notice {
+                    Notice::Ended => {
+                        end_once(&notice_ended, if file { "done" } else { "audio.closed" })
+                    }
+                    Notice::Fatal(code) if file => end_once(&notice_ended, code),
+                    Notice::Restarted(code) | Notice::Fatal(code) => notice_said.say(code),
+                };
 
-        let mut kicks = Vec::with_capacity(streams.len());
-        let base_setup = lane::Setup {
-            endpoint: start.config.realtime.clone(),
-            model: REALTIME.into(),
-            spoken: start.about.spoken.clone(),
-            ..lane::Setup::default()
-        };
-        for (n, stream) in streams.iter().cloned().enumerate() {
-            let setup = glossary::live(&start.terms, &stream, base_setup.clone());
-            let (kick_tx, kick_rx) = watch::channel(0u64);
-            kicks.push(kick_tx);
-            lane_specs.push((stream.clone(), setup.clone(), kick_rx.clone()));
-            let (keys, dial, lane_stats, lane_gauges, lane_audio, lane_mode, lane_out) = (
-                start.keys.clone(),
-                start.config.dial.clone(),
-                stats.clone(),
-                gauges.lanes[n].clone(),
-                audio.subscribe(),
-                internal_mode_rx.clone(),
-                lane_tx.clone(),
-            );
-            let (done_tx, done_rx) = oneshot::channel();
-            lane_dones.push(done_rx);
-            recording.spawn(LANE_NAMES[n], async move {
-                let running = lane::run(
-                    n,
-                    stream,
-                    &setup,
-                    keys,
-                    dial,
-                    lane_stats,
-                    lane_gauges,
-                    lane_audio,
-                    lane_mode,
-                    kick_rx,
-                    lane_out,
+                let hearing = (start.config.hear)(source, Box::new(sink), Box::new(notice), &stats)
+                    .map_err(end_code)?;
+                capture = Some(hearing);
+
+                let tape_dir = start.config.data.join("tape").join(&start.id);
+                let reels = start.config.reels.clone();
+                let tape_blocks = stats.counter("tape.blocks");
+                let tape_padded = stats.counter("tape.padded_blocks");
+                let tape_batch_ms = stats.spread("tape.batch_ms");
+                let tape_gauge = gauges.tape.clone();
+                tape_done = Some(keep::start(
+                    &recording,
+                    "tape",
+                    "tape.batch",
+                    tape_rx,
+                    tape_batch_ms,
+                    Restarts::default(),
+                    move || (reels)(&tape_dir, &key).map_err(|_| "tape"),
+                    move |writer, batch: &[Arc<Block>]| {
+                        for block in batch {
+                            let res = writer.append(block);
+                            let padded = writer.take_padded();
+                            if padded > 0 {
+                                tape_padded.add(padded);
+                            }
+                            res.map_err(|_| "tape")?;
+                        }
+                        if let Some(last) = batch.last() {
+                            tape_gauge.set(u64::from(last.t_ms) + BLOCK_MS);
+                        }
+                        tape_blocks.add(batch.len() as u64);
+                        Ok(())
+                    },
+                    |writer| writer.sync().map_err(|_| "tape"),
+                ));
+
+                let (draft_tx, draft_rx) =
+                    queue::bounded(&stats, "draft", DRAFT_QUEUE_LINES, Full::Drop);
+                let draft_shelf = start.shelf.clone();
+                let draft_id = start.id.clone();
+                let drafts = start.config.drafts.clone();
+                let draft_lines = stats.counter("draft.lines");
+                let draft_batch_ms = stats.spread("draft.batch_ms");
+                let draft_gauge = gauges.draft.clone();
+                draft_done = Some(keep::start(
+                    &recording,
+                    "draft",
+                    "draft.batch",
+                    draft_rx,
+                    draft_batch_ms,
+                    Restarts::default(),
+                    move || (drafts)(&draft_shelf, &draft_id).map_err(shelf_err),
+                    move |writer, batch: &[(String, Said, i64)]| {
+                        for (key, said, at) in batch {
+                            writer.put(key, said, *at).map_err(shelf_err)?;
+                        }
+                        if let Some((_, last_said, _)) = batch.last() {
+                            draft_gauge.set(u64::from(last_said.line.t1));
+                        }
+                        draft_lines.add(batch.len() as u64);
+                        Ok(())
+                    },
+                    |writer| writer.sync().map_err(shelf_err),
+                ));
+
+                let mut kicks = Vec::with_capacity(streams.len());
+                let base_setup = lane::Setup {
+                    endpoint: start.config.realtime.clone(),
+                    model: REALTIME.into(),
+                    spoken: start.about.spoken.clone(),
+                    ..lane::Setup::default()
+                };
+                for (n, stream) in streams.iter().cloned().enumerate() {
+                    let setup = glossary::live(&start.terms, &stream, base_setup.clone());
+                    let (kick_tx, kick_rx) = watch::channel(0u64);
+                    kicks.push(kick_tx);
+                    lane_specs.push((stream.clone(), setup.clone(), kick_rx.clone()));
+                    let (keys, dial, lane_stats, lane_gauges, lane_audio, lane_mode, lane_out) = (
+                        start.keys.clone(),
+                        start.config.dial.clone(),
+                        stats.clone(),
+                        gauges.lanes[n].clone(),
+                        audio.subscribe(),
+                        internal_mode_rx.clone(),
+                        lane_tx.clone(),
+                    );
+                    let (done_tx, done_rx) = oneshot::channel();
+                    lane_dones.push(done_rx);
+                    recording.spawn(LANE_NAMES[n], async move {
+                        let running = lane::run(
+                            n,
+                            stream,
+                            &setup,
+                            keys,
+                            dial,
+                            lane_stats,
+                            lane_gauges,
+                            lane_audio,
+                            lane_mode,
+                            kick_rx,
+                            lane_out,
+                        );
+                        let _ = running.await; // dropped: lane records its own end code in Link and Gauge
+                        let _ = done_tx.send(()); // dropped: recording task already ended or cancelled
+                    });
+                }
+                audio_fanout = Some(audio);
+                lane_tx_hold = Some(lane_tx);
+
+                let (health_tx, health_rx) = watch::channel(vec![Health::Live; columns]);
+                let frame_shared = Arc::new(FrameShared {
+                    id: start.id.clone(),
+                    shown: start.about.shown.clone(),
+                    streams,
+                    quiet,
+                    events: Arc::new(Mutex::new(lane_rx)),
+                    relay: Arc::new(Mutex::new(DraftRelay {
+                        tx: Some(draft_tx),
+                        gap: DraftGap::new(),
+                        next_idx: 0,
+                        told: quiet.is_empty().then_some(Status::Connecting),
+                        last_t1: vec![0; lane_count],
+                    })),
+                    mode: internal_mode_rx.clone(),
+                    health: health_rx,
+                    frame_reg: start.frame.clone(),
+                    session: start.session.clone(),
+                    said: start.said.clone(),
+                    capture_gauge: gauges.capture.clone(),
+                    frame_gauge: gauges.frame.clone(),
+                    frame_made: stats.counter("frame.made"),
+                    frame_cut: stats.counter("frame.cut"),
+                    frame_bound: stats.peak("frame.bound_bytes"),
+                    draft_lost: stats.counter("draft.lost_lines"),
+                    caption_lag_ms: stats.spread("caption.lag_ms"),
+                });
+                frame_done = Some(start_frame(&recording, frame_shared));
+
+                recording.spawn(
+                    "watch",
+                    watch_task(WatchArgs {
+                        id: start.id.clone(),
+                        origin: started_at,
+                        columns,
+                        first_block_ms: first_block_ms.clone(),
+                        gauges: gauges.clone(),
+                        mode: internal_mode_rx.clone(),
+                        stop: watch_stop_rx,
+                        health_tx,
+                        kicks,
+                        ended_tx: ended_tx.clone(),
+                        said: start.said.clone(),
+                        session: start.session.clone(),
+                        water_reg: start.water.clone(),
+                        next_snap: start.next_snap.clone(),
+                        root: start.root.clone(),
+                    }),
                 );
-                let _ = running.await; // dropped: lane records its own end code in Link and Gauge
-                let _ = done_tx.send(()); // dropped: recording task already ended or cancelled
-            });
+                Ok(())
+            })()
         }
-        audio_fanout = Some(audio);
-        lane_tx_hold = Some(lane_tx);
-
-        let (health_tx, health_rx) = watch::channel(vec![Health::Live; columns]);
-        let frame_shared = Arc::new(FrameShared {
-            id: start.id.clone(),
-            shown: start.about.shown.clone(),
-            streams,
-            quiet,
-            events: Arc::new(Mutex::new(lane_rx)),
-            relay: Arc::new(Mutex::new(DraftRelay {
-                tx: Some(draft_tx),
-                gap: DraftGap::new(),
-                next_idx: 0,
-                told: quiet.is_empty().then_some(Status::Connecting),
-                last_t1: vec![0; lane_count],
-            })),
-            mode: internal_mode_rx.clone(),
-            health: health_rx,
-            frame_reg: start.frame.clone(),
-            session: start.session.clone(),
-            said: start.said.clone(),
-            capture_gauge: gauges.capture.clone(),
-            frame_gauge: gauges.frame.clone(),
-            frame_made: stats.counter("frame.made"),
-            frame_cut: stats.counter("frame.cut"),
-            frame_bound: stats.peak("frame.bound_bytes"),
-            draft_lost: stats.counter("draft.lost_lines"),
-            caption_lag_ms: stats.spread("caption.lag_ms"),
-        });
-        frame_done = Some(start_frame(&recording, frame_shared));
-
-        recording.spawn(
-            "watch",
-            watch_task(WatchArgs {
-                id: start.id.clone(),
-                origin: started_at,
-                columns,
-                first_block_ms: first_block_ms.clone(),
-                gauges: gauges.clone(),
-                mode: internal_mode_rx.clone(),
-                stop: watch_stop_rx,
-                health_tx,
-                kicks,
-                ended_tx: ended_tx.clone(),
-                said: start.said.clone(),
-                session: start.session.clone(),
-                water_reg: start.water.clone(),
-                next_snap: start.next_snap.clone(),
-                root: start.root.clone(),
-            }),
-        );
-        Ok(())
-    })();
+    };
 
     let mut pending_effects = match open_result {
         Ok(()) => transition(&mut phase, &mut phase_at, &mut ending, Happened::Opened, ""),
@@ -1376,11 +1403,16 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     step_done = true;
                 }
                 Effect::Seal => {
-                    let tape_dir = start.config.data.join("tape").join(&start.id);
-                    sealed = seal(&start.root, &start.shelf, tape_dir, &start.id).await;
-                    match &sealed {
-                        Ok(_) => step_done = true,
-                        Err(code) => seal_failed = Some(*code),
+                    if !about_written {
+                        sealed = Err(ending);
+                        step_done = true;
+                    } else {
+                        let tape_dir = start.config.data.join("tape").join(&start.id);
+                        sealed = seal(&start.root, start.shelf.clone(), tape_dir, &start.id).await;
+                        match &sealed {
+                            Ok(_) => step_done = true,
+                            Err(code) => seal_failed = Some(*code),
+                        }
                     }
                 }
             }

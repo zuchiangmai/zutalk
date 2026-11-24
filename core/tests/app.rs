@@ -50,6 +50,20 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// Waits for `export.write` to finish (async off-hub export since P1-19).
+async fn wait_export(app: &App) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !app
+        .seen
+        .of("job.done")
+        .iter()
+        .any(|l| l.text("kind") == Some("export.write") && l.text("code") == Some("ok"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "export.write did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Waits for a `State` matching `holds`, failing if `"sign_in.first"` was ever said.
 async fn until_no_sign_in_first(app: &mut App, holds: impl Fn(&State) -> bool) -> State {
     let state = app.until(holds).await;
@@ -319,6 +333,7 @@ async fn a_recording_needs_nobody_signed_in() {
     until_no_sign_in_first(&mut app, |s| s.library.is_empty()).await;
     app.send(Command::Restore { id: id.clone() });
     until_no_sign_in_first(&mut app, |s| s.library.len() == 1).await;
+    wait_export(&app).await;
     let exported = fs::read_to_string(dir.path().join("exported.md")).expect("exported");
     assert!(exported.starts_with("# Local note"), "{exported}");
 
@@ -568,6 +583,7 @@ async fn nobody_signed_in_nothing_is_asked_of_our_server() {
     });
     app.send(Command::Share { recording: None });
     app.notice("sign_in.first").await;
+    wait_export(&app).await;
     assert!(out.exists());
 
     server.verify().await;
@@ -764,6 +780,7 @@ async fn an_imported_file_is_a_recording_and_a_change_is_one_more_record() {
     let to = dir.path().join("out.txt").to_string_lossy().into();
     app.send(Command::Export { id: id.clone(), exporter: "pdf".into(), languages: vec![], to });
     app.notice("export.which").await;
+    wait_export(&app).await;
     let exported = fs::read_to_string(dir.path().join("out.md")).expect("it was exported");
     assert!(exported.starts_with("# Budget"));
     app.send(Command::Close);
@@ -998,7 +1015,7 @@ async fn the_core_runs_on_a_tree_with_a_name() {
     let app = App::with_log(hub::config(dir.path()), zutalk_log::Level::Debug);
 
     let starts = app.seen.of("task.start");
-    assert_eq!(starts.len(), 2);
+    assert_eq!(starts.len(), 3, "{starts:?}");
     assert!(
         starts
             .iter()
@@ -1011,10 +1028,16 @@ async fn the_core_runs_on_a_tree_with_a_name() {
             .any(|line| line.text("tree") == Some("core") && line.text("task") == Some("stats")),
         "expected stats task.start, got {starts:?}"
     );
+    assert!(
+        starts
+            .iter()
+            .any(|line| line.text("tree") == Some("work") && line.text("task") == Some("desk")),
+        "expected desk task.start, got {starts:?}"
+    );
 
     let tally = app.core.stats().tally();
     let started = tally.counts.iter().find(|row| row.name == "task.started").map(|row| row.n);
-    assert_eq!(started, Some(2));
+    assert_eq!(started, Some(3));
     assert_eq!(app.seen.refused(), 0);
 }
 
@@ -1713,5 +1736,482 @@ async fn reconnect_starts_nothing_for_a_recording_that_never_had_captions() {
 
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[test]
+fn refresh_coalescing_table_holds() {
+    use zutalk_core::app::hub::next_refresh;
+    assert_eq!(next_refresh(0, None, 0), None);
+    assert_eq!(next_refresh(1, None, 0), Some(1));
+    assert_eq!(next_refresh(5, Some(1), 0), None);
+    assert_eq!(next_refresh(5, None, 1), Some(5));
+    assert_eq!(next_refresh(5, None, 5), None);
+}
+
+#[tokio::test]
+async fn a_burst_of_changes_is_read_back_once_or_twice() {
+    use zutalk_core::record::shelf::{About, RECORDING};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec19burst01";
+    let shelf = hub::local_shelf(dir.path());
+    let about = About {
+        started: now,
+        length_ms: 1_000,
+        title: "start".into(),
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.len() == 1).await;
+
+    let (seq_before, _) = app.outlet.state.now();
+    let refreshes_before =
+        app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("refresh")).count();
+
+    for i in 0..50 {
+        app.send(Command::Change {
+            id: id.into(),
+            change: Change::Title { text: format!("title-{i}") },
+        });
+    }
+
+    let state = app.until(|s| s.library.iter().any(|r| r.title == "title-49")).await;
+    assert_eq!(state.library[0].title, "title-49");
+
+    // Wait for all 50 changes and any follow-up refresh to finish.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("change")).count() < 50 {
+        assert!(tokio::time::Instant::now() < deadline, "50 change jobs did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (seq_after, latest) = app.outlet.state.now();
+    assert_eq!(latest.library[0].title, "title-49");
+    let state_delta = seq_after - seq_before;
+    assert!(state_delta <= 3, "expected state seq delta <= 3, got {state_delta}");
+
+    let changes: Vec<_> =
+        app.seen.of("job.done").into_iter().filter(|l| l.text("kind") == Some("change")).collect();
+    assert_eq!(changes.len(), 50);
+    let mut prev_seq = 0u64;
+    for line in &changes {
+        assert_eq!(line.text("code"), Some("ok"), "{line:?}");
+        let seq = line.u64("job").expect("change job seq");
+        assert!(seq > prev_seq, "change seq not strictly increasing: {prev_seq} -> {seq}");
+        prev_seq = seq;
+    }
+
+    let refreshes_after =
+        app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("refresh")).count();
+    let refresh_delta = refreshes_after - refreshes_before;
+    assert!(refresh_delta <= 3, "expected <= 3 refreshes for 50 changes, got {refresh_delta}");
+
+    let tally = app.core.stats().tally();
+    let merged =
+        tally.counts.iter().find(|r| r.name == "refresh.merged").map_or(0, |r| r.n) as usize;
+    assert!(
+        merged + refresh_delta >= 50,
+        "expected refresh.merged ({merged}) + refreshes ({refresh_delta}) >= 50"
+    );
+
+    let turn_spread = tally.spreads.iter().find(|r| r.name == "hub.turn_us");
+    let slow_count = app.seen.of("hub.turn.slow").len();
+    eprintln!("P1-19 burst: hub.turn_us={turn_spread:?} hub.turn.slow={slow_count}");
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn an_export_writes_what_was_changed_just_before_it() {
+    use zutalk_core::record::shelf::{About, RECORDING};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec19exp01";
+    let shelf = hub::local_shelf(dir.path());
+    let about = About {
+        started: now,
+        length_ms: 1_000,
+        title: "Old Title".into(),
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.len() == 1).await;
+
+    let out = dir.path().join("fresh");
+    app.send(Command::Change {
+        id: id.into(),
+        change: Change::Title { text: "Fresh Title".into() },
+    });
+    app.send(Command::Export {
+        id: id.into(),
+        exporter: "markdown".into(),
+        languages: vec![],
+        to: out.to_string_lossy().into_owned(),
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !app
+        .seen
+        .of("job.done")
+        .iter()
+        .any(|l| l.text("kind") == Some("export.write") && l.text("code") == Some("ok"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "export.write did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let exported = fs::read_to_string(dir.path().join("fresh.md")).expect("exported file");
+    assert!(exported.starts_with("# Fresh Title"), "expected new title, got: {exported}");
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn a_search_asked_again_answers_only_the_last() {
+    use zutalk_core::live::lines::Line;
+    use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let shelf = hub::local_shelf(dir.path());
+    for (id, word) in [("rec19alpha", "alpha"), ("rec19beta", "beta")] {
+        let line = Line { language: "en".into(), text: format!("word {word}"), ..Line::default() };
+        let said = Said { line, via: [("text".to_string(), "hand".to_string())].into() };
+        shelf.put(id, LINE, &[(format!("{id}.1.00000"), Some(said))], now).expect("line");
+        let about = About {
+            started: now,
+            length_ms: 1_000,
+            spoken: vec!["en".into()],
+            take: 1,
+            ..About::default()
+        };
+        shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("recording");
+    }
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.len() == 2).await;
+
+    app.send(Command::Search { query: "alpha".into() });
+    app.send(Command::Search { query: "beta".into() });
+
+    let state = app.until(|s| !s.hits.is_empty()).await;
+    assert_eq!(state.hits.len(), 1, "{:?}", state.hits);
+    assert_eq!(state.hits[0].0, "rec19beta");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("search")).count() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "both search jobs did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let searches: Vec<_> =
+        app.seen.of("job.done").into_iter().filter(|l| l.text("kind") == Some("search")).collect();
+    assert!(
+        searches.iter().any(|l| l.text("code") == Some("stale")),
+        "expected a stale search job.done: {searches:?}"
+    );
+    assert!(
+        searches.iter().any(|l| l.text("code") == Some("ok")),
+        "expected an ok search job.done: {searches:?}"
+    );
+    let stale = app
+        .core
+        .stats()
+        .tally()
+        .counts
+        .into_iter()
+        .find(|r| r.name == "search.stale")
+        .map_or(0, |r| r.n);
+    assert!(stale >= 1, "expected search.stale >= 1");
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn a_desk_that_is_full_turns_commands_away_out_loud() {
+    use zutalk_core::record::shelf::{About, RECORDING};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec19full01";
+    let shelf = hub::local_shelf(dir.path());
+    let about = About {
+        started: now,
+        length_ms: 1_000,
+        title: "init".into(),
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.len() == 1).await;
+
+    for i in 0..200 {
+        app.send(Command::Change {
+            id: id.into(),
+            change: Change::Title { text: format!("v-{i}") },
+        });
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let done_changes = app
+            .seen
+            .of("job.done")
+            .iter()
+            .filter(|l| l.text("kind") == Some("change") && l.text("code") == Some("ok"))
+            .count();
+        let busy_cmds = app
+            .seen
+            .of("command.done")
+            .iter()
+            .filter(|l| l.text("kind") == Some("Change") && l.text("code") == Some("busy"))
+            .count();
+        if done_changes + busy_cmds == 200 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "desk burst did not settle: done={done_changes} busy={busy_cmds}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let about_path = dir
+        .path()
+        .join("records")
+        .join(hub::local_did().replace(':', "-"))
+        .join(id)
+        .join("about.jsonl");
+    let written = zu::Pack::read(&about_path).expect("about pack").records.len() - 1;
+    let busy_said =
+        app.seen.of("notice.said").iter().filter(|l| l.text("code") == Some("busy")).count();
+    let busy_cmds = app
+        .seen
+        .of("command.done")
+        .iter()
+        .filter(|l| l.text("kind") == Some("Change") && l.text("code") == Some("busy"))
+        .count();
+    let done_changes = app
+        .seen
+        .of("job.done")
+        .iter()
+        .filter(|l| l.text("kind") == Some("change") && l.text("code") == Some("ok"))
+        .count();
+
+    assert!(busy_said > 0, "expected at least one busy rejection on desk");
+    assert_eq!(busy_said + written, 200);
+    assert_eq!(done_changes, written);
+    assert_eq!(busy_cmds, busy_said);
+
+    let full_events: Vec<_> = app
+        .seen
+        .of("queue.full")
+        .into_iter()
+        .filter(|l| l.text("queue") == Some("desk") && l.text("policy") == Some("reject"))
+        .collect();
+    assert!(!full_events.is_empty(), "expected queue.full(desk, reject)");
+
+    let tally = app.core.stats().tally();
+    let desk_row = tally.queues.iter().find(|r| r.name == "desk").expect("desk queue row");
+    assert_eq!(desk_row.full, busy_said as u64);
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_whose_record_cannot_be_written_ends_saying_so() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    app.until(|_| true).await;
+
+    // Replace the local identity's records folder with a regular file so shelf.put fails.
+    let records_dir = dir.path().join("records");
+    fs::create_dir_all(&records_dir).expect("records dir");
+    let local_dir = records_dir.join(hub::local_did().replace(':', "-"));
+    fs::write(&local_dir, b"not-a-directory").expect("block records dir");
+
+    app.send(Command::Start);
+    app.notice("shelf").await;
+    app.session(|s| s.is_none()).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app.seen.of("recording.end").is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "recording.end did not arrive");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let tape_dir = dir.path().join("tape");
+    assert!(
+        !tape_dir.exists() || fs::read_dir(&tape_dir).expect("tape dir").next().is_none(),
+        "no tape should be left when initial record cannot be written"
+    );
+
+    let ends = app.seen.of("recording.end");
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0].level, zutalk_log::Level::Error);
+    assert_eq!(ends[0].text("code"), Some("shelf"));
+
+    let phases = app.seen.of("recording.phase");
+    assert!(!phases.is_empty(), "expected recording.phase events");
+    assert_eq!(phases.first().and_then(|l| l.text("from")), Some("Opening"));
+    assert_eq!(phases.last().and_then(|l| l.text("to")), Some("Ended"));
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn a_job_that_panics_is_one_failed_job_and_the_desk_goes_on() {
+    use std::sync::atomic::AtomicU64;
+    use zutalk_core::app::work::{Desk, DeskJob};
+    use zutalk_core::rt::supervise::Tree;
+
+    enum FakeJob {
+        Boom,
+        After,
+    }
+    impl DeskJob for FakeJob {
+        fn kind(&self) -> &'static str {
+            match self {
+                FakeJob::Boom => "boom",
+                FakeJob::After => "after",
+            }
+        }
+    }
+
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let stats = Stats::new();
+    let root = Tree::root("test", stats.clone());
+    let work_tree = root.child("work");
+    let (out_tx, mut out_rx) = queue::bounded::<(&'static str, Result<(), &'static str>)>(
+        &stats,
+        "test.desk.out",
+        8,
+        Full::Wait,
+    );
+    let desk = Desk::start(
+        &work_tree,
+        Arc::new(AtomicU64::new(1)),
+        |job: FakeJob| match job {
+            FakeJob::Boom => panic!("simulated desk panic"),
+            FakeJob::After => Ok(()),
+        },
+        move |kind, res| {
+            let out_tx = out_tx.clone();
+            async move {
+                let _ = out_tx.send((kind, res)).await;
+            }
+        },
+    );
+
+    desk.offer(FakeJob::Boom).expect("boom queued");
+    desk.offer(FakeJob::After).expect("after queued");
+
+    let first = out_rx.recv().await.expect("first result");
+    let second = out_rx.recv().await.expect("second result");
+    assert_eq!(first, ("boom", Err("panic")));
+    assert_eq!(second, ("after", Ok(())));
+
+    let done = seen.of("job.done");
+    assert_eq!(done.len(), 2, "{done:?}");
+    assert_eq!(done[0].level, zutalk_log::Level::Warn);
+    assert_eq!(done[0].text("kind"), Some("boom"));
+    assert_eq!(done[0].text("code"), Some("panic"));
+    assert_eq!(done[1].level, zutalk_log::Level::Info);
+    assert_eq!(done[1].text("kind"), Some("after"));
+    assert_eq!(done[1].text("code"), Some("ok"));
+
+    let tally = stats.tally();
+    assert_eq!(tally.counts.iter().find(|r| r.name == "jobs.failed").map(|r| r.n), Some(1));
+    assert_eq!(tally.counts.iter().find(|r| r.name == "jobs.done").map(|r| r.n), Some(1));
+    assert_eq!(seen.refused(), 0);
+    root.cancel();
+    root.wait().await;
+}
+
+#[tokio::test]
+async fn no_job_says_what_it_was_about() {
+    use zutalk_core::live::lines::Line;
+    use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec19priv01";
+    let secret_title = "QuartzTitleMarker77";
+    let secret_query = "ObsidianNeedle88";
+    let secret_path = "TopazPath99";
+
+    let shelf = hub::local_shelf(dir.path());
+    let line = Line {
+        language: "en".into(),
+        text: format!("Has {secret_query} inside."),
+        ..Line::default()
+    };
+    let said = Said { line, via: [("text".to_string(), "hand".to_string())].into() };
+    shelf.put(id, LINE, &[(format!("{id}.1.00000"), Some(said))], now).expect("line");
+    let about = About {
+        started: now,
+        length_ms: 1_000,
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("recording");
+
+    let mut app = App::start(dir.path());
+    app.until(|s| s.library.len() == 1).await;
+
+    let out = dir.path().join(secret_path);
+    app.send(Command::Change {
+        id: id.into(),
+        change: Change::Title { text: secret_title.into() },
+    });
+    app.send(Command::Search { query: secret_query.into() });
+    app.send(Command::Export {
+        id: id.into(),
+        exporter: "markdown".into(),
+        languages: vec![],
+        to: out.to_string_lossy().into_owned(),
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let done = app.seen.of("job.done");
+        let has = |k: &str| {
+            done.iter().any(|l| l.text("kind") == Some(k) && l.text("code") == Some("ok"))
+        };
+        if has("change") && has("search") && has("export.write") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "jobs did not finish: {done:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    for line in app.seen.all() {
+        let rendered = format!("{line:?}");
+        assert!(!rendered.contains(secret_title), "title leaked: {line:?}");
+        assert!(!rendered.contains(secret_query), "query leaked: {line:?}");
+        assert!(!rendered.contains(secret_path), "export path leaked: {line:?}");
+    }
     assert_eq!(app.seen.refused(), 0);
 }
