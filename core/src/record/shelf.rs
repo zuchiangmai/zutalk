@@ -40,6 +40,7 @@ pub struct About {
     /// whole-session transcription. Lines of other takes stay in the pack, unshown.
     pub take: u32,
     pub moved: bool, // from the 0.8 app, with the transcript it had there
+    pub topics: Vec<String>,
 }
 
 /// A recording's first words, for a list.

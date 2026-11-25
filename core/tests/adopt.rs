@@ -128,6 +128,7 @@ async fn first_sign_in_adopts_all_takes_notes_speakers_terms_and_keeps_audio_and
         source: "mic".into(),
         take: 1,
         moved: false,
+        ..About::default()
     };
 
     // Write take 0 (live draft) and take 1 (refined) lines.

@@ -12,7 +12,7 @@ use crate::capture::audio::{Notice, Source};
 use crate::capture::clock::{Block, wall_ms};
 use crate::capture::tape;
 use crate::id::keys::{self, Chain};
-use crate::knowledge::glossary::{self, Term};
+use crate::knowledge::topic::{self, TopicContext};
 use crate::live::frame::{Composer, Fit, Frame, MAX_COLUMNS, status};
 use crate::live::lane::{self, LANE_NAMES, Mode, Stream};
 use crate::live::lines::Line;
@@ -321,7 +321,7 @@ pub(crate) struct Start {
     pub shelf: Arc<Shelf>,
     pub keys: Arc<Chain>,
     pub config: Arc<Config>,
-    pub terms: Vec<Term>,
+    pub context: TopicContext,
     pub frame: Register<Frame>,
     pub session: Register<Option<Session>>,
     pub level: Register<SoundLevel>,
@@ -1153,6 +1153,17 @@ pub(crate) async fn run(mut start: Start) -> Done {
                 ));
 
                 let mut kicks = Vec::with_capacity(streams.len());
+                if !streams.is_empty() {
+                    info!(
+                        "topic.context",
+                        rec = Id(&start.id),
+                        where = "live",
+                        topics = start.context.topic_count,
+                        terms = start.context.terms.len(),
+                        pairs = start.context.translation_pairs.len(),
+                        text_chars = start.context.text.chars().count(),
+                    );
+                }
                 let base_setup = lane::Setup {
                     endpoint: start.config.realtime.clone(),
                     model: REALTIME.into(),
@@ -1160,7 +1171,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     ..lane::Setup::default()
                 };
                 for (n, stream) in streams.iter().cloned().enumerate() {
-                    let setup = glossary::live(&start.terms, &stream, base_setup.clone());
+                    let setup = topic::apply_live(&start.context, &stream, base_setup.clone());
                     let (kick_tx, kick_rx) = watch::channel(0u64);
                     kicks.push(kick_tx);
                     lane_specs.push((stream.clone(), setup.clone(), kick_rx.clone()));

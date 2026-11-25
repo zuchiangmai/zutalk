@@ -50,6 +50,8 @@ pub struct Setup {
     pub endpoint: String,
     pub model: String,                            // of the `stt-rt-` kind
     pub spoken: Vec<String>,                      // the languages expected in the room
+    pub general: Vec<(String, String)>,           // structured topic facts (`context.general`)
+    pub text: String,                             // bounded topic background (`context.text`)
     pub terms: Vec<String>,                       // names and words to listen for
     pub translation_terms: Vec<(String, String)>, // and how some of them are translated
 }
@@ -144,6 +146,13 @@ pub fn config(key: &str, kind: &Stream, setup: &Setup) -> Value {
         Stream::TwoWay(a, b) => json!({"type": "two_way", "language_a": a, "language_b": b}),
         Stream::OneWay(into) => json!({"type": "one_way", "target_language": into}),
     };
+    let general: Vec<Value> = setup
+        .general
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .map(|(k, v)| json!({"key": k, "value": v}))
+        .collect();
+    let text = if setup.text.trim().is_empty() { Value::Null } else { json!(setup.text) };
     let pair = |(source, target): &(String, String)| json!({"source": source, "target": target});
     let pairs: Vec<Value> = setup.translation_terms.iter().map(pair).collect();
     #[rustfmt::skip]
@@ -156,7 +165,12 @@ pub fn config(key: &str, kind: &Stream, setup: &Setup) -> Value {
         // The service ends a line where the speaker pauses. These are its balanced settings.
         "enable_endpoint_detection": true, "max_endpoint_delay_ms": 2_000,
         "endpoint_latency_adjustment_level": 0, "endpoint_sensitivity": 0.0,
-        "context": stated(json!({"terms": setup.terms, "translation_terms": pairs})),
+        "context": stated(json!({
+            "general": general,
+            "text": text,
+            "terms": setup.terms,
+            "translation_terms": pairs,
+        })),
         "translation": translation,
     });
     stated(config)

@@ -72,6 +72,7 @@ fn plan(soniox: &str, openrouter: &str, into: &[&str]) -> Plan {
         model: "stt-async-v6".into(),
         soniox: format!("{soniox}/v1"),
         openrouter: format!("{openrouter}/api/v1"),
+        ..Plan::default()
     }
 }
 
@@ -233,6 +234,96 @@ fn the_transcription_is_asked_with_the_glossary_and_the_topic() {
     );
     let bare = Plan { terms: Vec::new(), topic: String::new(), ..plan };
     assert!(transcription(&bare, NAME, "file-1")["context"].is_null());
+}
+
+#[test]
+fn live_and_refine_requests_carry_general_text_terms_and_translation_terms() {
+    use zutalk_core::knowledge::glossary::Term;
+    use zutalk_core::knowledge::topic::{
+        self, ALWAYS_TOPIC_ID, CONTEXT_PROMPT_BACKGROUND_CHARS, Topic, TopicFact, TranslationPair,
+    };
+    use zutalk_core::live::lane::{self, Setup as LaneSetup, Stream};
+
+    let topic_doc = Topic {
+        id: ALWAYS_TOPIC_ID.into(),
+        pinned: true,
+        domain: "Philosophy".into(),
+        facts: vec![TopicFact { key: "Book".into(), value: "Republic".into() }],
+        background: "Third night cave allegory notes. ".repeat(150),
+        terms: vec![Term { said: "Polis".into(), written: owned(&[("zh", "城邦")]) }],
+        translation_terms: vec![TranslationPair {
+            source: "Agora".into(), target: "广场".into()
+        }],
+        ..Topic::default()
+    };
+    let ctx = topic::assemble_context(&[topic_doc], &[], "Night Three");
+
+    // 1. Live `lane::config` carries general, text, terms, translation_terms on TwoWay.
+    let base = LaneSetup { model: "stt-rt-v6".into(), ..LaneSetup::default() };
+    let two_way = lane::config(
+        "k",
+        &Stream::TwoWay("en".into(), "zh".into()),
+        &topic::apply_live(&ctx, &Stream::TwoWay("en".into(), "zh".into()), base.clone()),
+    );
+    assert!(two_way["context"]["general"].as_array().unwrap().len() >= 3);
+    assert!(two_way["context"]["text"].as_str().unwrap().contains("cave allegory"));
+    assert!(two_way["context"]["terms"].as_array().unwrap().iter().any(|v| v == "Polis"));
+    assert!(two_way["context"]["terms"].as_array().unwrap().iter().any(|v| v == "Agora"));
+    let pairs = two_way["context"]["translation_terms"].as_array().unwrap();
+    assert!(pairs.iter().any(|p| p["source"] == "Agora" && p["target"] == "广场"));
+    assert!(pairs.iter().any(|p| p["source"] == "Polis" && p["target"] == "城邦"));
+
+    // Transcribe stream still carries general/text/terms, omits translation_terms.
+    let transcribe = lane::config(
+        "k",
+        &Stream::Transcribe,
+        &topic::apply_live(&ctx, &Stream::Transcribe, base.clone()),
+    );
+    assert!(transcribe["context"]["general"].is_array());
+    assert!(transcribe["context"]["text"].is_string());
+    assert!(transcribe["context"]["translation_terms"].is_null());
+
+    // Empty context omits `context` entirely.
+    let empty_cfg = lane::config("k", &Stream::TwoWay("en".into(), "zh".into()), &base);
+    assert!(empty_cfg["context"].is_null());
+
+    // 2. Refine Soniox `transcription()` carries general, text, terms, translation_terms.
+    let refine_plan = Plan {
+        general: ctx.general.clone(),
+        background: ctx.text.clone(),
+        terms: ctx.terms.iter().map(|t| (t.said.clone(), t.written.clone())).collect(),
+        translation_pairs: ctx
+            .translation_pairs
+            .iter()
+            .map(|p| (p.source.clone(), p.target.clone()))
+            .collect(),
+        topic: "Night Three".into(),
+        ..plan("https://s", "https://o", &["zh"])
+    };
+    let tr = transcription(&refine_plan, NAME, "file-1");
+    assert!(tr["context"]["general"].as_array().unwrap().len() >= 3);
+    assert!(tr["context"]["text"].as_str().unwrap().contains("cave allegory"));
+    assert!(tr["context"]["terms"].as_array().unwrap().iter().any(|v| v == "Agora"));
+    assert_eq!(
+        tr["context"]["translation_terms"],
+        json!([{ "source": "Agora", "target": "广场" }])
+    );
+
+    // 3. Refine OpenRouter `request()` injects bounded Facts, Background, Glossary, Pairs while
+    // preserving ZDR and strict JSON schema.
+    let l0 = line("en", "We talked about the Agora.");
+    let req = request(&MODELS[0], &refine_plan, &[], &[(0, &l0)]);
+    let system = req["messages"][0]["content"].as_str().expect("system prompt");
+    assert!(system.contains("Facts:"));
+    assert!(system.contains("Background:"));
+    assert!(system.contains("Glossary:"));
+    assert!(system.contains("Pairs:"));
+    assert!(system.contains("Agora"));
+    let bg_section = system.split("Background: ").nth(1).unwrap().split("\nPairs:").next().unwrap();
+    assert!(bg_section.chars().count() <= CONTEXT_PROMPT_BACKGROUND_CHARS);
+    assert_eq!(req["provider"]["zdr"], true);
+    assert_eq!(req["provider"]["data_collection"], "deny");
+    assert_eq!(req["response_format"]["json_schema"]["strict"], true);
 }
 
 #[test]

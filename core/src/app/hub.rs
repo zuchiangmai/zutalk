@@ -18,6 +18,7 @@ use crate::capture::audio::Source;
 use crate::capture::clock::wall_ms;
 use crate::id::identity::{self, AuthEvent, auth_step};
 use crate::id::keys::Service;
+use crate::knowledge::topic;
 use crate::live::frame::{Frame, MAX_COLUMNS};
 use crate::live::lane::{self, Mode};
 use crate::out::city::{Calendar, Filing};
@@ -454,7 +455,8 @@ impl Hub {
         match msg {
             Msg::Do(command) => self.command(command)?,
             Msg::Booted(out) => {
-                let BootOut { setup, signed } = *out;
+                let BootOut { mut setup, signed } = *out;
+                setup.topics = topic::normalize_selected_topics(setup.topics);
                 self.state.setup = setup;
                 self.apply_signed(signed);
                 self.set_boot(BootEvent::Ready, "boot");
@@ -522,7 +524,12 @@ impl Hub {
             Msg::Diagnosed => self.said.say("diagnose.done"),
             Msg::RotationSaved => self.state.rotation_unsaved = false,
             Msg::TopicRemembered => self.said.say("topic.remembered"),
-            Msg::TopicRemoved(_id) => {} // P6-02 removes `_id` from `self.state.setup.topics`
+            Msg::TopicRemoved(id) => {
+                if self.state.setup.topics.iter().any(|t| t == &id) {
+                    self.state.setup.topics.retain(|t| t != &id);
+                    let _ = self.work.save_setup(self.state.setup.clone()); // dropped: desk queue busy; next setup save persists cleaned topics
+                }
+            }
             Msg::InstallFailed(c) => {
                 self.set_boot(BootEvent::InstallFailed, "update.install");
                 return Err(c);
@@ -637,6 +644,7 @@ impl Hub {
                     return Err("captions.columns");
                 }
                 setup.caption = setup.caption.normalized();
+                setup.topics = topic::normalize_selected_topics(setup.topics);
                 if setup.caption.scene == self.state.setup.caption.scene
                     && setup.mode != self.state.setup.mode
                 {
@@ -915,14 +923,21 @@ impl Hub {
             }
             _ => String::new(),
         };
-        let (spoken, shown) = (setup.spoken, setup.shown);
+        let (spoken, shown, topics) = (setup.spoken, setup.shown, setup.topics);
         let captions = lane::captions(file, &shown, self.has_key(Service::Soniox));
         let initial = match &captions {
             Ok(_) => Status::Connecting,
             Err(why) => Status::AudioOnly { why: (*why).into() },
         };
-        let about =
-            About { started, title, spoken, shown, source: source_name, ..About::default() };
+        let about = About {
+            started,
+            title,
+            spoken,
+            shown,
+            source: source_name,
+            topics,
+            ..About::default()
+        };
         let (mode, watching) = watch::channel(Mode::Recording);
         let (reconnect, reconnect_rx) = watch::channel(0u64);
         self.work.start_recording(

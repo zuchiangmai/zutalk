@@ -6,6 +6,10 @@
 use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::capture::tape::{self, Pass};
 use crate::id::keys::{From, Keys, Lease, Service};
+use crate::knowledge::topic::{
+    CONTEXT_MAX_GENERAL_ITEMS, CONTEXT_MAX_TERMS, CONTEXT_MAX_TEXT_CHARS,
+    CONTEXT_MAX_TRANSLATION_TERMS, CONTEXT_PROMPT_BACKGROUND_CHARS,
+};
 use crate::live::lang::{self, Script, profile};
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::record::shelf::{self, About, LINE, RECORDING, Said, Shelf};
@@ -25,6 +29,7 @@ use std::{fs, path::Path, time::Duration};
 pub const WAV_QUEUE_CHUNKS: usize = 32;
 
 /// What to write, and with what. The services' addresses are here so a test can stand in.
+#[derive(Debug, Clone, Default)]
 pub struct Plan {
     pub id: String,
     pub spoken: Vec<String>,
@@ -32,6 +37,12 @@ pub struct Plan {
     /// The glossary: a term as it is said, and how each language writes it.
     pub terms: Vec<(String, BTreeMap<String, String>)>,
     pub topic: String,
+    /// Structured key-value facts from active topics (`context.general`).
+    pub general: Vec<(String, String)>,
+    /// Bounded narrative background from active topics (`context.text`).
+    pub background: String,
+    /// Explicit source -> target translation pairs from active topics (`context.translation_terms`).
+    pub translation_pairs: Vec<(String, String)>,
     pub model: String,      // of the `stt-async-` kind
     pub soniox: String,     // `https://api.soniox.com/v1`
     pub openrouter: String, // `https://openrouter.ai/api/v1`
@@ -213,14 +224,65 @@ pub fn transcription(plan: &Plan, name: &str, file: &str) -> Value {
         "language_hints": plan.spoken, "enable_language_identification": true,
         "enable_speaker_diarization": true,
     });
-    // The glossary goes to the recogniser too: it and the translator must agree on a name.
-    let terms = plan.terms.iter().flat_map(|(said, written)| written.values().chain([said]));
-    let terms: BTreeSet<&String> = terms.filter(|term| !term.is_empty()).collect();
+    // The glossary and active topic context go to the recogniser too so it and the translator
+    // agree on names, domain, background, and explicit pairs (`DECISIONS.md` #7).
+    let mut terms: BTreeSet<&str> = BTreeSet::new();
+    for (said, written) in &plan.terms {
+        if !said.is_empty() {
+            terms.insert(said.as_str());
+        }
+        for form in written.values() {
+            if !form.is_empty() {
+                terms.insert(form.as_str());
+            }
+        }
+    }
+    for (source, target) in &plan.translation_pairs {
+        if !source.is_empty() {
+            terms.insert(source.as_str());
+        }
+        if !target.is_empty() {
+            terms.insert(target.as_str());
+        }
+    }
+    let terms: Vec<&str> = terms.into_iter().take(CONTEXT_MAX_TERMS).collect();
     if !terms.is_empty() {
         body["context"]["terms"] = json!(terms);
     }
-    if !plan.topic.is_empty() {
-        body["context"]["general"] = json!([{ "key": "topic", "value": plan.topic }]);
+
+    let mut general: Vec<Value> = plan
+        .general
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .take(CONTEXT_MAX_GENERAL_ITEMS)
+        .map(|(k, v)| json!({ "key": k, "value": v }))
+        .collect();
+    let topic_trim = plan.topic.trim();
+    if !topic_trim.is_empty()
+        && general.len() < CONTEXT_MAX_GENERAL_ITEMS
+        && !plan.general.iter().any(|(k, v)| k == "topic" && v.trim() == topic_trim)
+    {
+        general.push(json!({ "key": "topic", "value": topic_trim }));
+    }
+    if !general.is_empty() {
+        body["context"]["general"] = json!(general);
+    }
+
+    let bg = plan.background.trim();
+    if !bg.is_empty() {
+        let excerpt: String = bg.chars().take(CONTEXT_MAX_TEXT_CHARS).collect();
+        body["context"]["text"] = json!(excerpt);
+    }
+
+    let pairs: Vec<Value> = plan
+        .translation_pairs
+        .iter()
+        .filter(|(s, t)| !s.trim().is_empty() && !t.trim().is_empty() && s != t)
+        .take(CONTEXT_MAX_TRANSLATION_TERMS)
+        .map(|(s, t)| json!({ "source": s, "target": t }))
+        .collect();
+    if !pairs.is_empty() {
+        body["context"]["translation_terms"] = json!(pairs);
     }
     body
 }
@@ -272,7 +334,32 @@ pub fn request(model: &Model, plan: &Plan, before: &[&Line], batch: &[(usize, &L
     let before: Vec<Value> = before.iter().map(|line| said(line)).collect();
     let into: BTreeMap<&String, &str> = plan.into.iter().map(|l| (l, profile(l).prompt)).collect();
     let (into, glossary) = (json!(into), json!(plan.terms));
-    let system = format!("{RULES}\nTopic: {}\nInto: {into}\nGlossary: {glossary}", plan.topic);
+    let mut system = format!("{RULES}\nTopic: {}\nInto: {into}\nGlossary: {glossary}", plan.topic);
+    let facts: Vec<Value> = plan
+        .general
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .take(CONTEXT_MAX_GENERAL_ITEMS)
+        .map(|(k, v)| json!({ "key": k, "value": v }))
+        .collect();
+    if !facts.is_empty() {
+        system.push_str(&format!("\nFacts: {}", json!(facts)));
+    }
+    let bg = plan.background.trim();
+    if !bg.is_empty() {
+        let excerpt: String = bg.chars().take(CONTEXT_PROMPT_BACKGROUND_CHARS).collect();
+        system.push_str(&format!("\nBackground: {excerpt}"));
+    }
+    let pairs: Vec<Value> = plan
+        .translation_pairs
+        .iter()
+        .filter(|(s, t)| !s.trim().is_empty() && !t.trim().is_empty() && s != t)
+        .take(CONTEXT_MAX_TRANSLATION_TERMS)
+        .map(|(s, t)| json!({ "source": s, "target": t }))
+        .collect();
+    if !pairs.is_empty() {
+        system.push_str(&format!("\nPairs: {}", json!(pairs)));
+    }
     let object = |required: Value, properties: Value| {
         json!({ "type": "object", "additionalProperties": false,
                 "required": required, "properties": properties })

@@ -7,4 +7,4 @@ import type { Sound } from "./Sound";
  * What the next recording will be, which a recording freezes; the interface's language; and
  * how long audio stays on this device once a recording's record is written (`retain`).
  */
-export type Setup = { spoken: Array<string>, shown: Array<string>, sound: Sound, device: string | null, mode: Mode, language: string | null, keep: number | null, caption: CaptionPrefs, city: string | null, };
+export type Setup = { spoken: Array<string>, shown: Array<string>, sound: Sound, device: string | null, mode: Mode, language: string | null, keep: number | null, caption: CaptionPrefs, city: string | null, topics: Array<string>, };

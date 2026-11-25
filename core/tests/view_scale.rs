@@ -789,6 +789,7 @@ async fn i3_rebuild_queries_and_draft_stay_within_bounds() {
             source: "mic".into(),
             take: 0,
             moved: false,
+            ..About::default()
         };
         shelf.put(&id, RECORDING, &[(id.clone(), Some(about))], started).expect("write about");
         let lines = vec![

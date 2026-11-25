@@ -5,6 +5,7 @@
 //! bounded UTF-8 file reading live in thin helpers called off-hub on `desk`.
 
 use crate::knowledge::glossary::{self, Term};
+use crate::live::lane::{Setup as LaneSetup, Stream};
 use crate::live::lang::profile;
 use crate::record::shelf::{Shelf, TOPIC};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,16 @@ pub const TOPIC_IMPORT_BACKGROUND_CHARS: usize = 1_200;
 pub const MAX_SELECTED_TOPICS: usize = 8;
 /// Maximum byte length of a topic id so `settings.json` stays compact and plain (`P6.md` §3.2).
 pub const TOPIC_ID_MAX_BYTES: usize = 64;
+/// Bounded Soniox `context.general` items across active topics (`P6.md` §3.2).
+pub const CONTEXT_MAX_GENERAL_ITEMS: usize = 24;
+/// Bounded Soniox `context.text` chars leaving headroom under the 10k limit (`P6.md` §3.2).
+pub const CONTEXT_MAX_TEXT_CHARS: usize = 8_000;
+/// Bounded Soniox `context.terms` strings (`P6.md` §3.2).
+pub const CONTEXT_MAX_TERMS: usize = 300;
+/// Bounded Soniox `context.translation_terms` pairs (`P6.md` §3.2).
+pub const CONTEXT_MAX_TRANSLATION_TERMS: usize = 300;
+/// Bounded background narrative chars injected into OpenRouter system prompts (`P6.md` §3.2).
+pub const CONTEXT_PROMPT_BACKGROUND_CHARS: usize = 2_400;
 
 const MAX_CANDIDATE_CHARS: usize = 40; // short term or phrase suitable as a glossary candidate
 const MIN_CANDIDATE_CHARS: usize = 2; // ignore single-character noise when extracting suggestions
@@ -674,4 +685,201 @@ pub fn put_always_term(
     }
     save(shelf, always, now)?;
     Ok(())
+}
+
+/// Assembled context from the pinned `"always"` topic plus this recording's selected topics
+/// (`DECISIONS.md` #7). Redacts every content field in `Debug` so terms and background text can
+/// never reach logs (`CLAUDE.md` Principle 6).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct TopicContext {
+    pub topic_count: usize,
+    pub general: Vec<(String, String)>,
+    pub text: String,
+    pub terms: Vec<Term>,
+    pub translation_pairs: Vec<TranslationPair>,
+}
+
+impl std::fmt::Debug for TopicContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopicContext")
+            .field("topic_count", &self.topic_count)
+            .field("general_len", &self.general.len())
+            .field("text_chars", &self.text.chars().count())
+            .field("terms_len", &self.terms.len())
+            .field("pairs_len", &self.translation_pairs.len())
+            .finish()
+    }
+}
+
+/// Pure sanitizer for `Setup.topics`: trims, excludes `"always"` (always included automatically),
+/// drops invalid/oversized ids, deduplicates in order, and caps at [`MAX_SELECTED_TOPICS`].
+pub fn normalize_selected_topics(ids: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for raw in ids {
+        let id = raw.trim();
+        if id.is_empty() || id == ALWAYS_TOPIC_ID || !valid_id(id) {
+            continue;
+        }
+        if seen.insert(id.to_owned()) {
+            out.push(id.to_owned());
+            if out.len() >= MAX_SELECTED_TOPICS {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Pure context assembler (`DECISIONS.md` #7): merges ONLY pinned topics and topics explicitly
+/// listed in `selected_ids` (ignoring deleted/missing ids), enforcing all character and item caps.
+pub fn assemble_context(
+    all_topics: &[Topic],
+    selected_ids: &[String],
+    recording_title: &str,
+) -> TopicContext {
+    let mut active: Vec<&Topic> = Vec::new();
+    let mut included_ids: BTreeSet<&str> = BTreeSet::new();
+
+    for topic in all_topics {
+        if topic.pinned && included_ids.insert(topic.id.as_str()) {
+            active.push(topic);
+        }
+    }
+    for sel in selected_ids {
+        let sel = sel.trim();
+        if sel.is_empty() || sel == ALWAYS_TOPIC_ID {
+            continue;
+        }
+        if let Some(topic) = all_topics.iter().find(|t| !t.pinned && t.id == sel)
+            && included_ids.insert(topic.id.as_str())
+        {
+            active.push(topic);
+        }
+    }
+
+    let mut seen_general = BTreeSet::new();
+    let mut general = Vec::new();
+    let mut push_general = |k: &str, v: &str| {
+        if general.len() >= CONTEXT_MAX_GENERAL_ITEMS {
+            return;
+        }
+        let k = k.trim();
+        let v = v.trim();
+        if k.is_empty() || v.is_empty() {
+            return;
+        }
+        let dedup = (profile("").key(k), profile("").key(v));
+        if seen_general.insert(dedup) {
+            general.push((k.to_owned(), v.to_owned()));
+        }
+    };
+    push_general("topic", recording_title);
+    for topic in &active {
+        push_general("domain", &topic.domain);
+        for fact in &topic.facts {
+            push_general(&fact.key, &fact.value);
+        }
+    }
+
+    let backgrounds: Vec<&str> =
+        active.iter().map(|t| t.background.trim()).filter(|bg| !bg.is_empty()).collect();
+    let text: String = backgrounds.join("\n\n").chars().take(CONTEXT_MAX_TEXT_CHARS).collect();
+
+    let mut term_indices: BTreeMap<String, usize> = BTreeMap::new();
+    let mut terms: Vec<Term> = Vec::new();
+    for topic in &active {
+        for term in &topic.terms {
+            let said = term.said.trim();
+            if said.is_empty() {
+                continue;
+            }
+            let key = profile("").key(said);
+            if let Some(&idx) = term_indices.get(&key) {
+                for (lang, form) in &term.written {
+                    let form = form.trim();
+                    if !lang.trim().is_empty() && !form.is_empty() {
+                        terms[idx].written.insert(lang.trim().to_owned(), form.to_owned());
+                    }
+                }
+            } else if terms.len() < CONTEXT_MAX_TERMS {
+                term_indices.insert(key, terms.len());
+                terms.push(Term {
+                    said: said.to_owned(),
+                    written: clean_written(term.written.clone()),
+                });
+            }
+        }
+    }
+
+    let mut seen_pairs = BTreeSet::new();
+    let mut translation_pairs = Vec::new();
+    for topic in &active {
+        for pair in &topic.translation_terms {
+            if translation_pairs.len() >= CONTEXT_MAX_TRANSLATION_TERMS {
+                break;
+            }
+            let source = pair.source.trim();
+            let target = pair.target.trim();
+            if source.is_empty() || target.is_empty() || source == target {
+                continue;
+            }
+            let dedup = (profile("").key(source), profile("").key(target));
+            if seen_pairs.insert(dedup) {
+                translation_pairs
+                    .push(TranslationPair { source: source.to_owned(), target: target.to_owned() });
+            }
+        }
+    }
+
+    TopicContext { topic_count: active.len(), general, text, terms, translation_pairs }
+}
+
+/// Projects an assembled [`TopicContext`] onto one live Soniox stream setup (`P6.md` §3.3).
+pub fn apply_live(ctx: &TopicContext, stream: &Stream, setup: LaneSetup) -> LaneSetup {
+    let into = match stream {
+        Stream::Transcribe => vec![],
+        Stream::TwoWay(a, b) => vec![a, b],
+        Stream::OneWay(into) => vec![into],
+    };
+    let mut heard: BTreeSet<String> = BTreeSet::new();
+    let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for term in &ctx.terms {
+        let forms: BTreeSet<&String> = term.written.values().chain([&term.said]).collect();
+        for form in &forms {
+            if !form.is_empty() {
+                heard.insert((*form).clone());
+            }
+        }
+        for target in into.iter().map(|into| term.written.get(*into).unwrap_or(&term.said)) {
+            for form in forms.iter().filter(|form| **form != target) {
+                pairs.insert(((*form).clone(), target.clone()));
+            }
+        }
+    }
+    for pair in &ctx.translation_pairs {
+        if !pair.source.is_empty() {
+            heard.insert(pair.source.clone());
+        }
+        if !pair.target.is_empty() {
+            heard.insert(pair.target.clone());
+        }
+        if !into.is_empty()
+            && !pair.source.is_empty()
+            && !pair.target.is_empty()
+            && pair.source != pair.target
+        {
+            pairs.insert((pair.source.clone(), pair.target.clone()));
+        }
+    }
+
+    let general: Vec<(String, String)> =
+        ctx.general.iter().take(CONTEXT_MAX_GENERAL_ITEMS).cloned().collect();
+    let text: String = ctx.text.chars().take(CONTEXT_MAX_TEXT_CHARS).collect();
+    let terms: Vec<String> = heard.into_iter().take(CONTEXT_MAX_TERMS).collect();
+    let translation_terms: Vec<(String, String)> =
+        pairs.into_iter().take(CONTEXT_MAX_TRANSLATION_TERMS).collect();
+
+    LaneSetup { general, text, terms, translation_terms, ..setup }
 }

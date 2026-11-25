@@ -13,7 +13,7 @@ use crate::capture::tape;
 use crate::id::identity::{self, PendingSignIn};
 use crate::id::keys::{self, Chain, Me, Ours, SIGN_IN_WAIT_MS, Secret, Service, SignIn, Who};
 use crate::id::quota;
-use crate::knowledge::glossary::{self, Term};
+use crate::knowledge::glossary;
 use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
@@ -250,11 +250,10 @@ struct Snapshot {
 }
 
 /// Updated write target returned by [`IndexSync::recording_sealed`] so post-seal refinement
-/// runs against the active shelf (including a newly adopted person shelf) with fresh keys/terms.
+/// runs against the active shelf (including a newly adopted person shelf) with fresh keys.
 pub(crate) struct SealTarget {
     shelf: Arc<Shelf>,
     keys: Arc<Chain>,
-    terms: Vec<Term>,
 }
 
 enum SyncKind {
@@ -492,7 +491,6 @@ struct DeskEnv {
     identity: Arc<Mutex<Identity>>,
     index: Mutex<Option<Index>>,
     views: Arc<ViewEngine>,
-    terms: Arc<Mutex<Vec<Term>>>,
     topics: Arc<Mutex<Vec<Topic>>>,
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
@@ -533,8 +531,6 @@ pub(crate) struct Work {
     results: Tx<Msg>,
     progress_reg: Register<Progress>,
     views: Arc<ViewEngine>,
-    terms: Arc<Mutex<Vec<Term>>>,
-    #[allow(dead_code)] // read in P6-02 when assembling TopicContext on start_recording
     topics: Arc<Mutex<Vec<Topic>>>,
     said: Voice,
     root: Tree,
@@ -575,7 +571,6 @@ impl Work {
         let next_seq = Arc::new(AtomicU64::new(1));
         let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
         let identity = Arc::new(Mutex::new(Identity::starting()));
-        let terms: Arc<Mutex<Vec<Term>>> = Arc::new(Mutex::new(Vec::new()));
         let topics: Arc<Mutex<Vec<Topic>>> = Arc::new(Mutex::new(Vec::new()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
@@ -591,7 +586,6 @@ impl Work {
             identity: identity.clone(),
             index: Mutex::new(None),
             views: views.clone(),
-            terms: terms.clone(),
             topics: topics.clone(),
             invite: invite.clone(),
             signing: signing.clone(),
@@ -846,7 +840,6 @@ impl Work {
             results,
             progress_reg,
             views,
-            terms,
             topics,
             said,
             root,
@@ -867,8 +860,8 @@ impl Work {
         }
     }
 
-    fn current_terms(&self) -> Vec<Term> {
-        self.terms.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    fn current_topics(&self) -> Vec<Topic> {
+        self.topics.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn index_sync(&self) -> IndexSync {
@@ -1486,7 +1479,8 @@ impl Work {
         let snap = snapshot(&self.identity);
         let shelf = snap.shelf?;
         let keys = snap.keys;
-        let terms = self.current_terms();
+        let topics = self.current_topics();
+        let context = topic::assemble_context(&topics, &about.topics, &about.title);
         let index_sync = self.index_sync();
         let rec_start = recording::Start {
             id: id.clone(),
@@ -1498,7 +1492,7 @@ impl Work {
             shelf: shelf.clone(),
             keys: keys.clone(),
             config: self.config.clone(),
-            terms: terms.clone(),
+            context,
             frame,
             session,
             level,
@@ -1528,7 +1522,6 @@ impl Work {
             next_seq: self.next_seq.clone(),
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
-            terms,
             manual: false,
             from_state: RefineStatus::Draft { why: None },
         };
@@ -1544,7 +1537,6 @@ impl Work {
         let snap = snapshot(&self.identity);
         let Ok(shelf) = snap.shelf else { return };
         let keys = snap.keys;
-        let terms = self.current_terms();
         let tapes = self.config.tapes();
         let soniox = self.config.soniox.clone();
         let said = self.said.clone();
@@ -1594,7 +1586,6 @@ impl Work {
                     next_seq: next_seq.clone(),
                     jobs_done: jobs_done.clone(),
                     jobs_failed: jobs_failed.clone(),
-                    terms: terms.clone(),
                     manual: false,
                     from_state: RefineStatus::Draft { why: None },
                 };
@@ -1615,7 +1606,6 @@ impl Work {
             });
             return;
         };
-        let terms = self.current_terms();
         let ctx = WriteCtx {
             id,
             started_by: shelf.by().to_owned(),
@@ -1633,7 +1623,6 @@ impl Work {
             next_seq: self.next_seq.clone(),
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
-            terms,
             manual: true,
             from_state: from,
         };
@@ -2291,7 +2280,6 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<
                 let guard = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.who.person().map(|me| me.did.clone())
             };
-            let current_terms = || env.terms.lock().unwrap_or_else(PoisonError::into_inner).clone();
             if started_by.starts_with("did:key:")
                 && let Some(person_did) = person_did
             {
@@ -2323,8 +2311,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<
                                 Some(&local_shelf),
                                 Some(&person_did),
                             );
-                            let target =
-                                SealTarget { shelf, keys: snap.keys, terms: current_terms() };
+                            let target = SealTarget { shelf, keys: snap.keys };
                             return (Some(local_status), Some(target));
                         }
                         Ok(_) => {
@@ -2350,7 +2337,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<
                 env.views.invalidate(ViewKind::Search, None);
                 env.views.invalidate(ViewKind::Recording, Some(id.clone()));
                 env.views.invalidate(ViewKind::Transcript, Some(id));
-                return (None, Some(SealTarget { shelf, keys: snap.keys, terms: current_terms() }));
+                return (None, Some(SealTarget { shelf, keys: snap.keys }));
             }
             (None, None)
         }
@@ -2546,6 +2533,7 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Ok(json) => match serde_json::from_slice::<Setup>(&json) {
             Ok(mut setup) => {
                 setup.caption = setup.caption.normalized();
+                setup.topics = topic::normalize_selected_topics(setup.topics);
                 let ms = t.elapsed().as_millis() as u64;
                 info!("boot.step", step = "settings", code = "ok", ms = ms);
                 setup
@@ -2735,7 +2723,6 @@ fn run_sign(
         refresh_topic_caches(env, shelf);
     } else {
         *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = Vec::new();
-        *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = Vec::new();
     }
 
     let refreshed = match run_refresh(env, &snap, 0, Some(keep)) {
@@ -2784,10 +2771,7 @@ fn run_sign(
 
 fn refresh_topic_caches(env: &DeskEnv, shelf: &Shelf) {
     if let Ok(list) = topic::list(shelf) {
-        let always_terms =
-            list.iter().find(|t| t.pinned).map(|t| t.terms.clone()).unwrap_or_default();
         *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = list;
-        *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = always_terms;
     }
 }
 
@@ -3329,7 +3313,6 @@ struct WriteCtx {
     next_seq: Arc<AtomicU64>,
     jobs_done: Counter,
     jobs_failed: Counter,
-    terms: Vec<Term>,
     manual: bool,
     from_state: RefineStatus,
 }
@@ -3391,7 +3374,6 @@ impl WriteCtx {
                     self.started_by = target.shelf.by().to_owned();
                     self.shelf = target.shelf;
                     self.keys = target.keys;
-                    self.terms = target.terms;
                 }
                 let key = self.keys.from(Service::Soniox) != From::Nowhere;
                 match write::owed(about.take == 0, audio, about.moved, key) {
@@ -3431,7 +3413,6 @@ impl WriteCtx {
 
     async fn write_job(&self) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let terms: Vec<_> = self.terms.iter().cloned().map(|t| (t.said, t.written)).collect();
         let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
         let slot_ref = &slot;
         let state: Mutex<RefineStatus> = Mutex::new(self.from_state.clone());
@@ -3476,14 +3457,37 @@ impl WriteCtx {
                         self.views
                             .set_active_refine(self.id.clone(), Some(("closing".into(), 0, 0)));
                     }
+                    let all_topics = topic::list(&self.shelf).unwrap_or_default();
+                    let ctx = topic::assemble_context(&all_topics, &about.topics, &about.title);
+                    info!(
+                        "topic.context",
+                        rec = Id(&self.id),
+                        where = "refine",
+                        topics = ctx.topic_count,
+                        terms = ctx.terms.len(),
+                        pairs = ctx.translation_pairs.len(),
+                        text_chars = ctx.text.chars().count(),
+                    );
                     let key = keys::derive("tape", &self.id)?;
                     let (soniox, openrouter) =
                         (self.config.soniox.clone(), self.config.openrouter.clone());
-                    let (id, spoken, into, topic) =
-                        (self.id.clone(), about.spoken, about.shown, about.title);
-                    let (model, terms) = (WHOLE.into(), terms.clone());
-                    let plan =
-                        write::Plan { id, spoken, into, terms, topic, model, soniox, openrouter };
+                    let terms: Vec<_> =
+                        ctx.terms.into_iter().map(|t| (t.said, t.written)).collect();
+                    let translation_pairs: Vec<_> =
+                        ctx.translation_pairs.into_iter().map(|p| (p.source, p.target)).collect();
+                    let plan = write::Plan {
+                        id: self.id.clone(),
+                        spoken: about.spoken,
+                        into: about.shown,
+                        terms,
+                        topic: about.title,
+                        general: ctx.general,
+                        background: ctx.text,
+                        translation_pairs,
+                        model: WHOLE.into(),
+                        soniox,
+                        openrouter,
+                    };
                     let progress = |step: &str, done: usize, of: usize| {
                         let (done, of) = (done as u32, of as u32);
                         let w = Writing { done, of, ..writing(&self.id, step) };

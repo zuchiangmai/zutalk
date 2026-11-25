@@ -117,6 +117,7 @@ export const EMPTY: State = {
     keep: null,
     caption: DEFAULT_CAPTION_PREFS,
     city: null,
+    topics: [],
   },
   devices: [],
   languages: ['en', 'fr', 'es', 'de', 'zh', 'ja', 'ko', 'th'],
@@ -252,6 +253,7 @@ export function mockBus(recording = false): Bus {
       keep: 30,
       caption: structuredClone(DEFAULT_CAPTION_PREFS),
       city: 'demo.city.local',
+      topics: [],
     },
     devices: [
       { id: 'mbp', name: 'MacBook Pro Microphone', default: true },

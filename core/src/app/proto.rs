@@ -342,6 +342,8 @@ pub struct Setup {
     pub caption: CaptionPrefs,
     #[serde(default)]
     pub city: Option<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]

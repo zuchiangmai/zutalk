@@ -3,18 +3,31 @@
 
 mod hub;
 
-use hub::{App, STORE, nobody};
+use futures_util::{SinkExt, StreamExt};
+use hub::{
+    App, Asked, NOWHERE, STORE, config, config_on, nobody, shelf, signed_in, soniox, store, tape,
+};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
-use zutalk_core::app::proto::{Command, Query, QueryValue};
+use zutalk_core::app::hub::Config;
+use zutalk_core::app::proto::{Command, Query, QueryValue, RefineStatus, Setup as AppSetup};
+use zutalk_core::id::keys;
 use zutalk_core::knowledge::glossary::{self, Term};
 use zutalk_core::knowledge::topic::{
-    self, ALWAYS_TOPIC_ID, TOPIC_IMPORT_BACKGROUND_CHARS, TOPIC_IMPORT_MAX_BYTES, TOPIC_MAX_CHARS,
-    TOPIC_MAX_SUGGESTED_TERMS, Topic, TopicFact, TranslationPair,
+    self, ALWAYS_TOPIC_ID, CONTEXT_MAX_GENERAL_ITEMS, CONTEXT_MAX_TERMS, CONTEXT_MAX_TEXT_CHARS,
+    CONTEXT_MAX_TRANSLATION_TERMS, MAX_SELECTED_TOPICS, TOPIC_IMPORT_BACKGROUND_CHARS,
+    TOPIC_IMPORT_MAX_BYTES, TOPIC_MAX_CHARS, TOPIC_MAX_SUGGESTED_TERMS, Topic, TopicFact,
+    TranslationPair,
 };
-use zutalk_core::record::shelf::Shelf;
+use zutalk_core::live::lines::Line;
+use zutalk_core::record::shelf::{About, LINE, RECORDING, Said, Shelf};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const NOW: i64 = 1_800_000_000_000;
@@ -307,5 +320,422 @@ async fn topic_commands_and_queries_work_without_sign_in_and_emit_safe_events() 
     {
         assert!(!dumped.contains(secret), "topic secret `{secret}` leaked into logs");
     }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[test]
+fn assemble_context_includes_pinned_and_selected_only_and_enforces_budgets() {
+    let always = Topic {
+        id: ALWAYS_TOPIC_ID.into(),
+        pinned: true,
+        domain: "AlwaysDomain".into(),
+        facts: vec![TopicFact { key: "Org".into(), value: "AlwaysOrg".into() }],
+        background: "Always background notes.".into(),
+        terms: vec![Term { said: "AlwaysTerm".into(), written: owned(&[("zh", "常驻词")]) }],
+        translation_terms: vec![TranslationPair {
+            source: "AlwaysSrc".into(),
+            target: "AlwaysDst".into(),
+        }],
+        ..Topic::default()
+    };
+
+    // Selected Topic A has huge background + many facts/terms/pairs to exercise every ceiling.
+    let mut facts_a = Vec::new();
+    for i in 0..30 {
+        facts_a.push(TopicFact { key: format!("k{i}"), value: format!("SelectedFact{i}") });
+    }
+    let mut terms_a = Vec::new();
+    for i in 0..320 {
+        terms_a.push(Term { said: format!("SelectedTerm{i}"), written: BTreeMap::new() });
+    }
+    let mut pairs_a = Vec::new();
+    for i in 0..320 {
+        pairs_a.push(TranslationPair { source: format!("SrcA{i}"), target: format!("DstA{i}") });
+    }
+    let topic_a = Topic {
+        id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        name: "Topic A".into(),
+        domain: "SelectedDomainA".into(),
+        facts: facts_a,
+        background: "精选背景中文。".repeat(2_000),
+        terms: terms_a,
+        translation_terms: pairs_a,
+        ..Topic::default()
+    };
+
+    // Unselected Topic B must NEVER leak into assembled context.
+    let topic_b = Topic {
+        id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        name: "Secret Topic B".into(),
+        domain: "UNSELECTED_DOMAIN_B".into(),
+        facts: vec![TopicFact { key: "Secret".into(), value: "UNSELECTED_FACT_B".into() }],
+        background: "UNSELECTED_BACKGROUND_B".into(),
+        terms: vec![Term {
+            said: "UNSELECTED_TERM_B".into(),
+            written: owned(&[("zh", "UNSELECTED_ZH_B")]),
+        }],
+        translation_terms: vec![TranslationPair {
+            source: "UNSELECTED_SRC_B".into(),
+            target: "UNSELECTED_DST_B".into(),
+        }],
+        ..Topic::default()
+    };
+
+    // Also include a missing/deleted topic id to confirm it is ignored cleanly without error.
+    let selected = vec![topic_a.id.clone(), "deadbeefdeadbeefdeadbeefdeadbeef".into()];
+    let ctx = topic::assemble_context(&[always, topic_a, topic_b], &selected, "Session Title");
+
+    assert_eq!(ctx.topic_count, 2);
+    assert!(ctx.general.len() <= CONTEXT_MAX_GENERAL_ITEMS);
+    assert!(ctx.text.chars().count() <= CONTEXT_MAX_TEXT_CHARS);
+    assert!(ctx.terms.len() <= CONTEXT_MAX_TERMS);
+    assert!(ctx.translation_pairs.len() <= CONTEXT_MAX_TRANSLATION_TERMS);
+
+    // Pinned `always` + selected Topic A + recording title are present.
+    assert!(ctx.general.iter().any(|(k, v)| k == "topic" && v == "Session Title"));
+    assert!(ctx.general.iter().any(|(k, v)| k == "domain" && v == "AlwaysDomain"));
+    assert!(ctx.general.iter().any(|(k, v)| k == "domain" && v == "SelectedDomainA"));
+    assert!(ctx.text.contains("Always background notes."));
+    assert!(ctx.text.contains("精选背景中文。"));
+    assert!(ctx.terms.iter().any(|t| t.said == "AlwaysTerm"));
+    assert!(ctx.terms.iter().any(|t| t.said == "SelectedTerm0"));
+    assert!(ctx.translation_pairs.iter().any(|p| p.source == "AlwaysSrc"));
+    assert!(ctx.translation_pairs.iter().any(|p| p.source == "SrcA0"));
+
+    // Unselected Topic B is 100% absent from every field.
+    let serialized =
+        format!("{:?} {} {:?} {:?}", ctx.general, ctx.text, ctx.terms, ctx.translation_pairs);
+    for forbidden in [
+        "UNSELECTED_DOMAIN_B",
+        "UNSELECTED_FACT_B",
+        "UNSELECTED_BACKGROUND_B",
+        "UNSELECTED_TERM_B",
+        "UNSELECTED_ZH_B",
+        "UNSELECTED_SRC_B",
+        "UNSELECTED_DST_B",
+    ] {
+        assert!(!serialized.contains(forbidden), "unselected `{forbidden}` leaked into context");
+    }
+
+    // TopicContext Debug is strictly redacted (prints only counts/lengths, zero content).
+    let debug = format!("{ctx:?}");
+    assert!(debug.contains("topic_count"));
+    assert!(debug.contains("text_chars"));
+    for secret in
+        ["AlwaysTerm", "AlwaysDomain", "Always background", "SelectedTerm0", "Session Title"]
+    {
+        assert!(!debug.contains(secret), "TopicContext Debug leaked `{secret}`: {debug}");
+    }
+
+    // normalize_selected_topics drops always, blanks, invalid/oversized ids, deduplicates, caps at 8.
+    let mut many: Vec<String> = (0..12).map(|i| format!("{i:032x}")).collect();
+    many.insert(0, ALWAYS_TOPIC_ID.into());
+    many.insert(1, "  ".into());
+    many.insert(2, "x".repeat(70));
+    many.insert(3, format!("{:032x}", 0));
+    let clean = topic::normalize_selected_topics(many);
+    assert_eq!(clean.len(), MAX_SELECTED_TOPICS);
+    assert!(!clean.iter().any(|id| id == ALWAYS_TOPIC_ID));
+    assert_eq!(clean[0], format!("{:032x}", 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_topic_reaches_live_and_refine_while_unselected_topic_stays_local() {
+    let _store = STORE.lock().await;
+    signed_in();
+    keys::set("openrouter", Some(b"or-own-test-key")).expect("openrouter key");
+    let (dir, asked_soniox) = (tempfile::tempdir().expect("tempdir"), Asked::default());
+    let stt = soniox(&asked_soniox).await;
+
+    // Stand-in OpenRouter capturing translation request body.
+    let asked_or: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked_or_tap = asked_or.clone();
+    let openrouter = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/chat/completions"))
+        .respond_with(move |req: &Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            asked_or_tap.lock().unwrap().push(body);
+            let reply = json!({
+                "lines": [{ "id": 0, "unclear": false, "facts": [], "to": { "zh": "在祖扎鲁讨论雅典城邦。" } }]
+            });
+            ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": { "content": reply.to_string() }
+                }]
+            }))
+        })
+        .mount(&openrouter)
+        .await;
+
+    let realtime = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ws");
+    let config = Config {
+        soniox: format!("{}/v1", stt.uri()),
+        openrouter: format!("{}/api/v1", openrouter.uri()),
+        realtime: format!("ws://{}", realtime.local_addr().expect("addr")),
+        ..config(dir.path())
+    };
+    let mut app = App::with(config);
+    app.until(|_| true).await;
+
+    // Seed pinned `always`, selected topic A, and unselected topic B.
+    app.send(Command::SaveTopic {
+        topic: Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            terms: vec![Term {
+                said: "AlwaysAlpha".into(), written: owned(&[("zh", "常驻词甲")])
+            }],
+            ..Topic::default()
+        },
+    });
+    app.send(Command::SaveTopic {
+        topic: Topic {
+            name: "Book Club A".into(),
+            domain: "SelectedDomainA".into(),
+            facts: vec![TopicFact { key: "Book".into(), value: "RepublicA".into() }],
+            background: "SelectedBackgroundA explains the cave allegory.".into(),
+            terms: vec![Term { said: "PolisAlpha".into(), written: owned(&[("zh", "城邦甲")]) }],
+            translation_terms: vec![TranslationPair {
+                source: "AgoraAlpha".into(),
+                target: "广场甲".into(),
+            }],
+            ..Topic::default()
+        },
+    });
+    app.send(Command::SaveTopic {
+        topic: Topic {
+            name: "Private Topic B".into(),
+            domain: "UnselectedDomainB".into(),
+            facts: vec![TopicFact { key: "Secret".into(), value: "UnselectedFactB".into() }],
+            background: "UnselectedBackgroundB must never leave this device.".into(),
+            terms: vec![Term {
+                said: "SecretBetaTerm".into(),
+                written: owned(&[("zh", "秘密词乙")]),
+            }],
+            translation_terms: vec![TranslationPair {
+                source: "SecretBetaSrc".into(),
+                target: "秘密乙".into(),
+            }],
+            ..Topic::default()
+        },
+    });
+
+    let summaries = loop {
+        if let Ok(reply) = app.query(Query::Topics).await
+            && let QueryValue::Topics(list) = reply.value
+            && list.iter().any(|t| t.name == "Book Club A")
+            && list.iter().any(|t| t.name == "Private Topic B")
+        {
+            break list;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let id_a = summaries.iter().find(|t| t.name == "Book Club A").unwrap().id.clone();
+
+    // Select ONLY Topic A in Setup, then start recording.
+    app.send(Command::Setup {
+        setup: AppSetup {
+            spoken: vec!["en".into(), "zh".into()],
+            shown: vec!["en".into(), "zh".into()],
+            topics: vec![id_a.clone()],
+            ..AppSetup::default()
+        },
+    });
+    app.until(|s| s.setup.topics == vec![id_a.clone()]).await;
+    app.send(Command::Start);
+
+    // 1. Live WebSocket first config frame carries always + A, zero B.
+    let (stream, _) = realtime.accept().await.expect("ws accept");
+    let mut ws = accept_async(stream).await.expect("ws handshake");
+    let Some(Ok(Message::Text(first_raw))) = ws.next().await else {
+        panic!("missing live config frame");
+    };
+    let first: Value = serde_json::from_str(&first_raw).expect("ws json");
+    let first_dump = first.to_string();
+    assert!(first_dump.contains("AlwaysAlpha"), "live missing always term: {first_dump}");
+    assert!(first_dump.contains("SelectedDomainA"), "live missing A domain: {first_dump}");
+    assert!(first_dump.contains("SelectedBackgroundA"), "live missing A background: {first_dump}");
+    assert!(first_dump.contains("PolisAlpha"), "live missing A term: {first_dump}");
+    assert!(first_dump.contains("AgoraAlpha"), "live missing A pair: {first_dump}");
+    for forbidden in [
+        "UnselectedDomainB",
+        "UnselectedFactB",
+        "UnselectedBackgroundB",
+        "SecretBetaTerm",
+        "SecretBetaSrc",
+    ] {
+        assert!(!first_dump.contains(forbidden), "live leaked unselected `{forbidden}`");
+    }
+
+    tokio::spawn(async move {
+        while let Some(Ok(message)) = ws.next().await {
+            if matches!(&message, Message::Text(text) if text.is_empty()) {
+                let finished = json!({ "tokens": [], "finished": true }).to_string();
+                let _ = ws.send(Message::text(finished)).await;
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    app.send(Command::Stop);
+
+    // 2. Refine Soniox async POST /transcriptions + OpenRouter POST /chat/completions.
+    let wait = async {
+        while asked_soniox.lock().unwrap().is_empty() || asked_or.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), wait).await.expect("refine requests sent");
+
+    let soniox_dump = asked_soniox.lock().unwrap()[0].to_string();
+    assert!(soniox_dump.contains("AlwaysAlpha"));
+    assert!(soniox_dump.contains("SelectedDomainA"));
+    assert!(soniox_dump.contains("SelectedBackgroundA"));
+    assert!(soniox_dump.contains("PolisAlpha"));
+    assert!(soniox_dump.contains("AgoraAlpha"));
+    for forbidden in [
+        "UnselectedDomainB",
+        "UnselectedFactB",
+        "UnselectedBackgroundB",
+        "SecretBetaTerm",
+        "SecretBetaSrc",
+    ] {
+        assert!(!soniox_dump.contains(forbidden), "soniox leaked unselected `{forbidden}`");
+    }
+
+    let or_dump = asked_or.lock().unwrap()[0].to_string();
+    assert!(or_dump.contains("SelectedDomainA"));
+    assert!(or_dump.contains("SelectedBackgroundA"));
+    assert!(or_dump.contains("PolisAlpha"));
+    assert!(or_dump.contains("AgoraAlpha"));
+    for forbidden in [
+        "UnselectedDomainB",
+        "UnselectedFactB",
+        "UnselectedBackgroundB",
+        "SecretBetaTerm",
+        "SecretBetaSrc",
+    ] {
+        assert!(!or_dump.contains(forbidden), "openrouter leaked unselected `{forbidden}`");
+    }
+
+    // 3. Structured `topic.context` logs emitted for live & refine with zero content leak.
+    let ctx_events = app.seen.of("topic.context");
+    assert!(
+        ctx_events.iter().any(|l| l.text("where") == Some("live") && l.u64("topics") == Some(2))
+    );
+    assert!(
+        ctx_events.iter().any(|l| l.text("where") == Some("refine") && l.u64("topics") == Some(2))
+    );
+    let log_dump = format!("{:?}", app.seen.all());
+    for secret in [
+        "AlwaysAlpha",
+        "SelectedDomainA",
+        "SelectedBackgroundA",
+        "PolisAlpha",
+        "AgoraAlpha",
+        "UnselectedBackgroundB",
+        "SecretBetaTerm",
+    ] {
+        assert!(!log_dump.contains(secret), "logs leaked `{secret}`");
+    }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn granted_key_async_refusal_keeps_draft_with_clear_code_after_topic_context() {
+    let _store = STORE.lock().await;
+    store(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let s = shelf(dir.path());
+    let saved_topic = topic::save(
+        &s,
+        Topic {
+            name: "Quota Context Topic".into(),
+            background: "Background kept local when quota key is refused.".into(),
+            terms: vec![Term { said: "QuotaTerm".into(), written: BTreeMap::new() }],
+            ..Topic::default()
+        },
+        NOW,
+    )
+    .expect("save topic");
+
+    let rec_id = "19a00000009quota403";
+    let about = About {
+        started: NOW,
+        length_ms: 2_000,
+        title: "Quota Refine Test".into(),
+        spoken: vec!["en".into()],
+        shown: vec!["en".into()],
+        take: 0,
+        topics: vec![saved_topic.id.clone()],
+        ..About::default()
+    };
+    s.put(rec_id, RECORDING, &[(rec_id.into(), Some(about))], NOW).expect("seed about");
+    let draft_line = Said {
+        line: Line {
+            t0: 0,
+            t1: 1_000,
+            speaker: "1".into(),
+            language: "en".into(),
+            text: "draft survives refusal".into(),
+            ..Line::default()
+        },
+        via: BTreeMap::from([("text".into(), "stt-rt-v6".into())]),
+    };
+    s.put(rec_id, LINE, &[(format!("{rec_id}.0.00000"), Some(draft_line))], NOW + 1)
+        .expect("seed draft");
+    tape(dir.path(), rec_id, 2);
+
+    // Granted Soniox key server + 403 refusing Soniox async endpoint.
+    let our_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/lease"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "key": "sk-granted-temp", "left": 5_000_000 })),
+        )
+        .mount(&our_server)
+        .await;
+
+    let refusing_soniox = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&refusing_soniox)
+        .await;
+
+    let mut app = App::with(Config {
+        soniox: format!("{}/v1", refusing_soniox.uri()),
+        openrouter: NOWHERE.into(),
+        ..config_on(dir.path(), &our_server.uri())
+    });
+
+    app.notice("keys.async_refused").await;
+    app.wait_recording(rec_id, |r| {
+        r.is_some_and(|v| {
+            v.row.draft
+                && matches!(v.refine, RefineStatus::Failed { ref code, .. } if code == "keys.async_refused")
+        })
+    })
+    .await;
+
+    // Draft line is intact.
+    let chunk = app.transcript(rec_id, Some(0), 0).await;
+    assert_eq!(chunk.lines.len(), 1);
+    assert_eq!(chunk.lines[0].1.line.text, "draft survives refusal");
+
+    // Observability: topic.context(where="refine") + refine.state(to="Failed", why="keys.async_refused").
+    assert!(
+        app.seen
+            .of("topic.context")
+            .iter()
+            .any(|l| l.text("where") == Some("refine") && l.u64("topics") == Some(2))
+    );
+    assert!(app.seen.of("refine.state").iter().any(|l| {
+        l.text("to") == Some("Failed") && l.text("why") == Some("keys.async_refused")
+    }));
     assert_eq!(app.seen.refused(), 0);
 }

@@ -84,6 +84,7 @@ fn write_recording(
         source: "mic".into(),
         take,
         moved: false,
+        ..About::default()
     };
     shelf.put(id, RECORDING, &[(id.to_owned(), Some(about))], started).expect("write about");
     for (t, lines) in takes_lines {
@@ -910,6 +911,7 @@ async fn core_query_reflects_recording_notes_changes_search_takes_and_invalidate
                     source: "mic".into(),
                     take: 0,
                     moved: true,
+                    ..About::default()
                 }),
             )],
             NOW + 10_000,
