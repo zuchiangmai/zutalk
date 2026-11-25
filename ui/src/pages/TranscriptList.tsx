@@ -6,7 +6,7 @@ import type { Note } from '$proto/Note';
 import type { Query } from '$proto/Query';
 import type { Said } from '$proto/Said';
 import type { TranscriptChunk } from '$proto/TranscriptChunk';
-import { clock, t, useQueries } from '../bus';
+import { clock, t, useQueries, word } from '../bus';
 import { Icon } from '../ds/icons';
 import { Pill, Tag } from '../ds/primitives';
 
@@ -152,6 +152,19 @@ export function TranscriptList({
     return map;
   }, [compareQueries, compareStates]);
 
+  const chunkErrorMap = useMemo(() => {
+    const map = new Map<number, string>();
+    const queries = compare ? compareQueries : transcriptQueries;
+    const states = compare ? compareStates : transcriptStates;
+    for (let i = 0; i < queries.length; i++) {
+      const st = states[i];
+      if (st?.status === 'error' && st.error) {
+        map.set(queries[i].chunk, st.error);
+      }
+    }
+    return map;
+  }, [compare, compareQueries, compareStates, transcriptQueries, transcriptStates]);
+
   const chunk0Transcript = transcriptMap.get(0) ?? null;
   const chunk0Compare = compareMap.get(0) ?? null;
 
@@ -245,12 +258,20 @@ export function TranscriptList({
     setEditingSpeaker(null);
   };
 
-  const loadingInitial = compare
-    ? compareStates[0]?.status === 'loading' && !chunk0Compare
-    : transcriptStates[0]?.status === 'loading' && !chunk0Transcript;
+  const initialState = compare ? compareStates[0] : transcriptStates[0];
+  const hasChunk0 = compare ? chunk0Compare !== null : chunk0Transcript !== null;
 
-  if (loadingInitial) {
-    return <p className="k">{t('reader.loading')}</p>;
+  if (!hasChunk0) {
+    if (initialState?.status === 'error') {
+      return (
+        <p className="k" role="status">
+          {word('code', initialState.error ?? 'busy')}
+        </p>
+      );
+    }
+    if (!initialState || initialState.status === 'idle' || initialState.status === 'loading') {
+      return <p className="k">{t('reader.loading')}</p>;
+    }
   }
 
   if (totalLines === 0) {
@@ -273,13 +294,16 @@ export function TranscriptList({
         if (compare) {
           const row: CompareRow | undefined = compareMap.get(chunkIdx)?.rows[offset];
           if (!row) {
+            const errCode = chunkErrorMap.get(chunkIdx);
             return (
               <li key={index} data-row-index={index} className="tl-row">
                 <div className="who">
                   <span className="num">…</span>
                 </div>
                 <div>
-                  <p className="k">{t('reader.loading')}</p>
+                  <p className="k" role={errCode ? 'status' : undefined}>
+                    {errCode ? word('code', errCode) : t('reader.loading')}
+                  </p>
                 </div>
               </li>
             );
@@ -324,13 +348,16 @@ export function TranscriptList({
 
         const entry = transcriptMap.get(chunkIdx)?.lines[offset];
         if (!entry) {
+          const errCode = chunkErrorMap.get(chunkIdx);
           return (
             <li key={index} data-row-index={index} className="tl-row">
               <div className="who">
                 <span className="num">…</span>
               </div>
               <div>
-                <p className="k">{t('reader.loading')}</p>
+                <p className="k" role={errCode ? 'status' : undefined}>
+                  {errCode ? word('code', errCode) : t('reader.loading')}
+                </p>
               </div>
             </li>
           );

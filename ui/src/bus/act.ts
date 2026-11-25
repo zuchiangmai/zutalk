@@ -9,17 +9,19 @@ function refusalCode(err: unknown): string {
   return 'busy';
 }
 
-/** Sends a command to the active bus; any rejection surfaces as a stable notice code. */
-export async function send(command: Command): Promise<void> {
+/** Sends a command to the active bus; returns true on success, or surfaces a notice code and returns false. */
+export async function send(command: Command): Promise<boolean> {
   const bus = getBus();
   if (!bus) {
     say('starting');
-    return;
+    return false;
   }
   try {
     await bus.send(command);
+    return true;
   } catch (err) {
     say(refusalCode(err));
+    return false;
   }
 }
 
@@ -31,14 +33,16 @@ export function pick(name?: string): Promise<string | null> {
     : save({ defaultPath: name });
 }
 
-/** Soft-deletes a recording, leaves its page if open, and offers an 8 s undo notice. */
-export async function removeWithUndo(id: string): Promise<void> {
+/** Soft-deletes a recording; only leaves its page and posts an 8 s undo notice if Remove succeeds. */
+export async function removeWithUndo(id: string): Promise<boolean> {
+  const ok = await send({ do: 'Remove', id });
+  if (!ok) return false;
   navigate({ is: 'RecordingRemoved', id });
-  await send({ do: 'Remove', id });
   say('remove', { do: 'Restore', id });
+  return true;
 }
 
 /** Exports a privacy-safe diagnostic bundle via the core. */
-export function diagnose(): Promise<void> {
+export function diagnose(): Promise<boolean> {
   return send({ do: 'Diagnose' });
 }

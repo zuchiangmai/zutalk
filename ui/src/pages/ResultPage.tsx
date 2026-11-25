@@ -279,9 +279,25 @@ export function ResultPage({ id }: { id: string }) {
 
   const recording = recQuery.data;
   if (!recording || !recording.row) {
+    if (recQuery.status === 'error') {
+      return (
+        <section className="doc">
+          <p className="k" role="status">
+            {word('code', recQuery.error ?? 'busy')}
+          </p>
+        </section>
+      );
+    }
+    if (recQuery.status === 'idle' || recQuery.status === 'loading') {
+      return (
+        <section className="doc">
+          <p className="k">{t('reader.loading')}</p>
+        </section>
+      );
+    }
     return (
       <section className="doc">
-        <p className="k">{recQuery.status === 'loading' ? t('reader.loading') : t('code.recording.gone')}</p>
+        <p className="k">{t('code.recording.gone')}</p>
       </section>
     );
   }

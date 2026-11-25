@@ -400,4 +400,49 @@ describe('ReaderPage virtualization, Compare, inline edits, notes, and confirmab
     const notices = noticesSource.getSnapshot();
     expect(notices.some((n) => n.code === 'remove' && n.undo?.do === 'Restore' && n.undo.id === 'rec-1')).toBe(true);
   });
+
+  it('surfaces Recording and Transcript query errors instead of reporting gone or empty transcript', async () => {
+    // 1. Query::Recording fails with 'index'
+    const recErrBus: Bus = {
+      async send() {},
+      async query() {
+        throw 'index';
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+    stopBus = startBus(recErrBus);
+    const first = render(<ReaderPage id="rec-err" />);
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
+    });
+    expect(screen.queryByText('This recording is no longer there')).toBeNull();
+    first.unmount();
+    stopBus();
+    resetChannel();
+
+    // 2. Query::Recording succeeds but Query::Transcript chunk 0 fails with 'index'
+    const rec = makeRecording();
+    const txErrBus: Bus = {
+      async send() {},
+      async query(q): Promise<QueryReply> {
+        if (q.view === 'Recording') {
+          return { version: 1, value: { view: 'Recording', data: rec } };
+        }
+        throw 'index';
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+    stopBus = startBus(txErrBus);
+    render(<ReaderPage id="rec-1" />);
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
+    });
+    expect(screen.queryByText('No transcript yet')).toBeNull();
+  });
 });

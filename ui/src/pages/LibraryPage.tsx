@@ -95,6 +95,7 @@ export type LibraryViewProps = {
   rows: readonly LibraryRow[];
   hasMore: boolean;
   loading: boolean;
+  error?: string | null;
   filter: LibraryFilter;
   languages: readonly string[];
   searchText: string;
@@ -115,6 +116,7 @@ export function LibraryView({
   rows,
   hasMore,
   loading,
+  error = null,
   filter,
   languages,
   searchText,
@@ -287,15 +289,33 @@ export function LibraryView({
                   </div>
                 )}
               </VList>
+            ) : error ? (
+              <p
+                className="read"
+                role="status"
+                style={{ margin: '48px 0', fontSize: 17, color: 'var(--danger)' }}
+              >
+                {word('code', error)}
+              </p>
             ) : (
               <p className="read" style={{ margin: '48px 0', fontSize: 17, color: 'var(--ink3)' }}>
                 {t('nomatch')}
               </p>
             )
           ) : rows.length === 0 ? (
-            <p className="read" style={{ margin: '48px 0', fontSize: 17, color: 'var(--ink3)' }}>
-              {loading ? t('reader.loading') : t('nomatch')}
-            </p>
+            error ? (
+              <p
+                className="read"
+                role="status"
+                style={{ margin: '48px 0', fontSize: 17, color: 'var(--danger)' }}
+              >
+                {word('code', error)}
+              </p>
+            ) : (
+              <p className="read" style={{ margin: '48px 0', fontSize: 17, color: 'var(--ink3)' }}>
+                {loading ? t('reader.loading') : t('nomatch')}
+              </p>
+            )
           ) : (
             <>
               <VList
@@ -454,6 +474,7 @@ export function LibraryPage({ initialMonth = null }: { initialMonth?: string | n
       rows={accumulatedRows}
       hasMore={monthQuery.data?.has_more ?? false}
       loading={monthQuery.status === 'loading'}
+      error={debouncedSearch ? searchQuery.error : (monthQuery.error ?? summaryQuery.error)}
       filter={filter}
       languages={state?.languages ?? []}
       searchText={searchText}

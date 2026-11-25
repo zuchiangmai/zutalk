@@ -9,7 +9,7 @@ import type { Session } from '$proto/Session';
 import type { State } from '$proto/State';
 import type { Tally } from '$proto/Tally';
 import { EMPTY, mockBus } from '../dev/mock';
-import { send } from '../src/bus/act';
+import { removeWithUndo, send } from '../src/bus/act';
 import {
   frameSource,
   levelSource,
@@ -26,7 +26,7 @@ import {
   take,
 } from '../src/bus/channel';
 import { QUERY_CACHE_MAX_ENTRIES, QueryCache, queryCache, queryKey } from '../src/bus/query';
-import { routeSource, routeStep, type Route } from '../src/bus/route';
+import { go, routeSource, routeStep, type Route } from '../src/bus/route';
 import { formatMonth, system, ui } from '../src/bus/words';
 
 const EMPTY_FILTER: LibraryFilter = {
@@ -153,9 +153,26 @@ describe('bus channel and state semantics', () => {
       send: () => Promise.reject('busy'),
       listen: () => () => {},
     });
-    await send({ do: 'Start' });
+    const ok = await send({ do: 'Start' });
     stop();
+    expect(ok).toBe(false);
     expect(noticesSource.getSnapshot().at(-1)?.code).toBe('busy');
+  });
+
+  it('keeps current route and preserves refusal notice when removeWithUndo is rejected', async () => {
+    const stop = startBus({
+      send: () => Promise.reject('busy'),
+      listen: () => () => {},
+    });
+    go({ page: 'reader', id: 'r1' });
+    const ok = await removeWithUndo('r1');
+    stop();
+
+    expect(ok).toBe(false);
+    expect(routeSource.getSnapshot()).toEqual({ page: 'reader', id: 'r1' });
+    const notices = noticesSource.getSnapshot();
+    expect(notices.at(-1)?.code).toBe('busy');
+    expect(notices.some((n) => n.code === 'remove')).toBe(false);
   });
 
   it('coalesces 15 Frame and 15 Level bursts into a single rAF commit with the latest seq', () => {

@@ -233,6 +233,45 @@ describe('LibraryPage month rail, filters, debounced search, and undo remove', (
     fireEvent.click(screen.getByText('Matched search phrase in chapter three'));
     expect(routeSource.getSnapshot()).toEqual({ page: 'reader', id: 'rec-0', lineKey: 'k3' });
   });
+
+  it('surfaces LibraryMonth and Search query errors instead of showing No matching recordings', async () => {
+    const bus: Bus = {
+      async send() {},
+      async query(q): Promise<QueryReply> {
+        if (q.view === 'LibrarySummary') {
+          return {
+            version: 1,
+            value: { view: 'LibrarySummary', data: { total: 2, months: [{ month: '2026-11', count: 2 }] } },
+          };
+        }
+        throw 'index';
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    render(<LibraryPage />);
+
+    // Browse mode error (LibraryMonth rejected with 'index')
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
+    });
+    expect(screen.queryByText('No matching recordings')).toBeNull();
+
+    // Search mode error (Search rejected with 'index')
+    const searchInput = screen.getByRole('searchbox', { name: 'Search recordings' });
+    fireEvent.change(searchInput, { target: { value: 'hello' } });
+    await waitFor(
+      () => {
+        expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
+        expect(screen.queryByText('No matching recordings')).toBeNull();
+      },
+      { timeout: 1000 },
+    );
+  });
 });
 
 describe('SettingsPage', () => {
