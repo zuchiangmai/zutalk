@@ -2,5 +2,6 @@
 
 /**
  * A recording in a list. A draft's text is still the live one.
+ * Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
  */
 export type Row = { id: string, started: number, length_ms: number, title: string, preview: string, spoken: Array<string>, draft: boolean, audio: boolean, };

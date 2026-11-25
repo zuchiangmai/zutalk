@@ -4,7 +4,7 @@ use hub::{App, Asked, STORE, config, shelf, signed_in, soniox, tape, wav};
 use std::fs;
 use std::path::Path;
 use zutalk_core::ai::write::Journal;
-use zutalk_core::app::proto::{Command, Row, Setup, State};
+use zutalk_core::app::proto::{Command, LibraryRow, RefineStatus, Setup};
 use zutalk_core::capture::clock::{BLOCK, Block, wall_ms};
 use zutalk_core::capture::tape::{self as tapes, Pass, Writer};
 use zutalk_core::live::lines::Line;
@@ -104,8 +104,8 @@ fn kept(data: &Path, id: &str, started: i64, take: u32) {
     tape(data, id, 1);
 }
 
-fn audio(state: &State, id: &str) -> Option<bool> {
-    state.library.iter().find(|row| row.id == id).map(|row| row.audio)
+fn audio(rows: &[LibraryRow], id: &str) -> Option<bool> {
+    rows.iter().find(|row| row.id == id).map(|row| row.audio)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -119,8 +119,9 @@ async fn at_start_up_audio_the_person_let_go_is_destroyed_and_audio_not_yet_writ
     kept(data, "olddraft", now - 400 * DAY, 0);
     // Kept until destroyed, as the 0.8 app kept it: nothing goes.
     let mut app = App::with(config(data));
-    let state = app.until(|state| state.library.len() == 3).await;
-    assert!(state.library.iter().all(|row| row.audio), "{:?}", state.library);
+    let state = app.until(|_| true).await;
+    let rows = app.wait_library(|rows| rows.len() == 3).await;
+    assert!(rows.iter().all(|row| row.audio), "{rows:?}");
     assert_eq!(state.setup.keep, None);
     app.send(Command::Setup { setup: Setup { keep: Some(30), ..Setup::default() } });
     app.until(|state| state.setup.keep == Some(30)).await;
@@ -136,16 +137,16 @@ async fn at_start_up_audio_the_person_let_go_is_destroyed_and_audio_not_yet_writ
     }
     drop(app);
     // Thirty days: at the next start the old written one's audio goes, and its text stays.
-    let mut app = App::with(config(data));
-    let state = app.until(|state| state.library.len() == 3).await;
-    assert_eq!(audio(&state, "oldwritten"), Some(false));
-    assert_eq!(audio(&state, "newwritten"), Some(true));
-    assert_eq!(audio(&state, "olddraft"), Some(true), "its record is not written yet");
+    let app = App::with(config(data));
+    let rows = app.wait_library(|rows| rows.len() == 3).await;
+    assert_eq!(audio(&rows, "oldwritten"), Some(false));
+    assert_eq!(audio(&rows, "newwritten"), Some(true));
+    assert_eq!(audio(&rows, "olddraft"), Some(true), "its record is not written yet");
     assert!(!data.join("tape/oldwritten").exists() && data.join("tape/olddraft").exists());
-    app.send(Command::Open { id: "oldwritten".into() });
-    let open = app.until(|state| state.open.is_some()).await.open.expect("it opens");
-    assert_eq!(open.lines[0].1.line.text, "Said in oldwritten.");
-    assert!(!open.row.audio && !open.row.draft);
+    let rec = app.recording("oldwritten").await.expect("it opens");
+    let tr = app.transcript("oldwritten", None, 0).await;
+    assert_eq!(tr.lines[0].1.line.text, "Said in oldwritten.");
+    assert!(!rec.row.audio && !rec.row.draft);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -157,18 +158,18 @@ async fn audio_destroyed_at_the_persons_word_is_gone_for_good_and_its_text_stays
     kept(data, "written", now, 1);
     kept(data, "draft", now, 0);
     let mut app = App::with(config(data));
-    let state = app.until(|state| state.library.len() == 2).await;
-    assert_eq!((audio(&state, "written"), audio(&state, "draft")), (Some(true), Some(true)));
+    let rows = app.wait_library(|rows| rows.len() == 2).await;
+    assert_eq!((audio(&rows, "written"), audio(&rows, "draft")), (Some(true), Some(true)));
     app.send(Command::DestroyAudio { id: "written".into() });
-    app.until(|state| audio(state, "written") == Some(false)).await;
+    app.wait_library(|rows| audio(rows, "written") == Some(false)).await;
     assert!(!data.join("tape/written").exists());
     // A draft whose write left something at the service: the journal stays for the sweep.
     let owed = vec!["files/file-1".to_string()];
     let journal = Journal { name: Some("zutalk-draft.wav".into()), owed, take: 0, failed: None };
     journal.save(&data.join("tape/draft")).expect("the journal is kept");
     app.send(Command::DestroyAudio { id: "draft".into() });
-    let state = app.until(|state| audio(state, "draft") == Some(false)).await;
-    assert!(state.library.iter().all(|row| !row.audio));
+    let rows = app.wait_library(|rows| audio(rows, "draft") == Some(false)).await;
+    assert!(rows.iter().all(|row| !row.audio));
     app.send(Command::DestroyAudio { id: "nowhere".into() });
     app.notice("recording.gone").await;
     // Not while it is being recorded.
@@ -180,14 +181,13 @@ async fn audio_destroyed_at_the_persons_word_is_gone_for_good_and_its_text_stays
     app.session(|s| s.is_none()).await;
     drop(app);
     // Started again, the draft without its audio is not written again: its text stays.
-    let mut app = App::with(config(data));
-    let state = app.until(|state| state.library.iter().any(|row| row.id == "draft")).await;
-    let draft = state.library.iter().find(|row| row.id == "draft").expect("still there");
+    let app = App::with(config(data));
+    let rows = app.wait_library(|rows| rows.iter().any(|row| row.id == "draft")).await;
+    let draft = rows.iter().find(|row| row.id == "draft").expect("still there");
     assert!(draft.draft && !draft.audio);
-    assert!(state.writing.iter().all(|w| w.id != "draft"), "{:?}", state.writing);
-    app.send(Command::Open { id: "draft".into() });
-    let open = app.until(|state| state.open.is_some()).await.open.expect("it opens");
-    assert_eq!(open.lines[0].1.line.text, "Said in draft.");
+    assert!(app.outlet.progress.now().1.refine.as_ref().is_none_or(|w| w.id != "draft"));
+    let tr = app.transcript("draft", None, 0).await;
+    assert_eq!(tr.lines[0].1.line.text, "Said in draft.");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -209,16 +209,15 @@ async fn once_the_record_is_written_audio_kept_only_until_then_goes() {
     app.send(Command::Import { path: file.to_string_lossy().into() });
     // Once its tape is sealed the audio stays until it is written; then it goes, and the
     // transcript is the text.
-    let gone = |state: &State| {
-        let kept = |row: &Row| row.audio || !row.draft || row.length_ms == 0;
-        assert!(state.library.iter().all(kept), "{:?}", state.library);
-        state.library.iter().any(|row| !row.draft && !row.audio)
+    let gone = |rows: &[LibraryRow]| {
+        let kept = |row: &LibraryRow| row.audio || !row.draft || row.length_ms == 0;
+        assert!(rows.iter().all(kept), "{rows:?}");
+        rows.iter().any(|row| !row.draft && !row.audio)
     };
-    let row = app.until(gone).await.library[0].clone();
+    let row = app.wait_library(gone).await[0].clone();
     assert!(!data.join("tape").join(&row.id).exists());
-    app.send(Command::Open { id: row.id.clone() });
-    let open = app.until(|state| state.open.is_some()).await.open.expect("it opens");
-    assert_eq!(open.lines[0].1.line.text, "Zuzalu is in Chiang Mai.");
+    let tr = app.transcript(&row.id, None, 0).await;
+    assert_eq!(tr.lines[0].1.line.text, "Zuzalu is in Chiang Mai.");
     assert_eq!(asked.lock().expect("one at a time").len(), 1);
     assert!(fs::read_dir(data.join("tape")).expect("the folder").next().is_none());
 }
@@ -339,11 +338,12 @@ async fn transcripts_are_written_one_at_a_time() {
         .mount(&server)
         .await;
 
-    let mut app = App::with(zutalk_core::app::hub::Config {
+    let app = App::with(zutalk_core::app::hub::Config {
         soniox: format!("{}/v1", server.uri()),
         ..config(data)
     });
-    app.until(|s| ids.iter().all(|id| s.library.iter().any(|r| r.id == *id && !r.draft))).await;
+    app.wait_library(|rows| ids.iter().all(|id| rows.iter().any(|r| r.id == *id && !r.draft)))
+        .await;
 
     assert_eq!(peak.load(Ordering::SeqCst), 1, "writes must never overlap");
     let spans = spans.lock().unwrap().clone();
@@ -459,29 +459,31 @@ async fn one_that_waits_to_try_again_does_not_hold_up_the_next() {
         .await;
 
     let started = Instant::now();
-    let mut app = App::with(zutalk_core::app::hub::Config {
+    let app = App::with(zutalk_core::app::hub::Config {
         soniox: format!("{}/v1", server.uri()),
         ..config(data)
     });
 
-    // Wait until one draft is written (!draft) and the other shows its retry code in State.writing.
-    let state = app
-        .until(|s| {
-            let one_written = s.library.iter().any(|r| !r.draft);
-            let one_retrying = s.writing.iter().any(|w| w.step == "service-busy");
-            one_written && one_retrying
-        })
-        .await;
+    // Wait until one draft is written (!draft) while the failed draft is in retry backoff.
+    app.wait_library(|rows| rows.iter().any(|r| !r.draft)).await;
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_millis(AGAIN_MS / 2),
         "second draft should finish long before AGAIN_MS ({AGAIN_MS} ms), took {elapsed:?}"
     );
     let retried_id = failed_id.lock().unwrap().clone().expect("first upload recorded failed id");
+    let retried = app
+        .wait_recording(&retried_id, |r| {
+            r.is_some_and(|v| {
+                matches!(v.refine, RefineStatus::Refining { ref step, .. } if step == "service-busy")
+            })
+        })
+        .await
+        .expect("retried recording present");
     assert!(
-        state.writing.iter().any(|w| w.id == retried_id && w.step == "service-busy"),
-        "expected {retried_id} retrying with service-busy in {:?}",
-        state.writing
+        matches!(retried.refine, RefineStatus::Refining { ref step, .. } if step == "service-busy"),
+        "expected {retried_id} retrying with service-busy, got {:?}",
+        retried.refine
     );
 
     let events: Vec<_> = app

@@ -13,11 +13,16 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
 use zutalk_core::ai::write::wav_header;
 use zutalk_core::app::hub::{Config, Core, Outlet};
-use zutalk_core::app::proto::{Command, Frame, Session, State};
+use zutalk_core::app::proto::{
+    Command, Frame, LibraryFilter, LibraryRow, Progress, Query, QueryReply, QueryValue,
+    RecordingView, SearchResult, Session, State, TranscriptChunk,
+};
 use zutalk_core::capture::audio::{Capture, Feed, Hearing, Keep, Open, Sink, Source, Tell, offer};
 use zutalk_core::capture::clock::{BLOCK, Block, Gap, wall_ms};
 use zutalk_core::capture::tape;
 use zutalk_core::id::keys;
+use zutalk_core::knowledge::glossary::Term;
+use zutalk_core::out::city::Calendar;
 use zutalk_core::record::shelf::Shelf;
 use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::End;
@@ -221,6 +226,169 @@ impl App {
             }
         };
         timeout(Duration::from_secs(20), wait).await.expect("it came in time")
+    }
+
+    pub async fn query(&self, q: Query) -> Result<QueryReply, &'static str> {
+        self.core.query(q).await
+    }
+
+    pub async fn library(&self) -> Vec<LibraryRow> {
+        match self
+            .core
+            .query(Query::LibraryRecent { filter: LibraryFilter::default(), limit: 200, offset: 0 })
+            .await
+            .expect("library query")
+            .value
+        {
+            QueryValue::LibraryPage(page) => page.rows,
+            other => panic!("unexpected library reply: {other:?}"),
+        }
+    }
+
+    pub async fn recording(&self, id: &str) -> Option<RecordingView> {
+        match self
+            .core
+            .query(Query::Recording { id: id.into() })
+            .await
+            .expect("recording query")
+            .value
+        {
+            QueryValue::Recording(view) => view.map(|b| *b),
+            other => panic!("unexpected recording reply: {other:?}"),
+        }
+    }
+
+    pub async fn transcript(&self, id: &str, take: Option<u32>, chunk: u32) -> TranscriptChunk {
+        match self
+            .core
+            .query(Query::Transcript { id: id.into(), take, chunk })
+            .await
+            .expect("transcript query")
+            .value
+        {
+            QueryValue::Transcript(chunk) => chunk,
+            other => panic!("unexpected transcript reply: {other:?}"),
+        }
+    }
+
+    pub async fn search(&self, q: &str) -> SearchResult {
+        match self
+            .core
+            .query(Query::Search { query: q.into(), limit: 200 })
+            .await
+            .expect("search query")
+            .value
+        {
+            QueryValue::Search(res) => res,
+            other => panic!("unexpected search reply: {other:?}"),
+        }
+    }
+
+    pub async fn glossary(&self) -> Vec<Term> {
+        match self.core.query(Query::Glossary).await.expect("glossary query").value {
+            QueryValue::Glossary(terms) => terms,
+            other => panic!("unexpected glossary reply: {other:?}"),
+        }
+    }
+
+    pub async fn calendar(&self) -> Option<Calendar> {
+        match self.core.query(Query::Calendar).await.expect("calendar query").value {
+            QueryValue::Calendar(cal) => cal,
+            other => panic!("unexpected calendar reply: {other:?}"),
+        }
+    }
+
+    pub async fn wait_library(&self, holds: impl Fn(&[LibraryRow]) -> bool) -> Vec<LibraryRow> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self
+                    .core
+                    .query(Query::LibraryRecent {
+                        filter: LibraryFilter::default(),
+                        limit: 200,
+                        offset: 0,
+                    })
+                    .await
+                    && let QueryValue::LibraryPage(page) = reply.value
+                    && holds(&page.rows)
+                {
+                    return page.rows;
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("library condition came in time")
+    }
+
+    pub async fn wait_recording(
+        &self,
+        id: &str,
+        holds: impl Fn(Option<&RecordingView>) -> bool,
+    ) -> Option<RecordingView> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Recording { id: id.into() }).await
+                    && let QueryValue::Recording(view) = reply.value
+                {
+                    let view = view.map(|b| *b);
+                    if holds(view.as_ref()) {
+                        return view;
+                    }
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("recording condition came in time")
+    }
+
+    pub async fn wait_progress(&mut self, holds: impl Fn(&Progress) -> bool) -> Progress {
+        let wait = async {
+            loop {
+                let (_, prog) = self.outlet.progress.now();
+                if holds(&prog) {
+                    return (*prog).clone();
+                }
+                self.outlet.progress.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("progress came in time")
+    }
+
+    pub async fn wait_glossary(&self, holds: impl Fn(&[Term]) -> bool) -> Vec<Term> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Glossary).await
+                    && let QueryValue::Glossary(terms) = reply.value
+                    && holds(&terms)
+                {
+                    return terms;
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("glossary condition came in time")
+    }
+
+    pub async fn wait_calendar(
+        &self,
+        holds: impl Fn(Option<&Calendar>) -> bool,
+    ) -> Option<Calendar> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Calendar).await
+                    && let QueryValue::Calendar(cal) = reply.value
+                    && holds(cal.as_ref())
+                {
+                    return cal;
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("calendar condition came in time")
     }
 }
 

@@ -145,7 +145,7 @@ async fn notes_work_during_live_recording_and_never_leave_to_city() {
 
     // Wait until the recording has finished Opening (about.jsonl synced and listed) while still live.
     let shelf = local_shelf(dir.path());
-    app.until(|s| s.library.iter().any(|r| r.id == rec_id)).await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == rec_id)).await;
     assert!((*app.outlet.session.now().1).as_ref().is_some_and(|s| s.id == rec_id));
 
     // Add both a timestamped note and a bare mark while recording is live (no sign-in required).
@@ -185,7 +185,8 @@ async fn notes_work_during_live_recording_and_never_leave_to_city() {
     // Stop recording and wait for seal.
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    app.until(|s| s.library.iter().any(|r| r.id == rec_id) && s.writing.is_empty()).await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == rec_id)).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
 
     let recorded = shelf.read(&rec_id).expect("read recorded").expect("recording exists");
     assert_eq!(recorded.notes.len(), 2);

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate, matchers::any};
 use zu::{Blob, Cid, Codec, Held, PublicKey, Query, Record, SecretKey, Value};
-use zutalk_core::app::proto::{Command, State};
+use zutalk_core::app::proto::{Command, RecordingView};
 use zutalk_core::capture::clock::Block;
 use zutalk_core::capture::tape;
 use zutalk_core::id::keys::{self, Me};
@@ -228,8 +228,8 @@ impl City {
     }
 }
 
-fn filed(state: &State) -> Option<&Filing> {
-    state.open.as_ref()?.filed.as_ref().filter(|f| !f.state.is_empty())
+fn filed(rec: Option<&RecordingView>) -> Option<&Filing> {
+    rec?.filed.as_ref().filter(|f| !f.state.is_empty())
 }
 
 #[test]
@@ -296,7 +296,7 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     let data = tempfile::tempdir().unwrap();
     let id = recording(data.path(), 300_000 + 4_000);
     let mut app = App::with(config(data.path()));
-    app.until(|s| s.library.len() == 1).await;
+    app.wait_library(|rows| rows.len() == 1).await;
     // Filed nowhere yet: there is no city to file to, and what is no city's address is said.
     app.send(Command::File { id: id.clone(), event: event.clone(), audio: true });
     app.notice("city.none").await;
@@ -306,7 +306,7 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     app.send(Command::City { address: silent.uri() });
     app.notice("city.unknown").await;
     app.send(Command::City { address: server.uri() });
-    let calendar = app.until(|s| s.city.is_some()).await.city.unwrap();
+    let calendar = app.wait_calendar(|c| c.is_some()).await.unwrap();
     assert_eq!((calendar.did.as_str(), calendar.events.len()), (CITY, 1));
     assert_eq!(
         (calendar.events[0].path.as_str(), calendar.events[0].title.as_str()),
@@ -314,13 +314,13 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     );
     // Filed with its audio: the records first, then two files, each part of the audio as WAV.
     let release = city.hold_next_post();
-    app.send(Command::Open { id: id.clone() });
     app.send(Command::File { id: id.clone(), event: event.clone(), audio: true });
-    app.until(|s| s.filing.iter().any(|w| w.id == id)).await;
+    app.wait_progress(|p| p.file.as_ref().is_some_and(|w| w.id == id)).await;
     drop(release);
     app.notice("city.filed").await;
-    let state = app.until(|s| filed(s).is_some() && s.filing.is_empty()).await;
-    let filing = filed(&state).unwrap().clone();
+    app.wait_progress(|p| p.file.is_none()).await;
+    let rec = app.wait_recording(&id, |r| filed(r).is_some()).await;
+    let filing = filed(rec.as_ref()).unwrap().clone();
     assert_eq!(
         (filing.state.as_str(), filing.audio, filing.did.as_str()),
         ("city.filed", true, CITY)
@@ -356,8 +356,9 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     // Filed again without its audio: what goes now replaces what went, and names no file.
     app.send(Command::File { id: id.clone(), event: event.clone(), audio: false });
     app.notice("city.filed").await;
-    let state = app.until(|s| filed(s).is_some_and(|f| !f.audio) && s.filing.is_empty()).await;
-    assert_eq!(filed(&state).unwrap().key, filing.key);
+    app.wait_progress(|p| p.file.is_none()).await;
+    let rec = app.wait_recording(&id, |r| filed(r).is_some_and(|f| !f.audio)).await;
+    assert_eq!(filed(rec.as_ref()).unwrap().key, filing.key);
     let head = &city.bodies(&filing.key)[&("talk/recording".into(), filing.key.clone())];
     assert_eq!(head["audio"], json!([]));
 }
@@ -371,10 +372,9 @@ async fn each_refusal_is_said_and_kept_and_the_audio_alone_can_be_refused() {
     let data = tempfile::tempdir().unwrap();
     let id = recording(data.path(), 2_000);
     let mut app = App::with(config(data.path()));
-    app.until(|s| s.library.len() == 1).await;
+    app.wait_library(|rows| rows.len() == 1).await;
     app.send(Command::City { address: server.uri() });
-    app.until(|s| s.city.is_some()).await;
-    app.send(Command::Open { id: id.clone() });
+    app.wait_calendar(|c| c.is_some()).await;
     let refused = [
         (("talk/line", "full"), "city.full"),
         (("talk/speaker", "bad"), "city.bad"),
@@ -386,7 +386,8 @@ async fn each_refusal_is_said_and_kept_and_the_audio_alone_can_be_refused() {
         city.0.lock().unwrap().refuse = Some(refuse);
         app.send(Command::File { id: id.clone(), event: event.clone(), audio: true });
         app.notice(code).await;
-        app.until(|s| filed(s).is_some_and(|f| f.state == code) && s.filing.is_empty()).await;
+        app.wait_progress(|p| p.file.is_none()).await;
+        app.wait_recording(&id, |r| filed(r).is_some_and(|f| f.state == code)).await;
     }
     // An event taken out of the calendar since it was read takes nothing.
     city.0.lock().unwrap().refuse = None;
@@ -419,9 +420,8 @@ async fn a_filing_a_restart_left_on_its_way_goes_on() {
     let bodies = city.bodies(&key);
     assert_eq!(bodies.len(), 4, "{:?}", bodies.keys());
     assert_eq!(city.0.lock().unwrap().files.len(), 1);
-    app.send(Command::Open { id });
-    let state = app.until(|s| filed(s).is_some()).await;
-    assert_eq!(filed(&state).unwrap().state, "city.filed");
+    let rec = app.wait_recording(&id, |r| filed(r).is_some()).await;
+    assert_eq!(filed(rec.as_ref()).unwrap().state, "city.filed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

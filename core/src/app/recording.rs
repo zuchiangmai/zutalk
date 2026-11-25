@@ -1029,7 +1029,6 @@ pub(crate) async fn run(mut start: Start) -> Done {
         Ok(()) => {
             about_written = true;
             start.index_sync.recording_opened(start.id.clone()).await;
-            let _ = start.results.send(Msg::RecordingOpened).await; // dropped: the hub has ended
             (|| {
                 let key = keys::derive("tape", &start.id).map_err(end_code)?;
                 let (tape_tx, tape_rx) =

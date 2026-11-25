@@ -40,7 +40,7 @@ export const clock = (ms: number) => {
 export const when = (ms: number) => new Intl.DateTimeFormat(ui.lang, { dateStyle: 'medium', timeStyle: 'short' }).format(ms);
 
 /** A recording as plain text: each line under who said it and when, then the translations in `langs`. */
-export const text = (o: Open, langs: string[]) =>
+export const text = (o: Pick<Open, 'lines' | 'speakers'>, langs: string[]) =>
   o.lines.map(([, l]) => {
     const who = o.speakers[l.speaker] || (l.speaker && t('speaker', l.speaker));
     return [`${who} ${clock(l.t0)}`.trim(), l.text, ...langs.flatMap((x) => l.translations[x] || [])].join('\n');

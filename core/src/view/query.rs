@@ -362,6 +362,11 @@ impl ViewEngine {
         src.calendar = calendar;
     }
 
+    /// Reads the cached city calendar (used by `desk` when beginning a city filing).
+    pub fn calendar(&self) -> Option<Calendar> {
+        self.0.source.lock().unwrap_or_else(PoisonError::into_inner).calendar.clone()
+    }
+
     /// Tracks the currently active live recording id so `Query::Transcript` reads take 0 directly
     /// from the live draft pack.
     pub fn set_active_recording(&self, id: Option<String>) {

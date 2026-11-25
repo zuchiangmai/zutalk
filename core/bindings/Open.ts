@@ -5,5 +5,6 @@ import type { Said } from "./Said";
 
 /**
  * A recording being read: each line with the key it is corrected by.
+ * Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
  */
 export type Open = { row: Row, lines: Array<[string, Said]>, speakers: { [key in string]: string }, note: string, filed: Filing | null, };

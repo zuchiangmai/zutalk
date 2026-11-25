@@ -1,15 +1,14 @@
 <script lang="ts">
-  import type { Open } from '$proto/Open';
-  import type { State } from '$proto/State';
-  import { send } from '../lib/core.svelte';
+  import type { RecordingView } from '$proto/RecordingView';
+  import { send, store } from '../lib/core.svelte';
   import { t, when, word } from '../lib/words.svelte';
 
   // A recording, filed to an event of a city: the city's address, one of its events (the one
   // nearest the recording until another is chosen), and its audio while it has some, which goes
   // unless turned off.
-  let { s, open }: { s: State; open: Open } = $props();
-  const id = $derived(open.row.id), filed = $derived(open.filed), cal = $derived(s.city);
-  const going = $derived(s.filing.find((w) => w.id === id));
+  let { open }: { open: RecordingView } = $props();
+  const id = $derived(open.row.id), filed = $derived(open.filed), cal = $derived(store.city);
+  const going = $derived(store.progress.file?.id === id ? store.progress.file : null);
   const away = (at: number | null) => (at === null ? Infinity : Math.abs(at - open.row.started));
   const near = $derived(cal?.events.reduce<(typeof cal.events)[number] | null>((a, e) => (a && away(a.start) <= away(e.start) ? a : e), null));
   let chosen = $state(''), audio = $state(true);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { State } from '$proto/State';
   import { renderSVG } from 'uqr';
-  import { send } from '../lib/core.svelte';
+  import { send, store } from '../lib/core.svelte';
   import { type Key, LANGS, langName, t, ui } from '../lib/words.svelte';
 
   let { s }: { s: State } = $props();
@@ -59,7 +59,7 @@
 </select>
 <h2>{t('s.terms')}</h2>
 <form onsubmit={add} title={t('terms.tip')}>
-  {#each s.terms as term (term.said)}
+  {#each store.terms as term (term.said)}
     <button type="button" class="on" aria-label={t('remove.one', term.said)} onclick={() => send({ do: 'Term', said: term.said, written: null })}>{[term.said, ...Object.values(term.written)].join(' · ')} ×</button>
   {/each}
   <input name="said" placeholder={t('term')} aria-label={t('term')} />

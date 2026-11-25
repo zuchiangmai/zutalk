@@ -8,8 +8,7 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    Change, Command, Device, From, Level as SoundLevel, Room, Row, Session, Sound, State, Status,
-    Writing,
+    Change, Command, Device, From, Level as SoundLevel, Room, Session, Sound, State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -28,6 +27,7 @@ use crate::rt::signal::Register;
 use crate::rt::stats::{Counter, Spread};
 use crate::rt::supervise::{End, Tree};
 use crate::rt::water::{Gauge, Water};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::watch;
@@ -97,15 +97,9 @@ pub(crate) enum Msg {
     Do(Command),
     Booted(BootOut),
     Devices(Vec<Device>),
-    RecordingOpened,
-    Sealed(Option<String>, Row),
     Ended(String),
-    Writing(Writing),
     Wrote(String),
-    RefineReady {
-        id: String,
-        from: RefineStatus,
-    },
+    RefineReady { id: String, from: RefineStatus },
     SignInFailed(&'static str),
     Signed(Result<SignedOut, &'static str>),
     Copied,
@@ -113,23 +107,14 @@ pub(crate) enum Msg {
     RotationSaved,
     InstallFailed(&'static str),
     Refreshed(Result<Refreshed, &'static str>),
-    DeskChanged,
     DeskFailed(&'static str),
-    Searched {
-        seq: u64,
-        search_seq: u64,
-        ms: u64,
-        result: Result<Vec<(String, String)>, &'static str>,
-    },
     Rooms(Vec<Room>),
     Shared(Result<(), &'static str>),
     Looked(Result<String, &'static str>),
     City(Result<Calendar, End>),
     FilingReady(String, Filing),
-    Filing(Writing),
     Filed(String, &'static str),
     Claimed(Result<(), &'static str>),
-    Moving(Writing),
     Moved(Result<Vec<(String, String)>, &'static str>),
     OwnKeyDone(Result<OwnKeyOut, &'static str>),
 }
@@ -140,10 +125,7 @@ impl Msg {
             Msg::Do(command) => command.kind(),
             Msg::Booted(_) => "Booted",
             Msg::Devices(_) => "Devices",
-            Msg::RecordingOpened => "RecordingOpened",
-            Msg::Sealed(_, _) => "Sealed",
             Msg::Ended(_) => "Ended",
-            Msg::Writing(_) => "Writing",
             Msg::Wrote(_) => "Wrote",
             Msg::RefineReady { .. } => "RefineReady",
             Msg::SignInFailed(_) => "SignInFailed",
@@ -153,18 +135,14 @@ impl Msg {
             Msg::RotationSaved => "RotationSaved",
             Msg::InstallFailed(_) => "InstallFailed",
             Msg::Refreshed(_) => "Refreshed",
-            Msg::DeskChanged => "DeskChanged",
             Msg::DeskFailed(_) => "DeskFailed",
-            Msg::Searched { .. } => "Searched",
             Msg::Rooms(_) => "Rooms",
             Msg::Shared(_) => "Shared",
             Msg::Looked(_) => "Looked",
             Msg::City(_) => "City",
             Msg::FilingReady(_, _) => "FilingReady",
-            Msg::Filing(_) => "Filing",
             Msg::Filed(_, _) => "Filed",
             Msg::Claimed(_) => "Claimed",
-            Msg::Moving(_) => "Moving",
             Msg::Moved(_) => "Moved",
             Msg::OwnKeyDone(_) => "OwnKeyDone",
         }
@@ -177,10 +155,6 @@ fn code(end: End) -> &'static str {
 
 fn now() -> i64 {
     wall_ms() as i64
-}
-
-fn writing(id: &str, step: &str) -> Writing {
-    Writing { id: id.into(), step: step.into(), done: 0, of: 0 }
 }
 
 pub(crate) struct Hub {
@@ -205,14 +179,14 @@ pub(crate) struct Hub {
     state: State,
     sent: Option<State>,
     recording: Option<(String, watch::Sender<Mode>, watch::Sender<u64>)>,
-    opened: Option<String>,
+    refining: BTreeSet<String>,
+    filing: BTreeSet<String>,
     moving: bool, // the 0.8 library is being moved in
     dirty: u64,
     refresh_in_flight: Option<u64>,
     refresh_synced: u64,
     need_retain: bool,
     need_rooms: bool,
-    search_seq: u64,
 }
 
 impl Hub {
@@ -263,14 +237,14 @@ impl Hub {
             state,
             sent: None,
             recording: None,
-            opened: None,
+            refining: BTreeSet::new(),
+            filing: BTreeSet::new(),
             moving: false,
             dirty: 0,
             refresh_in_flight: None,
             refresh_synced: 0,
             need_retain: false,
             need_rooms: false,
-            search_seq: 0,
         }
     }
 
@@ -335,7 +309,7 @@ impl Hub {
         if let Some(rev) = next_refresh(self.dirty, self.refresh_in_flight, self.refresh_synced) {
             let retain = self.need_retain.then_some(self.state.setup.keep);
             let include_rooms = self.need_rooms;
-            if self.work.refresh(rev, self.opened.clone(), retain, include_rooms).is_ok() {
+            if self.work.refresh(rev, retain, include_rooms).is_ok() {
                 self.refresh_in_flight = Some(rev);
                 self.need_retain = false;
                 self.need_rooms = false;
@@ -346,14 +320,6 @@ impl Hub {
     fn apply_refreshed(&mut self, refreshed: Refreshed) {
         self.state.keys = refreshed.keys;
         self.state.left = refreshed.left;
-        self.state.library = refreshed.library;
-        self.state.terms = refreshed.terms;
-        if refreshed.clear_hits {
-            self.state.hits.clear();
-        }
-        if refreshed.opened == self.opened {
-            self.state.open = refreshed.open;
-        }
         if let Some(rooms) = refreshed.rooms {
             self.state.rooms = rooms;
         }
@@ -363,12 +329,12 @@ impl Hub {
         let mut owed = Vec::new();
         for id in survey.writes {
             if !self.busy(&id) {
-                self.state.writing.push(writing(&id, "closing"));
+                self.refining.insert(id.clone());
                 owed.push(id);
             }
         }
         if survey.sweep {
-            self.work.write_recovered(owed, self.state.terms.clone());
+            self.work.write_recovered(owed);
         }
         for (id, filing) in survey.filings {
             if let Err(c) = self.start_filing(id, filing) {
@@ -383,8 +349,6 @@ impl Hub {
         }
         self.state.login = None;
         self.state.me = out.me;
-        self.opened = None;
-        self.state.open = None;
         self.state.rotation_unsaved = out.rotation_unsaved;
         self.apply_refreshed(out.refreshed);
         self.state.rooms = out.rooms;
@@ -403,30 +367,12 @@ impl Hub {
                 self.set_boot(BootEvent::Ready, "boot");
             }
             Msg::Devices(devices) => self.state.devices = devices,
-            Msg::RecordingOpened => self.mark_dirty(),
-            Msg::Sealed(owner, sealed_row) => {
-                if owner == self.state.me {
-                    if let Some(existing) =
-                        self.state.library.iter_mut().find(|r| r.id == sealed_row.id)
-                    {
-                        *existing = sealed_row;
-                    } else {
-                        self.state.library.insert(0, sealed_row);
-                    }
-                    self.mark_dirty();
-                }
-            }
             Msg::Ended(id) if self.under_way(&id) => {
                 self.stop();
-                self.mark_dirty();
             }
             Msg::Ended(_) => {} // from a recording that has stopped
-            Msg::Writing(writing) => {
-                self.state.writing.retain(|w| w.id != writing.id);
-                self.state.writing.push(writing);
-            }
             Msg::Wrote(id) => {
-                self.state.writing.retain(|w| w.id != id);
+                self.refining.remove(&id);
                 self.need_retain = true;
                 self.mark_dirty();
             }
@@ -437,8 +383,8 @@ impl Hub {
                 if self.busy(&id) {
                     return Err("recording.writing");
                 }
-                self.state.writing.push(writing(&id, "closing"));
-                self.work.write_manual(id, from, self.state.terms.clone());
+                self.refining.insert(id.clone());
+                self.work.write_manual(id, from);
             }
             Msg::SignInFailed(c) => {
                 self.state.login = None;
@@ -466,29 +412,9 @@ impl Hub {
                     }
                 }
             }
-            Msg::DeskChanged => self.mark_dirty(),
             Msg::DeskFailed(c) => {
                 self.maybe_refresh();
                 return Err(c);
-            }
-            Msg::Searched { seq, search_seq, ms, result } => {
-                if search_seq != self.search_seq {
-                    self.work.note_search_stale();
-                    warn!("job.done", kind = "search", job = seq, code = "stale", ms = ms);
-                } else {
-                    match result {
-                        Ok(hits) => {
-                            self.state.hits = hits;
-                            info!("job.done", kind = "search", job = seq, code = "ok", ms = ms);
-                            self.work.note_job_done();
-                        }
-                        Err(c) => {
-                            warn!("job.done", kind = "search", job = seq, code = c, ms = ms);
-                            self.work.note_job_failed();
-                            return Err(c);
-                        }
-                    }
-                }
             }
             Msg::Rooms(rooms) => self.state.rooms = rooms,
             Msg::Shared(done) => {
@@ -497,26 +423,20 @@ impl Hub {
                 done?;
             }
             Msg::Looked(found) => self.state.update = Some(found?),
-            Msg::City(calendar) => self.state.city = Some(calendar.map_err(code)?),
+            Msg::City(Ok(_)) => {}
+            Msg::City(Err(end)) => return Err(code(end)),
             Msg::FilingReady(id, filing) => self.start_filing(id, filing)?,
-            Msg::Filing(writing) => {
-                self.state.filing.retain(|w| w.id != writing.id);
-                self.state.filing.push(writing);
-            }
             Msg::Filed(id, said) => {
-                self.state.filing.retain(|w| w.id != id);
+                self.filing.remove(&id);
                 self.said.say(said);
-                self.mark_dirty();
             }
             Msg::Claimed(done) => {
                 done?;
                 self.mark_dirty();
             }
-            Msg::Moving(writing) => self.state.moving = Some(writing),
             Msg::Moved(skipped) => {
-                (self.moving, self.state.moving) = (false, None);
+                self.moving = false;
                 self.state.unmoved = skipped?;
-                self.mark_dirty();
             }
             Msg::OwnKeyDone(res) => match res {
                 Ok(out) => {
@@ -562,14 +482,6 @@ impl Hub {
                 self.state.setup = setup.clone();
                 self.work.save_setup(setup)?;
             }
-            Command::Open { id } => {
-                self.opened = Some(id);
-                self.mark_dirty();
-            }
-            Command::Close => {
-                self.opened = None;
-                self.state.open = None;
-            }
             // A line is corrected on the record, not on a draft about to be replaced.
             Command::Change { id, change: Change::Line { .. } } if self.busy(&id) => {
                 return Err("recording.writing");
@@ -592,10 +504,6 @@ impl Hub {
                 self.work.remove(id)?;
             }
             Command::Restore { id } => self.work.restore(id)?,
-            Command::Search { query } => {
-                self.search_seq += 1;
-                self.work.search(self.search_seq, query)?;
-            }
             Command::Export { id, exporter, languages, to } => {
                 let exporter = EXPORTERS.iter().find(|e| e.id == exporter).ok_or("export.which")?;
                 self.work.export(id, exporter.id, languages, to)?;
@@ -654,8 +562,7 @@ impl Hub {
             // What is still being written is filed once it is written.
             Command::File { id, .. } if self.busy(&id) => return Err("recording.writing"),
             Command::File { id, event, audio } => {
-                let calendar = self.state.city.clone().ok_or("city.none")?;
-                self.work.begin_file(id, calendar, event, audio)?;
+                self.work.begin_file(id, event, audio)?;
             }
             Command::Diagnose => self.work.diagnose(
                 self.state.setup.spoken.clone(),
@@ -668,11 +575,11 @@ impl Hub {
     }
 
     fn start_filing(&mut self, id: String, filing: Filing) -> Result<(), &'static str> {
-        if self.state.filing.iter().any(|w| w.id == id) {
+        if self.filing.contains(&id) {
             return Ok(()); // it is on its way
         }
         self.work.file(id.clone(), filing)?;
-        self.state.filing.push(writing(&id, "filing"));
+        self.filing.insert(id);
         Ok(())
     }
 
@@ -681,11 +588,11 @@ impl Hub {
     }
 
     fn busy(&self, id: &str) -> bool {
-        self.under_way(id) || self.state.writing.iter().any(|w| w.id == id)
+        self.under_way(id) || self.refining.contains(id)
     }
 
     fn busy_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.state.writing.iter().map(|w| w.id.clone()).collect();
+        let mut ids: Vec<String> = self.refining.iter().cloned().collect();
         if let Some((id, _, _)) = &self.recording {
             ids.push(id.clone());
         }
@@ -733,7 +640,6 @@ impl Hub {
             captions,
             watching,
             reconnect_rx,
-            self.state.terms.clone(),
             self.frame_reg.clone(),
             self.session_reg.clone(),
             self.level_reg.clone(),
@@ -764,7 +670,7 @@ impl Hub {
             self.frame_reg.set(Frame::default());
             self.level_reg.set(SoundLevel::default());
             self.water_reg.change(|current| (*current != Water::default()).then(Water::default));
-            self.state.writing.push(writing(&id, "closing"));
+            self.refining.insert(id);
         }
     }
 

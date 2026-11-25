@@ -250,7 +250,7 @@ async fn manual_refine_rejects_missing_audio_key_and_live_recording() {
     app.send(Command::Start);
     let session = app.session(|s| s.is_some()).await.expect("session started");
     let live_id = session.id.clone();
-    app.until(|s| s.library.iter().any(|r| r.id == live_id)).await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == live_id)).await;
     app.send(Command::Refine { id: live_id.clone() });
     app.notice("recording.under_way").await;
 
@@ -260,14 +260,15 @@ async fn manual_refine_rejects_missing_audio_key_and_live_recording() {
     // Stop recording: without a key it stays draft with audio -> Refine returns keys.none.
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    app.until(|s| s.library.iter().any(|r| r.id == live_id && r.audio) && s.writing.is_empty())
+    app.wait_library(|rows| rows.iter().any(|r| r.id == live_id && r.audio && r.length_ms > 0))
         .await;
+    app.wait_progress(|p| p.refine.is_none()).await;
     app.send(Command::Refine { id: live_id.clone() });
     app.notice("keys.none").await;
 
     // Destroy audio -> Refine returns tape.none (checked before key check).
     app.send(Command::DestroyAudio { id: live_id.clone() });
-    app.until(|s| s.library.iter().any(|r| r.id == live_id && !r.audio)).await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == live_id && !r.audio)).await;
     app.send(Command::Refine { id: live_id });
     app.notice("tape.none").await;
 }
@@ -322,7 +323,13 @@ async fn manual_refine_triggers_on_draft_retries_after_failure_and_re_refines() 
 
     // Boot survey auto-attempts refine, hits 401 on granted key -> persists keys.async_refused.
     app.notice("keys.async_refused").await;
-    app.until(|st| st.writing.is_empty()).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    app.wait_recording(ID, |r| {
+        r.is_some_and(|v| {
+            matches!(v.refine, RefineStatus::Failed { ref code, .. } if code == "keys.async_refused")
+        })
+    })
+    .await;
 
     let tape_dir = dir.path().join("tape").join(ID);
     let journal = Journal::load(&tape_dir).expect("load journal");
@@ -345,15 +352,15 @@ async fn manual_refine_triggers_on_draft_retries_after_failure_and_re_refines() 
         ..config_on(dir.path(), &our_server.uri())
     };
     let mut app2 = App::with(cfg2);
-    let booted = app2.until(|st| st.library.iter().any(|r| r.id == ID)).await;
-    assert!(booted.writing.is_empty());
+    app2.wait_library(|rows| rows.iter().any(|r| r.id == ID)).await;
+    assert!(app2.outlet.progress.now().1.refine.is_none());
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(asked.lock().expect("asked").is_empty(), "boot survey should skip failed draft");
 
     // Entering an own Soniox key clears keys.async_refused and triggers automatic refine -> take 1.
     app2.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-own-working".into()) });
-    app2.until(|st| st.library.iter().any(|r| r.id == ID && !r.draft) && st.writing.is_empty())
-        .await;
+    app2.wait_library(|rows| rows.iter().any(|r| r.id == ID && !r.draft)).await;
+    app2.wait_progress(|p| p.refine.is_none()).await;
 
     assert!(!tape_dir.join(Journal::FILE).exists(), "write.json cleared on success");
     assert_eq!(s.about(ID).expect("about").expect("exists").about.take, 1);
@@ -368,8 +375,8 @@ async fn manual_refine_triggers_on_draft_retries_after_failure_and_re_refines() 
 
     // Manual re-refine on already-refined take 1 produces take 2; takes 0, 1, 2 all readable.
     app2.send(Command::Refine { id: ID.into() });
-    app2.until(|st| !st.writing.is_empty()).await;
-    app2.until(|st| st.writing.is_empty()).await;
+    app2.wait_recording(ID, |r| r.is_some_and(|v| v.take == 2)).await;
+    app2.wait_progress(|p| p.refine.is_none()).await;
     assert_eq!(s.about(ID).expect("about").expect("exists").about.take, 2);
 
     let takes_list = takes::list(&s, ID, 2).expect("list takes");

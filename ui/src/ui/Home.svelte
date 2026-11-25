@@ -2,7 +2,7 @@
   import type { Setup } from '$proto/Setup';
   import type { Sound } from '$proto/Sound';
   import type { State } from '$proto/State';
-  import { pick, send, store } from '../lib/core.svelte';
+  import { openRecording, pick, searchRecordings, send, store } from '../lib/core.svelte';
   import { t, word } from '../lib/words.svelte';
   import Langs from './Langs.svelte';
   import Meta from './Meta.svelte';
@@ -10,8 +10,9 @@
 
   let { s }: { s: State } = $props();
   let query = $state('');
-  const found = $derived(new Set(s.hits.map(([id]) => id)));
-  const rows = $derived(s.library.filter((r) => !query || found.has(r.id)));
+  const found = $derived(new Set(store.hits.map((h) => h.recording_id)));
+  const rows = $derived(store.library.filter((r) => !query || found.has(r.id)));
+  const moving = $derived(store.progress.move_old);
   const set = (patch: Partial<Setup>) => send({ do: 'Setup', setup: { ...s.setup, ...patch } });
   const sounds: Sound[] = ['Mic', 'System', 'Both'];
   const live = $derived(s.rooms.find((r) => r.recording === null));
@@ -38,15 +39,15 @@
   </p>
   {#if live}<Room room={live} />{/if}
 </section>
-{#if s.moving}
-  <p class="quiet"><progress value={s.moving.done} max={s.moving.of || 1}></progress> {word('step code', s.moving.step)} · {s.moving.done}/{s.moving.of}</p>
+{#if moving}
+  <p class="quiet"><progress value={moving.done} max={moving.of || 1}></progress> {word('step code', moving.step)} · {moving.done}/{moving.of}</p>
 {/if}
 {#each s.unmoved as [title, code], i (i)}<p class="quiet">{t('unmoved')} · {title || t('untitled')} · {word('code', code)}</p>{/each}
-<input type="search" placeholder={t('search')} aria-label={t('search')} bind:value={query} oninput={() => send({ do: 'Search', query })} />
+<input type="search" placeholder={t('search')} aria-label={t('search')} bind:value={query} oninput={() => void searchRecordings(query)} />
 <ul>
   {#each rows as row (row.id)}
-    <li><button onclick={() => send({ do: 'Open', id: row.id })}>
-      <b class:quiet={!row.title}>{row.title || row.preview || t('untitled')}</b><Meta {row} {s} />
+    <li><button onclick={() => void openRecording(row.id)}>
+      <b class:quiet={!row.title}>{row.title || row.preview || t('untitled')}</b><Meta {row} />
     </button></li>
   {:else}
     <li class="quiet">{t(query ? 'nomatch' : 'empty')}</li>

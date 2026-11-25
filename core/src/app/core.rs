@@ -198,7 +198,6 @@ impl Core {
         let stats = Stats::new();
         let (commands, mail) = queue::bounded(&stats, "hub.mail", HUB_MAIL_MSGS, Full::Reject); // the interface: never waits, is told `busy`
         let results = commands.with(Full::Wait); // work that is done: must arrive; whoever did it can wait
-        let progress = commands.with(Full::Drop); // how far a job has got: only the latest matters
         let root = Tree::root("core", stats.clone());
         let work_tree = root.child("work");
         let config = Arc::new(config);
@@ -230,7 +229,6 @@ impl Core {
             config,
             http,
             results.clone(),
-            progress,
             said.clone(),
             root.clone(),
             work_tree,

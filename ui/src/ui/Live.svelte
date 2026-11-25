@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Session } from '$proto/Session';
   import type { State } from '$proto/State';
-  import { send, store } from '../lib/core.svelte';
+  import { openRecording, send, store } from '../lib/core.svelte';
   import { clock, t, word } from '../lib/words.svelte';
   import Captions from './Captions.svelte';
   import Room from './Room.svelte';
@@ -17,7 +17,7 @@
   const dead = $derived(store.live.some((c) => c.health.is === 'Dead'));
   const live = $derived(s.rooms.find((r) => r.recording === null));
   // After the stop, the recording itself is where the person lands: its id is read first.
-  const stop = (id = session.id) => void send({ do: 'Stop' }).then(() => send({ do: 'Open', id }));
+  const stop = (id = session.id) => void send({ do: 'Stop' }).then(() => openRecording(id));
 </script>
 
 <p class="bar">

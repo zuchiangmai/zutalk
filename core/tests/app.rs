@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zutalk_core::app::hub::{Clip, Config, HUB_MAIL_MSGS, Install, Notices};
-use zutalk_core::app::proto::{Change, Command, NoteOp, Session, Setup, State, Status};
+use zutalk_core::app::proto::{
+    Change, Command, NoteOp, Query, QueryValue, Session, Setup, State, Status,
+};
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::id::keys;
 use zutalk_core::rt::queue::{self, Back, Full};
@@ -99,8 +101,6 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Stop, false),
         (Command::Reconnect, false),
         (Command::Setup { setup: Setup::default() }, false),
-        (Command::Open { id: "id".into() }, false),
-        (Command::Close, false),
         (Command::Change { id: "id".into(), change: Change::Title { text: "t".into() } }, false),
         (
             Command::Note {
@@ -112,7 +112,6 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Refine { id: "id".into() }, false),
         (Command::Remove { id: "id".into() }, false),
         (Command::Restore { id: "id".into() }, false),
-        (Command::Search { query: "q".into() }, false),
         (
             Command::Export {
                 id: "id".into(),
@@ -290,7 +289,8 @@ async fn a_recording_needs_nobody_signed_in() {
     let dir = tempfile::tempdir().expect("a folder");
     let mut app = App::start(dir.path());
     let state = until_no_sign_in_first(&mut app, |_| true).await;
-    assert!(state.me.is_none() && state.library.is_empty());
+    assert!(state.me.is_none());
+    assert!(app.library().await.is_empty());
     assert_eq!(state.languages.len(), 8);
     assert_eq!(state.exporters, ["markdown", "srt", "vtt"]);
 
@@ -299,12 +299,10 @@ async fn a_recording_needs_nobody_signed_in() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     session_no_sign_in_first(&mut app, |s| s.is_none()).await;
-    let state = until_no_sign_in_first(&mut app, |s| {
-        s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)
-    })
-    .await;
-    assert_eq!(state.library.len(), 1);
-    let id = state.library[0].id.clone();
+    let rows = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    assert_eq!(rows.len(), 1);
+    let id = rows[0].id.clone();
 
     // Exactly one directory under `records/`, named for the device's `did:key`.
     let dirs = record_dirs(dir.path());
@@ -328,8 +326,9 @@ async fn a_recording_needs_nobody_signed_in() {
         id: id.clone(),
         change: Change::Title { text: "Local note".into() },
     });
-    until_no_sign_in_first(&mut app, |s| s.library.iter().any(|r| r.title == "Local note")).await;
-    app.send(Command::Search { query: "note".into() });
+    app.wait_library(|rows| rows.iter().any(|r| r.title == "Local note")).await;
+    let hits = app.search("note").await;
+    assert!(hits.hits.iter().any(|h| h.recording_id == id), "{hits:?}");
     let out = dir.path().join("exported");
     app.send(Command::Export {
         id: id.clone(),
@@ -338,10 +337,15 @@ async fn a_recording_needs_nobody_signed_in() {
         to: out.to_string_lossy().into(),
     });
     app.send(Command::Remove { id: id.clone() });
-    until_no_sign_in_first(&mut app, |s| s.library.is_empty()).await;
+    app.wait_library(|rows| rows.is_empty()).await;
     app.send(Command::Restore { id: id.clone() });
-    until_no_sign_in_first(&mut app, |s| s.library.len() == 1).await;
+    app.wait_library(|rows| rows.len() == 1).await;
     wait_export(&app).await;
+    assert!(
+        !app.outlet.said.now().1.codes.iter().any(|c| c == "sign_in.first")
+            && !app.seen.of("notice.said").iter().any(|l| l.text("code") == Some("sign_in.first")),
+        "unexpected sign_in.first"
+    );
     let exported = fs::read_to_string(dir.path().join("exported.md")).expect("exported");
     assert!(exported.starts_with("# Local note"), "{exported}");
 
@@ -399,17 +403,13 @@ async fn the_same_device_is_the_same_identity_the_next_time() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let id = app
-        .until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0))
-        .await
-        .library[0]
-        .id
-        .clone();
+    let id = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await[0].id.clone();
+    app.wait_progress(|p| p.refine.is_none()).await;
     drop(app);
 
-    let mut again = App::start(dir.path());
-    let state = again.until(|s| s.library.len() == 1).await;
-    assert_eq!(state.library[0].id, id);
+    let again = App::start(dir.path());
+    let rows = again.wait_library(|rows| rows.len() == 1).await;
+    assert_eq!(rows[0].id, id);
     assert_eq!(record_dirs(dir.path()).len(), 1);
 
     let who = again.seen.of("identity.who");
@@ -433,12 +433,8 @@ async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let id = app
-        .until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0))
-        .await
-        .library[0]
-        .id
-        .clone();
+    let id = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await[0].id.clone();
+    app.wait_progress(|p| p.refine.is_none()).await;
     drop(app);
 
     let local_dirs = record_dirs(dir.path());
@@ -452,12 +448,14 @@ async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
     keys::set("identity", Some(&kept)).expect("the identity is kept");
 
     let mut app = App::start(dir.path());
-    let signed = app.until(|s| s.me.as_deref() == Some(ME)).await;
-    assert!(signed.library.is_empty());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+    assert!(app.library().await.is_empty());
 
     app.send(Command::SignOut);
-    let back = app.until(|s| s.me.is_none() && s.library.len() == 1 && s.writing.is_empty()).await;
-    assert_eq!(back.library[0].id, id);
+    app.until(|s| s.me.is_none()).await;
+    let back = app.wait_library(|rows| rows.len() == 1).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    assert_eq!(back[0].id, id);
     assert_eq!(snapshot(&local_dir), before, "local shelf changed across sign-in and sign-out");
 
     let sign_out: Vec<_> = app
@@ -485,12 +483,8 @@ async fn what_needs_a_person_says_so_and_writes_nothing() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let id = app
-        .until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0))
-        .await
-        .library[0]
-        .id
-        .clone();
+    let id = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await[0].id.clone();
+    app.wait_progress(|p| p.refine.is_none()).await;
 
     for cmd in [
         Command::Share { recording: None },
@@ -525,10 +519,11 @@ async fn a_recording_is_signed_to_its_end_by_whoever_signed_its_start() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    // The task started under the person's shelf and keys: once `writing` reports "offline",
+    // The task started under the person's shelf and keys: once `progress.refine` reports "offline",
     // `seal()` has already written the sealed length record to that shelf.
-    let state = app.until(|s| s.writing.iter().any(|w| w.id == id && w.step == "offline")).await;
-    assert!(state.library.is_empty(), "the local shelf must not hold the person's recording");
+    app.wait_progress(|p| p.refine.as_ref().is_some_and(|w| w.id == id && w.step == "offline"))
+        .await;
+    assert!(app.library().await.is_empty(), "the local shelf must not hold the person's recording");
 
     let person_dir = dir.path().join("records").join(ME.replace(':', "-"));
     let held = zu::Pack::read(person_dir.join(&id).join("about.jsonl")).expect("person's about");
@@ -572,16 +567,13 @@ async fn nobody_signed_in_nothing_is_asked_of_our_server() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let id = app
-        .until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0))
-        .await
-        .library[0]
-        .id
-        .clone();
+    let id = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await[0].id.clone();
+    app.wait_progress(|p| p.refine.is_none()).await;
 
     app.send(Command::Change { id: id.clone(), change: Change::Title { text: "Quiet".into() } });
-    app.until(|s| s.library.iter().any(|r| r.title == "Quiet")).await;
-    app.send(Command::Search { query: "Quiet".into() });
+    app.wait_library(|rows| rows.iter().any(|r| r.title == "Quiet")).await;
+    let hits = app.search("Quiet").await;
+    assert!(hits.hits.iter().any(|h| h.recording_id == id), "{hits:?}");
     let out = dir.path().join("quiet.md");
     app.send(Command::Export {
         id,
@@ -609,7 +601,8 @@ async fn secrets_that_cannot_be_read_mean_nobody_signs_and_it_is_said() {
     let mut app = App::start(dir.path());
     app.notice("keys.store").await;
     let state = app.until(|_| true).await;
-    assert!(state.me.is_none() && state.library.is_empty());
+    assert!(state.me.is_none());
+    assert!(app.library().await.is_empty());
 
     app.send(Command::Start);
     app.notice("keys.store").await;
@@ -693,21 +686,24 @@ async fn the_old_library_moves_in_on_its_own_and_nothing_of_it_leaves() {
     let start =
         || App::with(Config { old: Some(old.path().into()), ..config(dir.path(), NOWHERE) });
     let mut app = start();
-    let state = app.until(|state| state.library.len() == 3 && state.moving.is_none()).await;
+    let rows = app.wait_library(|rows| rows.len() == 3).await;
+    app.wait_progress(|p| p.move_old.is_none()).await;
+    let state = app.until(|_| true).await;
     assert!(state.unmoved.is_empty());
-    let titles: Vec<&str> = state.library.iter().map(|row| row.title.as_str()).collect();
+    let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
     assert_eq!(titles, ["interview", "Weekly sync", ""]);
-    assert_eq!(state.library.iter().map(|row| row.draft).collect::<Vec<_>>(), [false, true, false]);
+    assert_eq!(rows.iter().map(|row| row.draft).collect::<Vec<_>>(), [false, true, false]);
     drop(app);
     // Again: nothing moves twice, and the live draft from 0.8, audio and all, is owed nothing.
-    let mut app = start();
-    let again = app.until(|state| !state.library.is_empty()).await;
-    assert_eq!((again.library, again.writing), (state.library, vec![]));
-    let (seq_before, _) = app.outlet.state.now();
+    let app = start();
+    let again_rows = app.wait_library(|rows| !rows.is_empty()).await;
+    assert_eq!(again_rows, rows);
+    assert!(app.outlet.progress.now().1.refine.is_none());
+    let (seq_before, _) = app.outlet.progress.now();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (seq_after, latest) = app.outlet.state.now();
-    assert_eq!(seq_after, seq_before, "{:?}", latest.writing);
-    assert!(latest.writing.is_empty());
+    let (seq_after, latest) = app.outlet.progress.now();
+    assert_eq!(seq_after, seq_before, "{latest:?}");
+    assert!(latest.refine.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -734,15 +730,14 @@ async fn a_recording_stops_at_once_and_is_kept_whole() {
     tokio::time::sleep(Duration::from_millis(1_200)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let state = app.until(|state| !state.writing.is_empty()).await;
+    let prog = app.wait_progress(|p| p.refine.is_some()).await;
     assert!(
-        matches!(state.writing.first().map(|w| w.step.as_str()), Some("closing" | "offline")),
-        "{:?}",
-        state.writing
+        matches!(prog.refine.as_ref().map(|w| w.step.as_str()), Some("closing" | "offline")),
+        "{prog:?}"
     );
     // The tape is sealed behind the stop, and the transcript waits for a key.
-    let waits = |state: &State| state.writing.iter().any(|w| w.step == "offline");
-    let row = app.until(waits).await.library[0].clone();
+    app.wait_progress(|p| p.refine.as_ref().is_some_and(|w| w.step == "offline")).await;
+    let row = app.wait_library(|rows| !rows.is_empty()).await[0].clone();
     assert!((900..2_000).contains(&row.length_ms) && row.draft, "{row:?}");
     // What the person chose for the next recording is still there after a restart.
     let mut again = App::start(dir.path());
@@ -759,27 +754,29 @@ async fn an_imported_file_is_a_recording_and_a_change_is_one_more_record() {
     let file = dir.path().join("Board meeting.wav");
     wav(&file, 1_500);
     app.send(Command::Import { path: file.to_string_lossy().into() });
-    let state = app.until(|s| s.library.iter().any(|r| r.length_ms > 0)).await;
+    let rows = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await;
     app.session(|s| s.is_none()).await;
-    let row = state.library[0].clone();
+    let row = rows[0].clone();
     assert_eq!((row.title.as_str(), row.length_ms, row.draft), ("Board meeting", 1_500, true));
     let id = row.id;
     let change = |change| Command::Change { id: id.clone(), change };
     app.send(change(Change::Title { text: "Budget".into() }));
     app.send(change(Change::Speaker { label: "1".into(), name: "Chair".into() }));
     app.send(change(Change::Note { text: "Decide in May".into() }));
-    app.send(Command::Open { id: id.clone() });
-    let open = app.until(|s| s.open.as_ref().is_some_and(|o| o.note == "Decide in May")).await.open;
-    let open = open.expect("it is open");
+    let open = app
+        .wait_recording(&id, |r| r.is_some_and(|o| o.note == "Decide in May"))
+        .await
+        .expect("it is open");
     assert_eq!((open.row.title.as_str(), open.speakers["1"].as_str()), ("Budget", "Chair"));
     // A line is corrected on the record, not on a draft that is about to be replaced.
     let key = format!("{id}.0.00000");
     app.send(change(Change::Line { key, language: "en".into(), text: "Hello".into() }));
     app.notice("recording.writing").await;
     app.send(Command::Remove { id: id.clone() });
-    app.until(|state| state.library.is_empty() && state.open.is_none()).await;
+    app.wait_library(|rows| rows.is_empty()).await;
+    assert!(app.recording(&id).await.is_none());
     app.send(Command::Restore { id: id.clone() });
-    app.until(|state| state.library.len() == 1).await;
+    app.wait_library(|rows| rows.len() == 1).await;
     // Written out by a row of the exporters, the extension added when the path has none.
     let out = dir.path().join("out");
     let to = out.to_string_lossy().into();
@@ -792,8 +789,6 @@ async fn an_imported_file_is_a_recording_and_a_change_is_one_more_record() {
     wait_export(&app).await;
     let exported = fs::read_to_string(dir.path().join("out.md")).expect("it was exported");
     assert!(exported.starts_with("# Budget"));
-    app.send(Command::Close);
-    app.until(|state| state.open.is_none()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -808,8 +803,9 @@ async fn a_file_that_holds_no_sound_leaves_nothing_behind() {
     app.send(Command::Import { path: file.to_string_lossy().into() });
     app.notice("audio.file.format").await;
     app.session(|s| s.is_none()).await;
-    let state = app.until(|state| state.writing.is_empty() && state.library.is_empty()).await;
-    assert!(state.library.is_empty(), "{:?}", state.library);
+    app.wait_progress(|p| p.refine.is_none()).await;
+    let rows = app.wait_library(|rows| rows.is_empty()).await;
+    assert!(rows.is_empty(), "{rows:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -863,11 +859,14 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
     };
     viewer.until(shown).await;
     // The draft has the line while the recording goes on.
-    app.send(Command::Open { id: id.clone() });
-    let has = |state: &State| {
-        state.open.as_ref().is_some_and(|o| o.lines.iter().any(|(_, s)| s.line.text == "Hello"))
-    };
-    app.until(has).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if app.transcript(&id, Some(0), 0).await.lines.iter().any(|(_, s)| s.line.text == "Hello") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "draft line did not land");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     app.send(Command::Stop);
     viewer.until(|event, plain| (event == "slot" && plain.is_none()).then_some(())).await;
     // A recording's room holds its text in the log.
@@ -904,26 +903,26 @@ async fn a_change_is_one_more_record() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
-    let state = app.until(|s| s.library.iter().any(|r| r.length_ms > 0)).await;
-    let id = state.library[0].id.clone();
+    let rows = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await;
+    let id = rows[0].id.clone();
     let change = |change| Command::Change { id: id.clone(), change };
     app.send(change(Change::Title { text: "Budget".into() }));
     app.send(change(Change::Speaker { label: "1".into(), name: "Chair".into() }));
     app.send(change(Change::Note { text: "Decide in May".into() }));
-    app.send(Command::Open { id: id.clone() });
-    let open = app.until(|s| s.open.as_ref().is_some_and(|o| o.note == "Decide in May")).await.open;
-    let open = open.expect("it is open");
+    let open = app
+        .wait_recording(&id, |r| r.is_some_and(|o| o.note == "Decide in May"))
+        .await
+        .expect("it is open");
     assert_eq!((open.row.title.as_str(), open.speakers["1"].as_str()), ("Budget", "Chair"));
     // A line is corrected on the record, not on a draft that is about to be replaced.
     let key = format!("{id}.0.00000");
     app.send(change(Change::Line { key, language: "en".into(), text: "Hello".into() }));
     app.notice("recording.writing").await;
     app.send(Command::Remove { id: id.clone() });
-    app.until(|state| state.library.is_empty() && state.open.is_none()).await;
+    app.wait_library(|rows| rows.is_empty()).await;
+    assert!(app.recording(&id).await.is_none());
     app.send(Command::Restore { id: id.clone() });
-    app.until(|state| state.library.len() == 1).await;
-    app.send(Command::Close);
-    app.until(|state| state.open.is_none()).await;
+    app.wait_library(|rows| rows.len() == 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1158,13 +1157,11 @@ async fn without_a_key_sound_is_kept_and_the_status_says_why() {
     app.send(Command::Stop);
     session_no_keys_none(&mut app, |s| s.is_none()).await;
 
-    let state = until_no_keys_none(&mut app, |s| {
-        s.writing.is_empty() && s.library.len() == 1 && s.library[0].length_ms > 0
-    })
-    .await;
-    let row = &state.library[0];
+    let rows = app.wait_library(|rows| rows.len() == 1 && rows[0].length_ms > 0).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    let row = &rows[0];
     assert!(row.draft && row.audio && row.length_ms > 0, "{row:?}");
-    assert!(state.writing.is_empty());
+    assert!(app.outlet.progress.now().1.refine.is_none());
 
     // Ensure `keys.none` was never said in either `Outlet.said` or `notice.said`.
     assert!(
@@ -1243,20 +1240,23 @@ async fn with_their_own_key_captions_come_without_signing_in() {
     assert_eq!(frame.columns[0].lines[0].text, "Hello");
 
     // Draft has the line before whole-transcript replaces it.
-    app.send(Command::Open { id: id.clone() });
-    app.until(|s| {
-        s.open.as_ref().is_some_and(|o| o.lines.iter().any(|(_, l)| l.line.text == "Hello"))
-    })
-    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if app.transcript(&id, Some(0), 0).await.lines.iter().any(|(_, l)| l.line.text == "Hello") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "draft line did not land");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     tokio::time::sleep(Duration::from_millis(600)).await;
     app.send(Command::Stop);
     app.session(|s| s.is_none()).await;
 
     // Whole transcript runs with the own key and turns the draft into a written record.
-    let state = app
-        .until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.id == id && !r.draft))
-        .await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == id && !r.draft)).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    let state = app.until(|_| true).await;
     assert!(state.me.is_none());
     assert_eq!(asked.lock().expect("one at a time").len(), 1);
     let requests = stt.received_requests().await.expect("requests");
@@ -1319,17 +1319,18 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
     let mut app =
         App::with(Config { soniox: format!("{}/v1", stt.uri()), ..config(data, NOWHERE) });
 
-    let state = app.until(|s| s.library.len() == 2).await;
+    let state = app.until(|_| true).await;
+    let rows = app.wait_library(|rows| rows.len() == 2).await;
     assert!(state.me.is_none());
-    assert!(state.writing.is_empty());
-    assert!(state.library.iter().all(|r| r.draft && r.audio));
+    assert!(app.outlet.progress.now().1.refine.is_none());
+    assert!(rows.iter().all(|r| r.draft && r.audio));
 
-    let (state_seq, _) = app.outlet.state.now();
+    let (prog_seq, _) = app.outlet.progress.now();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(app.outlet.said.now().1.next, 0, "unexpected notice: {:?}", app.outlet.said.now().1);
-    let (state_seq_after, latest) = app.outlet.state.now();
-    assert_eq!(state_seq_after, state_seq, "unexpected writing: {:?}", latest.writing);
-    assert!(latest.writing.is_empty());
+    let (prog_seq_after, latest) = app.outlet.progress.now();
+    assert_eq!(prog_seq_after, prog_seq, "unexpected refine progress: {latest:?}");
+    assert!(latest.refine.is_none());
     assert!(stt.received_requests().await.expect("requests").is_empty());
 
     let skipped = app.seen.of("write.skipped");
@@ -1340,12 +1341,9 @@ async fn drafts_without_a_key_wait_quietly_and_are_written_once_there_is_one() {
 
     // Setting an own Soniox key re-runs recover and writes both waiting drafts.
     app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-own-test-key".into()) });
-    let state = app
-        .until(|s| {
-            s.writing.is_empty() && s.library.len() == 2 && s.library.iter().all(|r| !r.draft)
-        })
-        .await;
-    assert_eq!(state.library.len(), 2);
+    let rows = app.wait_library(|rows| rows.len() == 2 && rows.iter().all(|r| !r.draft)).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    assert_eq!(rows.len(), 2);
     assert_eq!(asked.lock().expect("one at a time").len(), 2);
     assert_eq!(app.seen.refused(), 0);
 }
@@ -1492,7 +1490,7 @@ async fn every_command_leaves_its_kind_its_answer_and_nothing_it_carried() {
     shelf.put(id, RECORDING, &[(id.to_string(), Some(about))], now).expect("recording");
 
     let mut app = App::start(dir.path());
-    app.until(|s| s.library.iter().any(|r| r.id == id)).await;
+    app.wait_library(|rows| rows.iter().any(|r| r.id == id)).await;
 
     let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
     app.send(Command::Setup { setup });
@@ -1500,16 +1498,15 @@ async fn every_command_leaves_its_kind_its_answer_and_nothing_it_carried() {
         id: id.into(),
         change: Change::Title { text: secret_title.into() },
     });
-    app.send(Command::Search { query: secret_query.into() });
+    let _ = app.query(Query::Search { query: secret_query.into(), limit: 20 }).await;
     app.send(Command::Pause);
     app.notice("recording.none").await;
 
     let done = app.seen.of("command.done");
-    assert_eq!(done.len(), 4, "{done:?}");
+    assert_eq!(done.len(), 3, "{done:?}");
     let expected = [
         ("Setup", "ok", zutalk_log::Level::Info),
         ("Change", "ok", zutalk_log::Level::Info),
-        ("Search", "ok", zutalk_log::Level::Info),
         ("Pause", "recording.none", zutalk_log::Level::Warn),
     ];
     for (line, (kind, code, level)) in done.iter().zip(expected) {
@@ -1666,10 +1663,10 @@ async fn a_long_file_waits_for_its_tape() {
         gate.cv.notify_all();
     }
 
-    let state =
-        app.until(|s| s.writing.is_empty() && s.library.iter().any(|r| r.length_ms > 0)).await;
-    assert_eq!(state.library.len(), 1);
-    assert_eq!(state.library[0].length_ms, 120_000);
+    let rows = app.wait_library(|rows| rows.iter().any(|r| r.length_ms > 0)).await;
+    app.wait_progress(|p| p.refine.is_none()).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].length_ms, 120_000);
     assert!(!app.outlet.said.now().1.codes.iter().any(|c| c == "tape"));
     assert!(
         app.seen.of("recording.end").iter().any(|l| l.text("code") == Some("done")),
@@ -1798,8 +1795,8 @@ async fn a_burst_of_changes_is_read_back_once_or_twice() {
     };
     shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
 
-    let mut app = App::start(dir.path());
-    app.until(|s| s.library.len() == 1).await;
+    let app = App::start(dir.path());
+    app.wait_library(|rows| rows.len() == 1).await;
 
     let (seq_before, _) = app.outlet.state.now();
     let refreshes_before =
@@ -1812,10 +1809,10 @@ async fn a_burst_of_changes_is_read_back_once_or_twice() {
         });
     }
 
-    let state = app.until(|s| s.library.iter().any(|r| r.title == "title-49")).await;
-    assert_eq!(state.library[0].title, "title-49");
+    let rows = app.wait_library(|rows| rows.iter().any(|r| r.title == "title-49")).await;
+    assert_eq!(rows[0].title, "title-49");
 
-    // Wait for all 50 changes and any follow-up refresh to finish.
+    // Wait for all 50 change jobs to finish.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("change")).count() < 50 {
         assert!(tokio::time::Instant::now() < deadline, "50 change jobs did not finish");
@@ -1823,10 +1820,11 @@ async fn a_burst_of_changes_is_read_back_once_or_twice() {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (seq_after, latest) = app.outlet.state.now();
-    assert_eq!(latest.library[0].title, "title-49");
+    let (seq_after, _) = app.outlet.state.now();
+    let latest_rec = app.recording(id).await.expect("recording readable");
+    assert_eq!(latest_rec.row.title, "title-49");
     let state_delta = seq_after - seq_before;
-    assert!(state_delta <= 3, "expected state seq delta <= 3, got {state_delta}");
+    assert_eq!(state_delta, 0, "50 title edits must push 0 State updates, got {state_delta}");
 
     let changes: Vec<_> =
         app.seen.of("job.done").into_iter().filter(|l| l.text("kind") == Some("change")).collect();
@@ -1842,16 +1840,16 @@ async fn a_burst_of_changes_is_read_back_once_or_twice() {
     let refreshes_after =
         app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("refresh")).count();
     let refresh_delta = refreshes_after - refreshes_before;
-    assert!(refresh_delta <= 3, "expected <= 3 refreshes for 50 changes, got {refresh_delta}");
+    assert_eq!(refresh_delta, 0, "expected 0 refreshes for 50 title edits, got {refresh_delta}");
 
-    let tally = app.core.stats().tally();
-    let merged =
-        tally.counts.iter().find(|r| r.name == "refresh.merged").map_or(0, |r| r.n) as usize;
+    let (_, inv) = app.outlet.invalidated.now();
     assert!(
-        merged + refresh_delta >= 50,
-        "expected refresh.merged ({merged}) + refreshes ({refresh_delta}) >= 50"
+        inv.items.len() <= zutalk_core::view::query::ViewKind::ALL.len() + 1,
+        "coalesced invalidation ring stayed tiny: {:?}",
+        inv.items
     );
 
+    let tally = app.core.stats().tally();
     let turn_spread = tally.spreads.iter().find(|r| r.name == "hub.turn_us");
     let slow_count = app.seen.of("hub.turn.slow").len();
     eprintln!("P1-19 burst: hub.turn_us={turn_spread:?} hub.turn.slow={slow_count}");
@@ -1878,8 +1876,8 @@ async fn an_export_writes_what_was_changed_just_before_it() {
     };
     shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
 
-    let mut app = App::start(dir.path());
-    app.until(|s| s.library.len() == 1).await;
+    let app = App::start(dir.path());
+    app.wait_library(|rows| rows.len() == 1).await;
 
     let out = dir.path().join("fresh");
     app.send(Command::Change {
@@ -1933,40 +1931,40 @@ async fn a_search_asked_again_answers_only_the_last() {
         shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("recording");
     }
 
-    let mut app = App::start(dir.path());
-    app.until(|s| s.library.len() == 2).await;
+    let app = App::start(dir.path());
+    app.wait_library(|rows| rows.len() == 2).await;
 
-    app.send(Command::Search { query: "alpha".into() });
-    app.send(Command::Search { query: "beta".into() });
-
-    let state = app.until(|s| !s.hits.is_empty()).await;
-    assert_eq!(state.hits.len(), 1, "{:?}", state.hits);
-    assert_eq!(state.hits[0].0, "rec19beta");
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while app.seen.of("job.done").iter().filter(|l| l.text("kind") == Some("search")).count() < 2 {
-        assert!(tokio::time::Instant::now() < deadline, "both search jobs did not finish");
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    // Issue two searches back-to-back on the Search slot: the latest ("beta") always succeeds
+    // with rec19beta, while an in-flight older search is either already done or cancelled.
+    let (first, second) = tokio::join!(
+        app.query(Query::Search { query: "alpha".into(), limit: 50 }),
+        app.query(Query::Search { query: "beta".into(), limit: 50 }),
+    );
+    let second = second.expect("latest search succeeds");
+    match second.value {
+        QueryValue::Search(res) => {
+            assert_eq!(res.hits.len(), 1, "{res:?}");
+            assert_eq!(res.hits[0].recording_id, "rec19beta");
+        }
+        other => panic!("unexpected reply: {other:?}"),
     }
-    let searches: Vec<_> =
-        app.seen.of("job.done").into_iter().filter(|l| l.text("kind") == Some("search")).collect();
+    match first {
+        Ok(reply) => {
+            assert!(matches!(
+                reply.value,
+                QueryValue::Search(ref res) if res.hits.len() == 1 && res.hits[0].recording_id == "rec19alpha"
+            ));
+        }
+        Err("query.cancelled") => {}
+        Err(other) => panic!("unexpected first search error: {other}"),
+    }
     assert!(
-        searches.iter().any(|l| l.text("code") == Some("stale")),
-        "expected a stale search job.done: {searches:?}"
+        app.seen
+            .of("query.done")
+            .iter()
+            .any(|l| l.text("view") == Some("search") && l.text("code") == Some("ok")),
+        "expected query.done(search, ok)"
     );
-    assert!(
-        searches.iter().any(|l| l.text("code") == Some("ok")),
-        "expected an ok search job.done: {searches:?}"
-    );
-    let stale = app
-        .core
-        .stats()
-        .tally()
-        .counts
-        .into_iter()
-        .find(|r| r.name == "search.stale")
-        .map_or(0, |r| r.n);
-    assert!(stale >= 1, "expected search.stale >= 1");
     assert_eq!(app.seen.refused(), 0);
 }
 
@@ -1990,8 +1988,8 @@ async fn a_desk_that_is_full_turns_commands_away_out_loud() {
     };
     shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed");
 
-    let mut app = App::start(dir.path());
-    app.until(|s| s.library.len() == 1).await;
+    let app = App::start(dir.path());
+    app.wait_library(|rows| rows.len() == 1).await;
 
     for i in 0..200 {
         app.send(Command::Change {
@@ -2207,15 +2205,15 @@ async fn no_job_says_what_it_was_about() {
     };
     shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("recording");
 
-    let mut app = App::start(dir.path());
-    app.until(|s| s.library.len() == 1).await;
+    let app = App::start(dir.path());
+    app.wait_library(|rows| rows.len() == 1).await;
 
     let out = dir.path().join(secret_path);
     app.send(Command::Change {
         id: id.into(),
         change: Change::Title { text: secret_title.into() },
     });
-    app.send(Command::Search { query: secret_query.into() });
+    let _ = app.query(Query::Search { query: secret_query.into(), limit: 20 }).await;
     app.send(Command::Export {
         id: id.into(),
         exporter: "markdown".into(),
@@ -2229,7 +2227,7 @@ async fn no_job_says_what_it_was_about() {
         let has = |k: &str| {
             done.iter().any(|l| l.text("kind") == Some(k) && l.text("code") == Some("ok"))
         };
-        if has("change") && has("search") && has("export.write") {
+        if has("change") && has("export.write") {
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "jobs did not finish: {done:?}");
@@ -2707,12 +2705,13 @@ async fn signing_out_goes_back_to_the_device_off_the_hub() {
         .expect("seed local");
 
     let mut app = App::start(dir.path());
-    let signed = app.until(|s| s.me.as_deref() == Some(ME)).await;
-    assert!(signed.library.is_empty());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+    assert!(app.library().await.is_empty());
 
     app.send(Command::SignOut);
-    let back = app.until(|s| s.me.is_none() && s.library.iter().any(|r| r.id == local_id)).await;
-    assert_eq!(back.library.len(), 1);
+    app.until(|s| s.me.is_none()).await;
+    let back = app.wait_library(|rows| rows.iter().any(|r| r.id == local_id)).await;
+    assert_eq!(back.len(), 1);
 
     let who: Vec<_> = app
         .seen

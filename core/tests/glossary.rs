@@ -106,8 +106,8 @@ async fn the_glossary_reaches_the_live_captions_and_the_whole_session_transcript
     app.until(|_| true).await;
     let written = Some(owned(&[("th", "ซูซาลู")]));
     app.send(Command::Term { said: "Zuzalu".into(), written });
-    let state = app.until(|state| !state.terms.is_empty()).await;
-    assert_eq!(state.terms, [Term { said: "Zuzalu".into(), written: owned(&[("th", "ซูซาลู")]) }]);
+    let terms = app.wait_glossary(|terms| !terms.is_empty()).await;
+    assert_eq!(terms, [Term { said: "Zuzalu".into(), written: owned(&[("th", "ซูซาลู")]) }]);
     let next = Next {
         spoken: vec!["en".into(), "th".into()],
         shown: vec!["en".into(), "th".into()],
@@ -146,5 +146,6 @@ async fn the_glossary_reaches_the_live_captions_and_the_whole_session_transcript
     assert_eq!(body["context"]["terms"], json!(["Zuzalu", "ซูซาลู"]));
     // The glossary is the person's: signed out, there is none on screen.
     app.send(Command::SignOut);
-    app.until(|state| state.me.is_none() && state.terms.is_empty()).await;
+    app.until(|state| state.me.is_none()).await;
+    app.wait_glossary(|terms| terms.is_empty()).await;
 }

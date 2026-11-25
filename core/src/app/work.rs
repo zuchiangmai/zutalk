@@ -14,7 +14,7 @@ use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
-use crate::out::city::{self, Calendar, FileGate, Filer, Filing};
+use crate::out::city::{self, FileGate, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
 use crate::record::notes;
@@ -176,17 +176,12 @@ impl<J: DeskJob> Desk<J> {
     }
 }
 
-/// Snapshot of library, opened recording, glossary, keys, and rooms read on `desk`.
+/// Lightweight snapshot of bounded small-state fields (`keys`, `left`, `rooms`) read on `desk`.
 pub(crate) struct Refreshed {
     pub rev: u64,
-    pub opened: Option<String>,
     pub keys: Vec<(String, From)>,
     pub left: Option<u64>,
-    pub library: Vec<Row>,
-    pub open: Option<Open>,
-    pub terms: Vec<Term>,
     pub rooms: Option<Vec<Room>>,
-    pub clear_hits: bool,
 }
 
 /// Unfinished background work surveyed on `desk` (`recover` + `resume`).
@@ -312,7 +307,7 @@ enum Job {
     SignOut { keep: Option<u32>, busy: Vec<String> },
     Clip,
     RotationSaved,
-    Refresh { rev: u64, opened: Option<String>, retain: Option<Option<u32>>, include_rooms: bool },
+    Refresh { rev: u64, retain: Option<Option<u32>>, include_rooms: bool },
     Change { id: String, change: Change },
     Note { id: String, op: NoteOp },
     RefinePrepare { id: String },
@@ -324,7 +319,7 @@ enum Job {
     SharePrepare { recording: Option<String> },
     PutShare { id: String, share: Option<Share>, reply: oneshot::Sender<Result<(), &'static str>> },
     UnsharePrepare { id: String, recording: Option<String> },
-    BeginFile { id: String, calendar: Calendar, event: String, audio: bool },
+    BeginFile { id: String, event: String, audio: bool },
     OwnKey { service: Service, key: Option<String>, busy: Vec<String> },
     Diagnose { spoken: Vec<String>, shown: Vec<String>, sound: Sound, captions: bool },
     IndexSync { kind: SyncKind, done: oneshot::Sender<()> },
@@ -360,7 +355,6 @@ impl DeskJob for Job {
 }
 
 enum DeskOut {
-    Changed,
     Silent,
     Copied,
     Diagnosed,
@@ -410,6 +404,7 @@ struct DeskEnv {
     identity: Arc<Mutex<Identity>>,
     index: Mutex<Option<Index>>,
     views: Arc<ViewEngine>,
+    terms: Arc<Mutex<Vec<Term>>>,
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
@@ -434,9 +429,9 @@ pub(crate) struct Work {
     config: Arc<Config>,
     http: reqwest::Client,
     results: Tx<Msg>,
-    progress: Tx<Msg>,
     progress_reg: Register<Progress>,
     views: Arc<ViewEngine>,
+    terms: Arc<Mutex<Vec<Term>>>,
     said: Voice,
     root: Tree,
     tree: Tree,
@@ -450,7 +445,6 @@ pub(crate) struct Work {
     slot: Arc<Mutex<Option<(String, CancellationToken)>>>,
     jobs_done: Counter,
     jobs_failed: Counter,
-    search_stale: Counter,
 }
 
 impl Work {
@@ -459,7 +453,6 @@ impl Work {
         config: Arc<Config>,
         http: reqwest::Client,
         results: Tx<Msg>,
-        progress: Tx<Msg>,
         said: Voice,
         root: Tree,
         tree: Tree,
@@ -471,10 +464,10 @@ impl Work {
         let stats = tree.stats();
         let jobs_done = stats.counter("jobs.done");
         let jobs_failed = stats.counter("jobs.failed");
-        let search_stale = stats.counter("search.stale");
         let next_seq = Arc::new(AtomicU64::new(1));
         let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
         let identity = Arc::new(Mutex::new(Identity::starting()));
+        let terms: Arc<Mutex<Vec<Term>>> = Arc::new(Mutex::new(Vec::new()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
         let keep_hint: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
@@ -486,6 +479,7 @@ impl Work {
             identity: identity.clone(),
             index: Mutex::new(None),
             views: views.clone(),
+            terms: terms.clone(),
             invite: invite.clone(),
             signing: signing.clone(),
             keep_hint: keep_hint.clone(),
@@ -535,9 +529,6 @@ impl Work {
                 let desk_holder = deliver_desk.clone();
                 async move {
                     match outcome {
-                        Ok(DeskOut::Changed) => {
-                            let _ = results.send(Msg::DeskChanged).await; // dropped: the hub has ended
-                        }
                         Ok(DeskOut::Silent) => {}
                         Ok(DeskOut::Copied) => {
                             let _ = results.send(Msg::Copied).await; // dropped: the hub has ended
@@ -720,9 +711,9 @@ impl Work {
             config,
             http,
             results,
-            progress,
             progress_reg,
             views,
+            terms,
             said,
             root,
             tree,
@@ -736,8 +727,11 @@ impl Work {
             slot,
             jobs_done,
             jobs_failed,
-            search_stale,
         }
+    }
+
+    fn current_terms(&self) -> Vec<Term> {
+        self.terms.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn index_sync(&self) -> IndexSync {
@@ -895,11 +889,10 @@ impl Work {
     pub(crate) fn refresh(
         &self,
         rev: u64,
-        opened: Option<String>,
         retain: Option<Option<u32>>,
         include_rooms: bool,
     ) -> Result<(), &'static str> {
-        self.desk.offer(Job::Refresh { rev, opened, retain, include_rooms }).map(|_| ())
+        self.desk.offer(Job::Refresh { rev, retain, include_rooms }).map(|_| ())
     }
 
     pub(crate) fn change(&self, id: String, change: Change) -> Result<(), &'static str> {
@@ -963,11 +956,10 @@ impl Work {
     pub(crate) fn begin_file(
         &self,
         id: String,
-        calendar: Calendar,
         event: String,
         audio: bool,
     ) -> Result<(), &'static str> {
-        self.desk.offer(Job::BeginFile { id, calendar, event, audio }).map(|_| ())
+        self.desk.offer(Job::BeginFile { id, event, audio }).map(|_| ())
     }
 
     pub(crate) fn own_key(
@@ -1004,43 +996,6 @@ impl Work {
         );
     }
 
-    /// Runs a search off the `desk` in its own `search` task on the `work` subtree.
-    pub(crate) fn search(&self, search_seq: u64, query: String) -> Result<(), &'static str> {
-        let shelf = snapshot(&self.identity).shelf?;
-        let seq = self.alloc_seq();
-        let tree = self.tree.clone();
-        let results = self.results.clone();
-        self.tree.spawn("search", async move {
-            info!("job.start", kind = "search", job = seq, waited_ms = 0u64);
-            let started = std::time::Instant::now();
-            let outcome = tree.blocking("search", move || shelf.search(&query).map_err(fail)).await;
-            let ms = started.elapsed().as_millis() as u64;
-            let result = match outcome {
-                Ok(res) => res,
-                Err(_) => {
-                    if tree.is_cancelled() {
-                        return;
-                    }
-                    Err("panic")
-                }
-            };
-            let _ = results.send(Msg::Searched { seq, search_seq, ms, result }).await; // dropped: the hub has ended
-        });
-        Ok(())
-    }
-
-    pub(crate) fn note_job_done(&self) {
-        self.jobs_done.add(1);
-    }
-
-    pub(crate) fn note_job_failed(&self) {
-        self.jobs_failed.add(1);
-    }
-
-    pub(crate) fn note_search_stale(&self) {
-        self.search_stale.add(1);
-    }
-
     /// Starts a recording task on the root tree with `Work`'s current shelf and key chain,
     /// followed by post-seal transcription on the `work` subtree.
     #[allow(clippy::too_many_arguments)]
@@ -1052,7 +1007,6 @@ impl Work {
         captions: Result<Vec<crate::live::lane::Stream>, &'static str>,
         mode: tokio::sync::watch::Receiver<crate::live::lane::Mode>,
         reconnect: tokio::sync::watch::Receiver<u64>,
-        terms: Vec<Term>,
         frame: crate::rt::signal::Register<Frame>,
         session: crate::rt::signal::Register<Option<crate::app::proto::Session>>,
         level: crate::rt::signal::Register<crate::app::proto::Level>,
@@ -1064,6 +1018,7 @@ impl Work {
         let snap = snapshot(&self.identity);
         let shelf = snap.shelf?;
         let keys = snap.keys;
+        let terms = self.current_terms();
         let index_sync = self.index_sync();
         let rec_start = recording::Start {
             id: id.clone(),
@@ -1094,7 +1049,6 @@ impl Work {
             keys,
             config: self.config.clone(),
             results: self.results.clone(),
-            progress: self.progress.clone(),
             progress_reg: self.progress_reg.clone(),
             views: self.views.clone(),
             index_sync,
@@ -1117,10 +1071,11 @@ impl Work {
     }
 
     /// Sweeps any orphaned remote files and starts `job.write` tasks for owed drafts.
-    pub(crate) fn write_recovered(&self, ids: Vec<String>, terms: Vec<Term>) {
+    pub(crate) fn write_recovered(&self, ids: Vec<String>) {
         let snap = snapshot(&self.identity);
         let Ok(shelf) = snap.shelf else { return };
         let keys = snap.keys;
+        let terms = self.current_terms();
         let tapes = self.config.tapes();
         let soniox = self.config.soniox.clone();
         let said = self.said.clone();
@@ -1129,7 +1084,6 @@ impl Work {
         let bg = self.bg.clone();
         let config = self.config.clone();
         let results = self.results.clone();
-        let progress = self.progress.clone();
         let progress_reg = self.progress_reg.clone();
         let views = self.views.clone();
         let index_sync = self.index_sync();
@@ -1160,7 +1114,6 @@ impl Work {
                     keys: keys.clone(),
                     config: config.clone(),
                     results: results.clone(),
-                    progress: progress.clone(),
                     progress_reg: progress_reg.clone(),
                     views: views.clone(),
                     index_sync: index_sync.clone(),
@@ -1183,7 +1136,7 @@ impl Work {
     }
 
     /// Starts a manual whole-recording refinement on the `work` subtree (`Command::Refine`).
-    pub(crate) fn write_manual(&self, id: String, from: RefineStatus, terms: Vec<Term>) {
+    pub(crate) fn write_manual(&self, id: String, from: RefineStatus) {
         let snap = snapshot(&self.identity);
         let Ok(shelf) = snap.shelf else {
             let results = self.results.clone();
@@ -1192,13 +1145,13 @@ impl Work {
             });
             return;
         };
+        let terms = self.current_terms();
         let ctx = WriteCtx {
             id,
             shelf,
             keys: snap.keys,
             config: self.config.clone(),
             results: self.results.clone(),
-            progress: self.progress.clone(),
             progress_reg: self.progress_reg.clone(),
             views: self.views.clone(),
             index_sync: self.index_sync(),
@@ -1226,7 +1179,6 @@ impl Work {
         let shelf = snap.shelf?;
         let filer = Filer { http: self.http.clone(), me, shelf, tapes: self.config.tapes() };
         let results = self.results.clone();
-        let progress = self.progress.clone();
         let progress_reg = self.progress_reg.clone();
         let index_sync = self.index_sync();
         let tree = self.tree.clone();
@@ -1235,10 +1187,10 @@ impl Work {
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
         self.tree.spawn("job.file", async move {
+            set_file_progress(&progress_reg, Some(writing(&id, "filing")), None);
             let gate = FileGate { bg: &bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
             let said = city::file_job(&tree, &filer, &id, filing, gate, |w| {
-                set_file_progress(&progress_reg, Some(w.clone()), None);
-                let _ = progress.offer(Msg::Filing(w)); // dropped: the next one replaces it
+                set_file_progress(&progress_reg, Some(w), None);
             })
             .await;
             index_sync.filing_updated(id.clone(), said.into()).await;
@@ -1254,7 +1206,6 @@ impl Work {
         let Ok(shelf) = snapshot(&self.identity).shelf else { return false };
         let data = self.config.data.clone();
         let results = self.results.clone();
-        let progress = self.progress.clone();
         let progress_reg = self.progress_reg.clone();
         let index_sync = self.index_sync();
         let tree = self.tree.clone();
@@ -1276,8 +1227,7 @@ impl Work {
                     let progress = |p: migrate::Progress| {
                         let writing =
                             Writing { id: p.id, step: p.step.into(), done: p.done, of: p.of };
-                        set_move_progress(&reg_cb, Some(writing.clone()));
-                        let _ = progress.offer(Msg::Moving(writing)); // dropped: the next one replaces it
+                        set_move_progress(&reg_cb, Some(writing));
                     };
                     migrate::run((&old, &data), &shelf, &me, now, progress)
                 })
@@ -1429,9 +1379,9 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             keys::saved().map_err(code)?;
             Ok(DeskOut::RotationSaved)
         }
-        Job::Refresh { rev, opened, retain, include_rooms } => {
+        Job::Refresh { rev, retain, include_rooms } => {
             let snap = snapshot(identity);
-            run_refresh(env, &snap, rev, opened, retain, include_rooms).map(DeskOut::Refreshed)
+            run_refresh(env, &snap, rev, retain, include_rooms).map(DeskOut::Refreshed)
         }
         Job::Change { id, change } => {
             let shelf = snapshot(identity).shelf?;
@@ -1454,7 +1404,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             } else if is_note {
                 env.views.invalidate(ViewKind::Search, None);
             }
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::Note { id, op } => {
             let shelf = snapshot(identity).shelf?;
@@ -1479,7 +1429,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             });
             env.views.invalidate(ViewKind::Recording, Some(id));
             env.views.invalidate(ViewKind::Search, None);
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::RefinePrepare { id } => {
             let snap = snapshot(identity);
@@ -1513,7 +1463,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Search, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::Restore { id } => {
             let shelf = snapshot(identity).shelf?;
@@ -1525,13 +1475,16 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Search, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::Term { said, written } => {
             let shelf = snapshot(identity).shelf?;
             glossary::put(&shelf, &said, written, now())?;
+            if let Ok(terms) = glossary::read(&shelf) {
+                *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = terms;
+            }
             env.views.invalidate(ViewKind::Glossary, None);
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::DestroyAudio { id, under_way } => {
             let shelf = snapshot(identity).shelf?;
@@ -1553,7 +1506,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Changed)
+            Ok(DeskOut::Silent)
         }
         Job::Export { id, exporter, languages, to } => {
             let shelf = snapshot(identity).shelf?;
@@ -1598,7 +1551,8 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             let rooms = read_rooms(config, Some(&shelf))?;
             Ok(DeskOut::UnshareNet { ours, id, key, share, rooms })
         }
-        Job::BeginFile { id, calendar, event, audio } => {
+        Job::BeginFile { id, event, audio } => {
+            let calendar = env.views.calendar().ok_or("city.none")?;
             let shelf = snapshot(identity).shelf?;
             let filing = city::begin(&shelf, &id, &calendar, &event, audio)?;
             env.with_index(|idx| {
@@ -1995,20 +1949,19 @@ fn run_sign(
     *env.index.lock().unwrap_or_else(PoisonError::into_inner) = None;
 
     let snap = snapshot(identity);
-    let refreshed = match run_refresh(env, &snap, 0, None, Some(keep), true) {
+    let cached_terms =
+        snap.shelf.as_ref().ok().and_then(|s| glossary::read(s).ok()).unwrap_or_default();
+    *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = cached_terms;
+
+    let refreshed = match run_refresh(env, &snap, 0, Some(keep), true) {
         Ok(refreshed) => refreshed,
         Err(c) => {
             say.push(c);
             Refreshed {
                 rev: 0,
-                opened: None,
                 keys: Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect(),
                 left: snap.keys.left(),
-                library: Vec::new(),
-                open: None,
-                terms: Vec::new(),
                 rooms: Some(Vec::new()),
-                clear_hits: true,
             }
         }
     };
@@ -2049,7 +2002,6 @@ fn run_refresh(
     env: &DeskEnv,
     snap: &Snapshot,
     rev: u64,
-    opened: Option<String>,
     retain: Option<Option<u32>>,
     include_rooms: bool,
 ) -> Result<Refreshed, &'static str> {
@@ -2058,35 +2010,22 @@ fn run_refresh(
         Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
     let left = snap.keys.left();
     let Ok(shelf) = &snap.shelf else {
-        return Ok(Refreshed {
-            rev,
-            opened,
-            keys,
-            left,
-            library: Vec::new(),
-            open: None,
-            terms: Vec::new(),
-            rooms: include_rooms.then_some(Vec::new()),
-            clear_hits: true,
-        });
+        return Ok(Refreshed { rev, keys, left, rooms: include_rooms.then_some(Vec::new()) });
     };
-    let tapes = config.tapes();
-    let mut library: Vec<Row> =
-        shelf.list().map_err(fail)?.iter().map(|r| row(r, &tapes)).collect();
     if let Some(keep) = retain {
-        let mut entries: Vec<retain::Entry> = library
+        let tapes = config.tapes();
+        let mut entries: Vec<retain::Entry> = shelf
+            .list()
+            .map_err(fail)?
             .iter()
             .map(|r| retain::Entry {
                 id: r.id.clone(),
-                started: r.started,
-                draft: r.draft,
-                audio: r.audio,
+                started: r.about.started,
+                draft: r.about.take == 0,
+                audio: tape::kept(&tapes.join(&r.id)),
             })
             .collect();
         let destroyed = retain::sweep(&tapes, keep, &mut entries, now())?;
-        for (row, entry) in library.iter_mut().zip(entries) {
-            row.audio = entry.audio;
-        }
         if !destroyed.is_empty() {
             env.with_index(|idx| {
                 for id in &destroyed {
@@ -2097,25 +2036,8 @@ fn run_refresh(
             env.views.invalidate(ViewKind::Recording, None);
         }
     }
-    let read = opened.as_deref().map(|id| shelf.read(id)).transpose().map_err(fail)?;
-    let mut open_rec = read.flatten().map(|recording| open(recording, &tapes));
-    let terms = glossary::read(shelf)?;
-    if let Some(ref mut open_rec) = open_rec {
-        let mut filed = shelf.kept::<Filing>(FILING).map_err(fail)?.into_iter();
-        open_rec.filed = filed.find_map(|(id, filing)| (id == open_rec.row.id).then_some(filing));
-    }
     let rooms = if include_rooms { Some(read_rooms(config, Some(shelf))?) } else { None };
-    Ok(Refreshed {
-        rev,
-        opened,
-        keys,
-        left,
-        library,
-        open: open_rec,
-        terms,
-        rooms,
-        clear_hits: false,
-    })
+    Ok(Refreshed { rev, keys, left, rooms })
 }
 
 fn read_rooms(config: &Config, shelf: Option<&Shelf>) -> Result<Vec<Room>, &'static str> {
@@ -2494,7 +2416,6 @@ struct WriteCtx {
     keys: Arc<Chain>,
     config: Arc<Config>,
     results: Tx<Msg>,
-    progress: Tx<Msg>,
     progress_reg: Register<Progress>,
     views: Arc<ViewEngine>,
     index_sync: IndexSync,
@@ -2556,19 +2477,6 @@ impl WriteCtx {
                     .await
                     .unwrap_or(false);
                 self.index_sync.recording_sealed(self.id.clone()).await;
-                let sealed_row = Row {
-                    id: self.id.clone(),
-                    started: about.started,
-                    length_ms: about.length_ms,
-                    title: about.title.clone(),
-                    preview: about.preview.clone(),
-                    spoken: about.spoken.clone(),
-                    draft: about.take == 0,
-                    audio,
-                };
-                let owner =
-                    (!self.shelf.by().starts_with("did:key:")).then(|| self.shelf.by().to_string());
-                let _ = self.results.send(Msg::Sealed(owner, sealed_row)).await; // dropped: the hub has ended
                 let key = self.keys.from(Service::Soniox) != From::Nowhere;
                 match write::owed(about.take == 0, audio, about.moved, key) {
                     write::Owed::Yes => {
@@ -2656,9 +2564,7 @@ impl WriteCtx {
                         let (done, of) = (done as u32, of as u32);
                         let w = Writing { done, of, ..writing(&self.id, step) };
                         set_refine_progress(&self.progress_reg, Some(w.clone()), None);
-                        self.views
-                            .set_active_refine(self.id.clone(), Some((w.step.clone(), done, of)));
-                        let _ = self.progress.offer(Msg::Writing(w)); // dropped: the next one replaces it
+                        self.views.set_active_refine(self.id.clone(), Some((w.step, done, of)));
                     };
                     let tape = (self.tape(), key);
                     match write::write(
@@ -2675,9 +2581,8 @@ impl WriteCtx {
                         End::Done => Ok(()),
                         End::Retry(c) => {
                             let w = writing(&self.id, c);
-                            set_refine_progress(&self.progress_reg, Some(w.clone()), None);
+                            set_refine_progress(&self.progress_reg, Some(w), None);
                             self.views.set_active_refine(self.id.clone(), Some((c.into(), 0, 0)));
-                            let _ = self.progress.offer(Msg::Writing(w)); // dropped: the next one replaces it
                             Err(End::Retry(c))
                         }
                         end => Err(end),

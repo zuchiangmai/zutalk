@@ -4,9 +4,8 @@
 
 pub use crate::capture::audio::Device;
 pub use crate::id::keys::From;
-use crate::knowledge::glossary::Term;
 pub use crate::live::frame::{Caption, Column, Frame, Status};
-use crate::out::city::{Calendar, Filing};
+use crate::out::city::Filing;
 pub use crate::record::notes::Note;
 use crate::record::shelf::Said;
 pub use crate::record::takes::{RefineFailure, RefineStatus, TakeInfo};
@@ -25,7 +24,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use ts_rs::TS;
 
-/// Everything on screen that is not live text or a signal.
+/// Bounded app state sent whole whenever it changes (`PLAN.md` §2.4, `P2.md` §3.6.1).
+/// Anything that grows with recordings or history is fetched through [`Query`], never held here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct State {
@@ -40,15 +40,7 @@ pub struct State {
     pub devices: Vec<Device>,
     pub languages: Vec<String>, // the ones there are rules for
     pub exporters: Vec<String>,
-    pub library: Vec<Row>,
-    pub open: Option<Open>,
-    pub hits: Vec<(String, String)>, // a recording's id and a line's key
     pub rooms: Vec<Room>,
-    pub terms: Vec<Term>,               // the person's glossary
-    pub city: Option<Calendar>,         // the calendar of the city last asked for
-    pub writing: Vec<Writing>,          // transcripts on their way, after their stop
-    pub filing: Vec<Writing>,           // recordings on their way to a city
-    pub moving: Option<Writing>,        // the 0.8 library being moved in: which recording, how far
     pub unmoved: Vec<(String, String)>, // what 0.8 handed over that did not move: title, why
     pub captions: bool,                 // the captions window is on screen
 }
@@ -150,7 +142,9 @@ impl Notices {
 }
 
 /// A recording in a list. A draft's text is still the live one.
+/// Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct Row {
     pub id: String,
     #[ts(type = "number")]
@@ -164,7 +158,9 @@ pub struct Row {
 }
 
 /// A recording being read: each line with the key it is corrected by.
+/// Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct Open {
     pub row: Row,
     pub lines: Vec<(String, Said)>,
@@ -257,14 +253,11 @@ pub enum Command {
     Stop,
     Reconnect,
     Setup { setup: Setup },
-    Open { id: String },
-    Close,
     Change { id: String, change: Change },
     Note { id: String, op: NoteOp },
     Refine { id: String },
     Remove { id: String },
     Restore { id: String },
-    Search { query: String },
     Export { id: String, exporter: String, languages: Vec<String>, to: String },
     Share { recording: Option<String> },
     Unshare { room: String },
@@ -294,14 +287,11 @@ impl Command {
             Command::Stop => "Stop",
             Command::Reconnect => "Reconnect",
             Command::Setup { .. } => "Setup",
-            Command::Open { .. } => "Open",
-            Command::Close => "Close",
             Command::Change { .. } => "Change",
             Command::Note { .. } => "Note",
             Command::Refine { .. } => "Refine",
             Command::Remove { .. } => "Remove",
             Command::Restore { .. } => "Restore",
-            Command::Search { .. } => "Search",
             Command::Export { .. } => "Export",
             Command::Share { .. } => "Share",
             Command::Unshare { .. } => "Unshare",
@@ -332,14 +322,11 @@ impl Command {
             | Command::Stop
             | Command::Reconnect
             | Command::Setup { .. }
-            | Command::Open { .. }
-            | Command::Close
             | Command::Change { .. }
             | Command::Note { .. }
             | Command::Refine { .. }
             | Command::Remove { .. }
             | Command::Restore { .. }
-            | Command::Search { .. }
             | Command::Export { .. }
             | Command::SignIn
             | Command::SignOut

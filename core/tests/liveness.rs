@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as WallInstant};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
-use zutalk_core::app::proto::{Change, Command, Device, Setup, Status};
+use zutalk_core::app::proto::{
+    Change, Command, Device, Query, QueryValue, Setup, Status, ViewKind,
+};
 use zutalk_core::app::work::{DIAGNOSE_KEPT_DIRS, Facts};
 use zutalk_core::capture::clock::BLOCK;
 use zutalk_core::capture::tape::{self, Pass};
@@ -301,7 +303,7 @@ async fn nothing_said_or_secret_reaches_the_log() {
         id: rec_id.clone(),
         change: Change::Title { text: secret_title.into() },
     });
-    bench.send(Command::Search { query: secret_query.into() });
+    let _ = bench.query(Query::Search { query: secret_query.into(), limit: 50 }).await;
     tokio::time::sleep(Duration::from_millis(60_000)).await;
 
     bench.stop_recording().await;
@@ -1054,19 +1056,19 @@ async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
         .await
         .expect("Resume did not take effect while export was blocked");
 
-    // Change title and Open must return the updated title.
+    // Change title and Query::Recording must return the updated title.
     bench.send(Command::Change {
         id: existing_id.into(),
         change: Change::Title { text: "updated-title".into() },
     });
-    bench.send(Command::Open { id: existing_id.into() });
     bench
-        .wait_state(
-            |s| s.open.as_ref().is_some_and(|o| o.row.title == "updated-title"),
+        .wait_recording(
+            existing_id,
+            |r| r.is_some_and(|v| v.row.title == "updated-title"),
             Duration::from_secs(4),
         )
         .await
-        .expect("Change/Open did not complete while export was blocked");
+        .expect("Change/Query::Recording did not complete while export was blocked");
 
     // Observability while blocked (P1.md §2).
     let export_starts: Vec<_> = bench
@@ -1169,26 +1171,32 @@ async fn i2_background_work_runs_beside_a_recording() {
 
     // Start recording while migration & whole-session write are running, and also trigger search.
     let rec_id = bench.start_recording().await;
-    bench.send(Command::Search { query: needle.into() });
+    let search_res = bench.search(needle).await;
+    assert!(
+        search_res.hits.iter().any(|h| h.recording_id == search_id),
+        "expected search hit for {search_id}, got {search_res:?}"
+    );
 
     // Record for ~6 real seconds so multiple sentences complete while background work finishes.
     tokio::time::sleep(Duration::from_millis(6_000)).await;
 
-    // Wait for search hit, 3 migrated recordings, and the owed draft to become non-draft.
+    // Wait for migrated recordings and the owed draft to become non-draft.
     bench
-        .wait_state(
-            |s| {
-                let searched = s.hits.iter().any(|(id, _)| id == search_id);
-                let moved = s.moving.is_none()
-                    && s.library.iter().any(|r| r.title == "interview")
-                    && s.library.iter().any(|r| r.title == "Weekly sync");
-                let written = s.library.iter().any(|r| r.id == draft_id && !r.draft);
-                searched && moved && written
+        .wait_library(
+            |rows| {
+                let moved = rows.iter().any(|r| r.title == "interview")
+                    && rows.iter().any(|r| r.title == "Weekly sync");
+                let written = rows.iter().any(|r| r.id == draft_id && !r.draft);
+                moved && written
             },
             Duration::from_secs(20),
         )
         .await
-        .expect("search, migration, and whole-session transcription must all complete");
+        .expect("migration and whole-session transcription must all complete");
+    bench
+        .wait_progress(|p| p.move_old.is_none(), Duration::from_secs(10))
+        .await
+        .expect("migration progress clears");
 
     bench.stop_recording().await;
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -1931,15 +1939,14 @@ async fn a_stop_keeps_everything_said_and_recorded() {
     let (_, last) = recorded.lines.last().expect("last draft line");
     assert!(last.line.incomplete, "mid-sentence stop must keep incomplete half-line: {last:?}");
 
-    // Wait briefly so `Msg::Wrote` clears `state.writing` past `closing`.
-    let write_deadline = Instant::now() + Duration::from_secs(5);
-    while bench
-        .state()
-        .is_some_and(|s| s.writing.iter().any(|w| w.id == rec_id && w.step == "closing"))
-    {
-        assert!(Instant::now() < write_deadline, "state.writing stayed on closing");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Wait briefly so `Outlet.progress.refine` clears past `closing`.
+    bench
+        .wait_progress(
+            |p| p.refine.as_ref().is_none_or(|w| !(w.id == rec_id && w.step == "closing")),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("progress.refine stayed on closing");
 
     // Observability: exact phase order, recording.end after last phase, 5 recording task.end events.
     let phases = bench.seen().of("recording.phase");
@@ -2648,7 +2655,7 @@ async fn i7_offline_is_said_and_captions_stop_trying_until_asked() {
 
 // ---- 6. I8: cost of one update does not grow with library size (P2) ----
 
-async fn measure_state_bytes_for_library(count: usize) -> usize {
+async fn measure_state_bytes_for_library(count: usize) -> (usize, u64, usize) {
     let data = tempfile::tempdir().expect("data tempdir");
     hub::nobody();
     let shelf = hub::local_shelf(data.path());
@@ -2661,39 +2668,64 @@ async fn measure_state_bytes_for_library(count: usize) -> usize {
     opts.keep_store = true;
     opts.data = Some(data.path().to_path_buf());
     let bench = Bench::start(opts).await;
-    bench
-        .wait_state(|s| s.library.len() == count, Duration::from_secs(10))
-        .await
-        .expect("library loaded");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(reply) = bench.query(Query::LibrarySummary { tz_offset_min: 0 }).await
+            && let QueryValue::LibrarySummary(summary) = reply.value
+            && summary.total == count as u32
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "library of {count} did not finish indexing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let state_sent_before = bench.count("state.sent");
+    let inv_before = bench.outlet().invalidated.now().1.next;
 
     let target = format!("19a00000003{:08x}", 0);
     bench.send(Command::Change {
         id: target.clone(),
         change: Change::Title { text: "renamed-once".into() },
     });
-    bench
-        .wait_state(
-            |s| s.library.iter().any(|r| r.id == target && r.title == "renamed-once"),
+    let inv = bench
+        .wait_invalidated(
+            inv_before,
+            |i| i.view == ViewKind::Recording && i.key.as_deref() == Some(target.as_str()),
             Duration::from_secs(10),
         )
         .await
-        .expect("title change reflected in State");
+        .expect("title change emitted Recording invalidation");
+    let rec = bench.recording(&target).await.expect("renamed recording readable");
+    assert_eq!(rec.row.title, "renamed-once");
+
     let bytes = bench.latest_state_bytes();
+    let state_pushes = bench.count("state.sent").saturating_sub(state_sent_before);
+    let inv_bytes = serde_json::to_vec(&inv).expect("serialize invalidate").len();
     bench.finish();
-    bytes
+    (bytes, state_pushes, inv_bytes)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "P2：状态瘦身"]
 async fn i8_what_one_change_sends_does_not_grow_with_the_library() {
     let _store = STORE.lock().await;
-    let bytes_5 = measure_state_bytes_for_library(5).await;
-    let bytes_100 = measure_state_bytes_for_library(100).await;
+    let (bytes_5, pushes_5, inv_5) = measure_state_bytes_for_library(5).await;
+    let (bytes_100, pushes_100, inv_100) = measure_state_bytes_for_library(100).await;
     let ratio = bytes_100 as f64 / bytes_5.max(1) as f64;
-    eprintln!("i8: bytes_5={bytes_5} bytes_100={bytes_100} ratio={ratio:.2}");
+    eprintln!(
+        "i8: bytes_5={bytes_5} bytes_100={bytes_100} ratio={ratio:.2} \
+         state_pushes=({pushes_5},{pushes_100}) inv_bytes=({inv_5},{inv_100})"
+    );
     assert!(
         ratio <= 1.2,
         "State size grew with library: 5 recs = {bytes_5} B, 100 recs = {bytes_100} B (ratio {ratio:.2} > 1.2)"
+    );
+    assert_eq!(pushes_5, 0, "title edit must emit Invalidate without re-sending State");
+    assert_eq!(pushes_100, 0, "title edit must emit Invalidate without re-sending State");
+    assert!(
+        inv_5 <= 256 && inv_100 <= 256,
+        "Invalidate payload must stay bounded: {inv_5}/{inv_100}"
     );
 }
 
@@ -2714,7 +2746,7 @@ async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
     bench.setup(&["en", "zh"], &["en", "zh"]).await;
     let rec_id = bench.start_recording().await;
 
-    // 20 varied commands spread across 5 virtual minutes of recording.
+    // 20 varied commands & queries spread across 5 virtual minutes of recording.
     for i in 0..20usize {
         tokio::time::sleep(Duration::from_millis(15_000)).await;
         match i % 5 {
@@ -2722,14 +2754,17 @@ async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
                 id: existing.into(),
                 change: Change::Title { text: format!("Renamed {i}") },
             }),
-            1 => bench.send(Command::Search { query: "findme".into() }),
-            2 => bench.send(Command::Open { id: existing.into() }),
+            1 => {
+                let _ = bench.query(Query::Search { query: "findme".into(), limit: 50 }).await;
+            }
+            2 => {
+                let _ = bench.query(Query::Recording { id: existing.into() }).await;
+            }
             3 => bench.send(Command::Captions { show: i % 2 == 0 }),
             _ => bench
                 .send(Command::Term { said: format!("Term{i}"), written: Some(BTreeMap::new()) }),
         }
     }
-    bench.send(Command::Close);
     let _ = rec_id;
     bench.stop_recording().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2916,7 +2951,7 @@ async fn a_diagnosis_holds_nothing_that_was_said_and_no_secret() {
         id: rec_id.clone(),
         change: Change::Title { text: secret_title.into() },
     });
-    bench.send(Command::Search { query: secret_query.into() });
+    let _ = bench.query(Query::Search { query: secret_query.into(), limit: 50 }).await;
     tokio::time::sleep(Duration::from_millis(60_000)).await;
 
     bench.stop_recording().await;
@@ -3443,7 +3478,7 @@ async fn two_minute_recording_tally_matches_the_table() {
     let rec_id = bench.start_recording().await;
 
     tokio::time::sleep(Duration::from_millis(60_000)).await;
-    bench.send(Command::Search { query: "w000".into() });
+    let _ = bench.query(Query::Search { query: "w000".into(), limit: 50 }).await;
     bench.send(Command::Export {
         id: rec_id.clone(),
         exporter: "markdown".into(),
@@ -3498,7 +3533,10 @@ async fn two_minute_recording_tally_matches_the_table() {
         "lane.kicks",
         "jobs.done",
         "jobs.failed",
-        "search.stale",
+        "query.done",
+        "query.cancelled",
+        "index.rebuilds",
+        "view.invalidated",
         "refresh.merged",
         "shell.pushed",
         "shell.sinks.gone",
@@ -3515,6 +3553,8 @@ async fn two_minute_recording_tally_matches_the_table() {
         "lane.dial_ms",
         "desk.wait_ms",
         "desk.job_ms",
+        "query.ms",
+        "index.rebuild_ms",
         "shell.beat_ms",
         "ui.gap_ms",
     ];

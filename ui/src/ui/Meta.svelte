@@ -1,11 +1,11 @@
 <script lang="ts">
-  import type { Row } from '$proto/Row';
-  import type { State } from '$proto/State';
+  import type { LibraryRow } from '$proto/LibraryRow';
+  import { store } from '../lib/core.svelte';
   import { clock, langName, t, when, word } from '../lib/words.svelte';
 
   // What a recording is, in one quiet line: in the list, and above its transcript.
-  let { row, s }: { row: Row; s: State } = $props();
-  const w = $derived(s.writing.find((x) => x.id === row.id));
+  let { row }: { row: LibraryRow } = $props();
+  const w = $derived(store.progress.refine?.id === row.id ? store.progress.refine : null);
 </script>
 
 <small>

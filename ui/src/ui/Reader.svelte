@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Change } from '$proto/Change';
-  import type { Open } from '$proto/Open';
+  import type { RecordingView } from '$proto/RecordingView';
   import type { State } from '$proto/State';
   import { pick, say, send, store } from '../lib/core.svelte';
   import { clock, langName, t, text, word } from '../lib/words.svelte';
@@ -10,14 +10,15 @@
   import Sure from './Sure.svelte';
 
   // A recording: a click on a name or a text corrects it in place; each correction is a record.
-  let { s, open }: { s: State; open: Open } = $props();
+  let { s, open }: { s: State; open: RecordingView } = $props();
   const row = $derived(open.row);
+  const lines = $derived(store.openLines);
   const change = (change: Change) => send({ do: 'Change', id: row.id, change });
-  const langs = $derived([...new Set(open.lines.flatMap(([, l]) => Object.keys(l.translations)))]);
+  const langs = $derived([...new Set(lines.flatMap(([, l]) => Object.keys(l.translations)))]);
   let hidden = $state<string[]>([]); // translations put away while reading
   const shown = $derived(langs.filter((l) => !hidden.includes(l)));
-  const hits = $derived(new Set(s.hits.filter(([id]) => id === row.id).map(([, k]) => k)));
-  const copy = () => navigator.clipboard.writeText(text(open, shown)).then(() => say('copied'));
+  const hits = $derived(new Set(store.hits.filter((h) => h.recording_id === row.id).map((h) => h.key)));
+  const copy = () => navigator.clipboard.writeText(text({ lines, speakers: open.speakers }, shown)).then(() => say('copied'));
   const remove = () => (send({ do: 'Remove', id: row.id }), say('remove', { do: 'Restore', id: row.id }));
   // Written out in the languages being read; subtitles in the first of them.
   const write = (exporter: string) =>
@@ -48,7 +49,7 @@
 
 <input class="title" value={row.title} placeholder={row.preview || t('untitled')} aria-label={t('title')}
   onchange={(e) => change({ what: 'Title', text: e.currentTarget.value.trim() })} />
-<Meta {row} {s} />
+<Meta {row} />
 <p>
   <button class="primary" onclick={copy}>{t('act.copy')}</button>
   {#each langs as l (l)}
@@ -65,9 +66,9 @@
   {/if}
 </p>
 {#if shared}<Room room={shared} />{/if}
-{#if !taking}<City {s} {open} />{/if}
+{#if !taking}<City {open} />{/if}
 <ol class="transcript">
-  {#each open.lines as [k, l] (k)}
+  {#each lines as [k, l] (k)}
     <li class:hit={hits.has(k)}>
       <small>
         {#if l.speaker}{@render field(`who ${k}`, open.speakers[l.speaker] || t('speaker', l.speaker), (name) => change({ what: 'Speaker', label: l.speaker, name }))}{/if}

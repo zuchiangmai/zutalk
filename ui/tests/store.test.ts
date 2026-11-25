@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Column } from '$proto/Column';
+import type { LibraryRow } from '$proto/LibraryRow';
+import type { Progress } from '$proto/Progress';
+import type { Query } from '$proto/Query';
+import type { QueryReply } from '$proto/QueryReply';
 import type { Session } from '$proto/Session';
 import type { State } from '$proto/State';
 import type { Tally } from '$proto/Tally';
@@ -9,13 +13,13 @@ import { system, ui } from '../src/lib/words.svelte';
 
 describe('store', () => {
   it('replaces the state whole, never merging', () => {
-    const first: State = { ...EMPTY, captions: true, library: [{ id: 'a', started: 1, length_ms: 2, title: 't', preview: '', spoken: ['en'], draft: false, audio: true }] };
+    const first: State = { ...EMPTY, captions: true, update: '0.9.1' };
     const second: State = { ...EMPTY };
     take({ kind: 'State', is: first });
     expect(store.state).toBe(first);
     take({ kind: 'State', is: second });
     expect(store.state).toBe(second);
-    expect(store.state?.library).toEqual([]);
+    expect(store.state?.update).toBeNull();
     expect(store.state?.captions).toBe(false);
   });
 
@@ -166,5 +170,61 @@ describe('store', () => {
       (globalThis as unknown as { cancelAnimationFrame: typeof cancelAnimationFrame }).cancelAnimationFrame = origCaf;
       (globalThis as unknown as { document: Document }).document = origDoc;
     }
+  });
+
+  it('keeps Progress signal untouched by State', () => {
+    const progress: Progress = {
+      refine: { id: 'rec-9', step: 'translating', done: 2, of: 6 },
+      file: null,
+      move_old: null,
+    };
+    take({ kind: 'Signal', is: { seq: 1, signal: { of: 'Progress', is: progress } } });
+    expect(store.progress).toBe(progress);
+    take({ kind: 'State', is: EMPTY });
+    expect(store.progress).toBe(progress);
+  });
+
+  it('refetches Library on Invalidate and ignores older out-of-order replies', async () => {
+    const resolvers: ((reply: QueryReply) => void)[] = [];
+    const asked: Query[] = [];
+    const stop = use({
+      send: () => Promise.resolve(),
+      query: (q) => {
+        asked.push(q);
+        return new Promise<QueryReply>((resolve) => {
+          resolvers.push(resolve);
+        });
+      },
+      listen: () => () => {},
+    });
+
+    const rowOld: LibraryRow = {
+      id: 'old',
+      started: 1,
+      length_ms: 1000,
+      title: 'Old',
+      preview: '',
+      spoken: ['en'],
+      draft: false,
+      audio: true,
+      filed: false,
+      refine_failed: null,
+    };
+    const rowNew: LibraryRow = { ...rowOld, id: 'new', title: 'New' };
+
+    take({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 5 } });
+    take({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 6 } });
+    expect(asked.map((q) => q.view)).toEqual(['LibraryRecent', 'LibraryRecent']);
+
+    // Newer version (6) resolves first, then stale version (5) resolves out of order.
+    resolvers[1]({ version: 6, value: { view: 'LibraryPage', data: { total: 1, rows: [rowNew], has_more: false } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.library).toEqual([rowNew]);
+
+    resolvers[0]({ version: 5, value: { view: 'LibraryPage', data: { total: 1, rows: [rowOld], has_more: false } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.library).toEqual([rowNew]);
+
+    stop();
   });
 });

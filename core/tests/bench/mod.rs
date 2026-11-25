@@ -26,7 +26,10 @@ use tape::{CountingTape, GATE_TIMEOUT_MS, GatedTape};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use zutalk_core::app::hub::{Config, Core, Outlet};
-use zutalk_core::app::proto::{Column, Command, Device, Frame, Session, Setup, State, Status};
+use zutalk_core::app::proto::{
+    Column, Command, Device, Frame, Invalidate, LibraryFilter, LibraryRow, Progress, Query,
+    QueryReply, QueryValue, RecordingView, SearchResult, Session, Setup, State, Status,
+};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::{Draft, Drafts, LINE, Said, Shelf, Writer as ShelfWriter};
 use zutalk_core::rt::stats::{PeakRow, QueueRow, SpreadRow, Tally};
@@ -574,6 +577,148 @@ impl Bench {
 
     pub fn send(&self, command: Command) {
         self.core.send(command).expect("the hub's mailbox accepts the command");
+    }
+
+    pub async fn query(&self, q: Query) -> Result<QueryReply, &'static str> {
+        self.core.query(q).await
+    }
+
+    pub async fn library(&self) -> Vec<LibraryRow> {
+        match self
+            .core
+            .query(Query::LibraryRecent { filter: LibraryFilter::default(), limit: 200, offset: 0 })
+            .await
+            .expect("library query")
+            .value
+        {
+            QueryValue::LibraryPage(page) => page.rows,
+            other => panic!("unexpected library reply: {other:?}"),
+        }
+    }
+
+    pub async fn recording(&self, id: &str) -> Option<RecordingView> {
+        match self
+            .core
+            .query(Query::Recording { id: id.into() })
+            .await
+            .expect("recording query")
+            .value
+        {
+            QueryValue::Recording(view) => view.map(|b| *b),
+            other => panic!("unexpected recording reply: {other:?}"),
+        }
+    }
+
+    pub async fn search(&self, q: &str) -> SearchResult {
+        match self
+            .core
+            .query(Query::Search { query: q.into(), limit: 200 })
+            .await
+            .expect("search query")
+            .value
+        {
+            QueryValue::Search(res) => res,
+            other => panic!("unexpected search reply: {other:?}"),
+        }
+    }
+
+    pub async fn wait_library(
+        &self,
+        holds: impl Fn(&[LibraryRow]) -> bool,
+        limit: Duration,
+    ) -> Result<Vec<LibraryRow>, String> {
+        let mut inv = self.outlet.invalidated.clone();
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Ok(reply) = self
+                .core
+                .query(Query::LibraryRecent {
+                    filter: LibraryFilter::default(),
+                    limit: 200,
+                    offset: 0,
+                })
+                .await
+                && let QueryValue::LibraryPage(page) = reply.value
+                && holds(&page.rows)
+            {
+                return Ok(page.rows);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for library query".into());
+            }
+            let _ =
+                tokio::time::timeout(remaining.min(Duration::from_millis(50)), inv.next()).await;
+        }
+    }
+
+    pub async fn wait_recording(
+        &self,
+        id: &str,
+        holds: impl Fn(Option<&RecordingView>) -> bool,
+        limit: Duration,
+    ) -> Result<Option<RecordingView>, String> {
+        let mut inv = self.outlet.invalidated.clone();
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Ok(reply) = self.core.query(Query::Recording { id: id.into() }).await
+                && let QueryValue::Recording(view) = reply.value
+            {
+                let view = view.map(|b| *b);
+                if holds(view.as_ref()) {
+                    return Ok(view);
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for recording query".into());
+            }
+            let _ =
+                tokio::time::timeout(remaining.min(Duration::from_millis(50)), inv.next()).await;
+        }
+    }
+
+    pub async fn wait_progress(
+        &self,
+        holds: impl Fn(&Progress) -> bool,
+        limit: Duration,
+    ) -> Result<Progress, String> {
+        let mut rx = self.outlet.progress.clone();
+        let deadline = Instant::now() + limit;
+        loop {
+            let (_, prog) = rx.now();
+            if holds(&prog) {
+                return Ok((*prog).clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for progress signal".into());
+            }
+            let _ = tokio::time::timeout(remaining.min(Duration::from_millis(50)), rx.next()).await;
+        }
+    }
+
+    pub async fn wait_invalidated(
+        &self,
+        since: u64,
+        holds: impl Fn(&Invalidate) -> bool,
+        limit: Duration,
+    ) -> Result<Invalidate, String> {
+        let mut rx = self.outlet.invalidated.clone();
+        let deadline = Instant::now() + limit;
+        loop {
+            let (_, inv) = rx.now();
+            if inv.next > since
+                && let Some(hit) = inv.items.iter().find(|i| i.version > since && holds(i))
+            {
+                return Ok(hit.clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("timed out waiting for invalidation".into());
+            }
+            let _ = tokio::time::timeout(remaining.min(Duration::from_millis(50)), rx.next()).await;
+        }
     }
 
     pub fn pushed(&self, seq: u64) {
