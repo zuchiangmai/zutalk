@@ -1,5 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import './ds/tokens.css';
+import './ds/controls.css';
 import { startBus, tauri } from './bus';
 import { CaptionsWindow } from './captions/CaptionsWindow';
 import { Shell } from './shell/Shell';
