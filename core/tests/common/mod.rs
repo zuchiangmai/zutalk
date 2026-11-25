@@ -69,7 +69,22 @@ impl Upstream for Nowhere {
 
 /// The server, its origin, and the folder it keeps its data in.
 pub async fn serve() -> (String, tempfile::TempDir) {
-    serve_with(Arc::new(Keys), None).await
+    let (origin, _server, dir) = serve_handle().await;
+    (origin, dir)
+}
+
+/// The server, its origin, live `Arc<Server>` handle (for explicit sweep/shutdown), and data dir.
+pub async fn serve_handle() -> (String, Arc<Server>, tempfile::TempDir) {
+    _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let config = Config::new(&origin, dir.path(), vec![]);
+    let server =
+        Server::open(config, Arc::new(Keys), [Arc::new(Nowhere), Arc::new(Nowhere)]).unwrap();
+    let running = server.clone();
+    tokio::spawn(zutalk_server::serve(listener, running));
+    (origin, server, dir)
 }
 
 /// The server, with this directory and the 0.8 line's invite service there.

@@ -99,3 +99,11 @@
 - **并发防超支必须在「余额」和「每日次数」两把尺子上共用同一个 `pending` 预占账。** 如果 `Book::pending` 只扣余额、不记 `(did, service)` 在途件数，两个并发 `POST /lease` 在当日只剩 1 次额度时会同时通过上限检查并双双铸钥。把 `service` 编进 `pending` 并在 `Book::quota` 与 `lease` 里同步计入在途次数，并发压测下绝不超发。
 - **领回必须靠 `person.known(&id)`（含墓碑）而不是 `person.about(&id)` 判重，否则会复活用户已删的录音。** 用户把领回来的录音删掉后，本人书架里留的是空值墓碑；如果下次登录只看现行清单，会把本机备份里同一条录音再次领回来。用 `known` 检查路径历史即可同时保证幂等、防复活、又允许同人补领后来新录的本机录音。
 - **`Stats` 接近硬上限（38/40 计数）时，新业务观测应优先走结构化事件而非滥加计数器。** P4 全程零新增 `Stats` 计数/分布行，身份/额度/领回全部复用 `jobs.done`/`jobs.failed`/`commands.done` 配合 4 个语义清晰的事件（`identity.auth`、`quota.updated`、`identity.adopt`、`identity.discard_local`），稳守 `stats.full == 0` 与 `Tally ≤ 8192 B`。
+
+## P5 里学到的（2026-11）
+
+- **直播房间只留槽且用 `tokio::sync::watch`，同时解决了内存有界、晚来观众立得最新帧、精确人数与清零 `broadcast::channel` 欠账。** 旧 `broadcast::channel(256)` 既占欠账又在慢观众时滞后；换成 `watch<SlotState>` 后每个房间内存恒定 1 槽，`receiver_count()` 直接给 `viewers`，`send_replace(SlotState::Gone)` 一次通知全部观众并自然结束流，彻底告别 `rooms/` 磁盘残留。
+- **两道保险必须分开验证，且锁文件只放房间 id 绝不放密钥。** 客户端崩溃后进程重启路径靠 `<data>/host.lock`（仅 32 字节十六进制房间 id，零密钥）发 `gone` 立即清理；客户端崩溃且不再重启的路径靠服务器 2 分钟无写入 TTL 清扫（`ROOM_IDLE_TTL_MS = 120_000`）。两者互补，确保「主持一场、崩溃一次、外面不留任何东西」在所有故障形态下成立。
+- **桌面字幕窗在 `shell.sh` 零锁零查询红线下，几何同步必须靠事件驱动 + 无锁防抖 + 纯状态机 diff。** 不调任何会阻塞主线程的 `inner_size`/`outer_position`/`scale_factor`，直接用 `WindowEvent::Moved`/`Resized` 推入 `tokio::sync::watch`、防抖 400 ms 回写 `Command::CaptionGeometry`，并由 `CaptionWindowTracker::diff` 跳过相同规格与全屏期间几何，杜绝 OS 事件回调引发的回环。
+- **按住 1.4 秒 + 8 秒可撤销倒数把「公开不可撤回」的误触降到零，但绝不能提前派发 `Command::File`。** 8 秒宽限期完全在界面显式状态机 `FilePhase` 内完成，按撤销立即清定时器并退回 `review`；只有宽限期走完才真正发出 `Command::File`。
+- **静态规则脚本的正则扫描也会检查注释与测试外源码。** `ui.sh` 禁止不安全 HTML 注入属性名出现在 `ui/src` 任何位置（包括注释），二维码统一用 `uqr::encode()` 输出纯 JSX `<svg><path d={...} /></svg>`，既轻又彻底消除注入面。

@@ -73,7 +73,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `record` | `record.rs`、`record/shelf.rs`、`record/notes.rs`、`record/takes.rs`、`record/adopt.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录读写、改、删与撤销、`Writer`、O(1) 草稿写手 `DraftWriter` 与 `DraftGap`）；带时间/锚点的多条笔记 `notes`；多版本读取与精修状态机 `takes`；本机 `did:key` 首次登录重签领回与清理 `adopt`；音频保留与清扫 `retain`；0.8 交接搬运 `migrate` |
 | `knowledge` | `knowledge.rs`、`knowledge/glossary.rs` | 词表（读写、给现场各流的 `terms`/`translation_terms` 与整场转写的 `Plan.terms`；P6 升级为 `topic.rs`） |
 | `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed`、精修失败状态持久化 |
-| `out` | `out.rs`、`out/export.rs`、`out/room.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；房间密文封帧与写槽；交城日历、签名上传与分段音频 |
+| `out` | `out.rs`、`out/export.rs`、`out/host.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；无盘主持直播房间状态机、内存持钥封帧与 `host.lock` 崩溃恢复；交城日历、集中 `ARCHIVE_TYPES` 归档表与分段音频 |
 | `view` | `view.rs`、`view/index.rs`、`view/transcript.rs`、`view/query.rs` | L3 可丢弃本机投影层：SQLite WAL + FTS5 `trigram` 索引与自动重建/对账/增量同步、64 行正文分块与纯函数对比、并发限 8 可取消 `ViewEngine` 与有界 `Invalidations` 环 |
 | `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口（含 `Core::query`）；零 IO 状态机 `hub`（含 `Boot`）；瘦身后的协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`（单写 SQLite 同步）、导出、串行后台精修/交城/搬运与自检包 `work` |
 | `shell` | `app/src/lib.rs`、`app/src/main.rs`、`app/src/pump.rs`、`app/src/beat.rs`、`app/src/windows.rs`、`app/src/updates.rs` | 无锁全 async 的 Tauri 外壳：异步 `query` 命令、独占推送状态机 `Fan`（含 `Progress` 与 `Invalidate` 转发/溢出降级）、非阻塞主线程心跳 `Beat`、不查询主线程的字幕窗显隐、无锁更新任务 |
@@ -92,13 +92,13 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 导出：`export::EXPORTERS` 是一张表，一种格式一行；渲染是纯函数，写文件在枢纽里。路径没有扩展名时补上那一行的扩展名。界面导出阅读页正在显示的语言，字幕文件用其中第一种；路径来自 Tauri 对话框插件。
 
-### 5.3 房间
+### 5.3 房间（P5 改为无盘只留槽与主持两道保险）
 
-服务器上一个房间就是一个 pack：造它的那条记录、往日志里加帧的每条记录，都是主人签名的 `talk/room` 记录 `{ room, do, frame, aud }`，经同一个 `check` 核对（类型、正文的 CID、`aud`、时间窗、签名钥匙是作者那一刻的）。所以只有一种认证；同一条记录送两次只算一次，重启后也一样。槽只在内存里，一个槽不会被换回更旧的帧。`make` 造房间（每人有上限），`log` 加一帧（每个房间有总字节上限），`slot` 换槽里的帧（空即清空），`gone` 删掉房间并告诉正在看的人。读房间不需要签名：`GET /rooms/{id}/events` 是 SSE，先补日志（按 `Last-Event-ID` 续接，不重复不遗漏），再给槽，然后实时。一个房间最后一次写入后保留 30 天，服务器重启算一次写入。
+服务器上直播房间**完全纯内存、不落盘**（不建 `rooms/` 文件夹、不保留历史帧日志）：`make`、`slot`、`gone` 均为本人签名的 `talk/room` 记录 `{ room, do, frame, aud }`，经同一个 `check` 核对（类型、正文 CID、`aud`、时间窗与签名钥匙）；已废除的 `log` 动作一律拒绝返回 `400 "do"`。房间内部以 `tokio::sync::watch<SlotState>` 广播最新密文槽（`Slot` / `Gone`），`slot` 要求时间严格递增并返回实时人数 `{ "viewers": n }`；`GET /rooms/{id}/events` 以 `WatchStream` 只推送最新 `slot` 或 `gone`（收到 `gone` 自动收尾）。清扫循环运行在 `server.tasks` 监督树（`server.sweep`）下并支持取消停机，默认 **2 分钟无写入即过期清理**（`ROOM_IDLE_TTL_MS = 120_000`），作为主机离线或崩溃时的第二道保险。
 
-本机这边：房间的 id 是本机随机的 128 位，钥匙由本机的 `room` 秘密派生，人拥有哪些房间是 `talk/share` 记录（在 `shares.jsonl`，不算录音）。`Share { recording: None }` 造直播房间：枢纽的字幕帧经一个 `watch` 交给这个房间的任务，任务最多每 250 毫秒封一帧写进槽，录音之间槽是空的，出错只在错误变化时说一次。`Share { recording: Some(id) }` 造房间、记下、再把这条录音分页写进日志（每页带录音的抬头和放得下的行，观看页把行接起来）。`Unshare` 先从清单上拿掉（直播任务随之停止），再删服务器上的房间；删不掉就放回清单并说明原因。`State.rooms` 列出房间和链接 `{server}/r/{id}#{key}`。
+本机这边：已删除单条录音分享（`out/room.rs`、`talk/share`、`State.rooms`、`Command::Share`/`Unshare`），由 `core/src/out/host.rs` 承接内存态主持状态机 `HostState`（`Idle` / `Arming` / `Armed` / `Live` / `Stopping`）。随机 128 位房间 id 与 256 位临时 AES-256-GCM 密钥（`Zeroizing<[u8; 32]>`）**仅驻留内存**；磁盘仅原子写入 `<data>/host.lock` 且**只存 32 位小写十六进制房间 id，绝不存密钥**。待开场每 3 秒轮询等待人数、直播中至多每 250 毫秒推最新密文槽（静音 30 秒保活），服务器返回的 `viewers` 实时进 `State.host` 与 `Session.viewers`。关闭观众字幕、取消主持/离页、`StopOutbound`（保留本机录音不停）、停止录音、退出登录与桌面 `ExitRequested` 均发 `gone` 并删除 `host.lock`；进程崩溃后下次启动或登录发现 `host.lock` 会自动发 `gone` 清理并记 `host.recover`，构成第一道保险。
 
-观看页 `ui/viewer.html` 只凭链接读房间：钥匙从 `#` 后取，WebCrypto 开帧，按到达顺序处理，槽是现场字幕，日志是录音；钥匙不对、房间没了、看的人太多，都以代码说一次。服务器不托管页面：`ui/dist` 由服务器前面的边缘以同一个源提供，`/r/*` 指向 `viewer.html`（和 TLS、限流一样是边缘的事）。
+观看页 `ui/viewer.html` 只凭链接 `{server}/r/{id}#{key}` 读只留槽直播房间：密钥从 `#` 后段取，WebCrypto AES-256-GCM 解密；空槽显示「等待开场」，收到 `gone` 立即清空实时字幕切到锁屏终态（「字幕结束了 · 这个链接已失效」），密钥错误（`room.bad`）、人数满员（`room.viewers`）与离线（`offline`）各有明确提示。服务器不托管页面：`ui/dist` 由前端边缘以同源提供并把 `/r/*` 指向 `viewer.html`。
 
 ### 5.4 逐字显现与界面语言
 
@@ -279,6 +279,25 @@ P4 零新增外部 crate 与 npm 包（`server/Cargo.toml` 仅复用锁文件既
   - `SettingsPage` 展示 `@handle` 与截断 DID、本机领回备份横幅（红底两步 `InlineConfirm`）、出字/AI 每日社区额度进度条与刷新、自有密钥优先说明与全部 8 语字典同步。
 
 测试：`server/tests/quota.rs`、`zu/tests/did.rs`、`core/tests/identity.rs`（含端到端落盘隐私与统计上限验收 `identity_secrets_dids_and_handles_never_reach_logs_or_diagnose`）、`core/tests/adopt.rs`、`ui/tests/identity_sheet.test.tsx`、`ui/tests/library_settings.test.tsx`。
+
+### 5.18 主持、字幕窗场合与对外（P5）
+
+P5 零新增外部依赖，把「离开设备」彻底收拢为无盘只留槽直播房间与显式按住确认的交城档案馆两件事，并彻底清零全仓 `bounded.sh`、`spawn.sh`、`layers.sh` 三份规则脚本的剩余欠账（详见 `docs/build/phases/P5.md`）：
+
+- **服务器无盘只留槽直播房间与任务取消（`server/src/{tasks,room,lib}.rs`）**：
+  - `Tasks` 新增 `CancellationToken`；清扫循环迁入 `server.tasks.spawn("server.sweep", …)`，优雅停机即取消；
+  - `room.rs` 删去全部 `rooms/` 磁盘 pack 与 `frames` 无限日志，改用 `tokio::sync::watch<SlotState>` 推最新槽并回报精确 `viewers`，默认 2 分钟无写入 TTL 清扫（`ROOM_IDLE_TTL_MS = 120_000`），清零 `bounded.sh` 与 `spawn.sh` 欠账。
+- **核心 `out/host.rs` 两道保险与 `out/city.rs` 归档表集中（`core/src/out/{host,city}.rs`、`core/src/app/{proto,hub,work}.rs`）**：
+  - 删除 `out/room.rs`、`talk/share`、`State.rooms`、`Command::Share`/`Unshare`；`out/host.rs`（零 `crate::app::proto` 依赖）实现 `HostState`/`host_step` 状态机、内存 `Zeroizing` 随机密钥、`host.lock`（只写 32 位房间 id）启动恢复与 `Command::StopOutbound`（本机录音不停）；
+  - `out/city.rs` 集中 `ARCHIVE_TYPES` 常量表（`DECISIONS.md` #6），并以本地 `FilingStep` 解除对 `crate::app::proto` 的反向依赖，全仓 `layers.sh` 欠账归零。
+- **桌面外壳无锁 4 场合字幕窗与退出收尾（`core/src/app/proto.rs`、`app/src/{windows,pump,main}.rs`）**：
+  - `Setup` 增补定界 4 场合 `CaptionPrefs`（`SelfView`/`Band`/`Stage`/`Facing`）与 `city` 记忆地址并落盘 `settings.json`；
+  - `app/src/windows.rs` 以纯状态机 `CaptionWindowTracker::diff` 驱动置顶、穿透点击、舞台全屏与几何恢复，经 `WindowEvent::Moved`/`Resized` + 无锁 `watch` + `CAPTION_GEO_DEBOUNCE_MS = 400` 防抖回写 `Command::CaptionGeometry`（零阻塞窗口查询、零锁）；`RunEvent::ExitRequested` 异步等待 `gone`（上限 `HOST_EXIT_WAIT_MS = 1_500`，零 `block_on`）。
+- **界面主持流、按住交城、字幕窗场合与手机观众页（`ui/src/`）**：
+  - `HostPage`（开场前色带/白纸切换、记忆城日历、最近活动、纯 JSX SVG 二维码与放大弹窗、离页自动 `HostCancel`）、`LivePage` 色带与一键 `StopOutbound`、`FileArchiveCard`（`filePhaseStep` 1.4 s 按住 + 8 s 可撤销倒数环后再发 `Command::File`）、`OutboundPage`（现场对外状态 + `Query::Outbound` 列表）；
+  - `CaptionScenesPanel`（16:10 实时桌面预览 + 全部场合/语言防删空/窗口开关）、4 场合零查询 `CaptionsWindow`（含 `Facing` 180° 旋转与 10 s `auto_hide`）及只留槽手机 `ViewerPage`（`viewerStatusStep`、单语聚焦渐隐、收到 `gone` 即刻清屏），8 语字典同步齐备。
+
+测试：`server/tests/rooms.rs`、`core/tests/host.rs`（含双保险崩溃恢复 `host_crash_recovery_double_insurance_leaves_nothing_outside` 与全链路落盘隐私字节审计 `host_city_and_caption_secrets_never_reach_logs_diagnose_lock_or_settings`）、`core/tests/city.rs`、`app/tests/windows.rs`、`ui/tests/host_outbound.test.tsx`、`ui/tests/captions_viewer.test.tsx`、`ui/tests/room.test.ts`。
 
 ## 6. 各模块的大小（上限已取消）
 

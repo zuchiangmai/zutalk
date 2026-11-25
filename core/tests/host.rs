@@ -6,23 +6,34 @@
 mod common;
 mod hub;
 
-use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine};
-use common::{Viewer, from_link, serve};
+use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD, Engine};
+use common::{Viewer, from_link, serve, serve_handle};
 use futures_util::{SinkExt, StreamExt};
-use hub::{App, STORE, config_on as config, store};
-use serde_json::json;
+use hub::{App, ME, STORE, config_on as config, store};
+use serde_json::{Value as Json, json};
+use std::collections::BTreeMap;
 use std::fs;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, ResponseTemplate};
-use zutalk_core::app::proto::{Command, HostEvent, HostState, Setup};
+use wiremock::matchers::{any, method, path};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use zu::{Cid, Codec, Held, PublicKey, Query as ZuQuery, Record, SecretKey, Value as ZuValue};
+use zutalk_core::app::hub::{Config as CoreConfig, Core, Outlet};
+use zutalk_core::app::proto::{
+    CaptionBg, CaptionPrefs, CaptionScene, CaptionSize, Command, HostEvent, HostState, Query,
+    QueryValue, RecordingView, Session, Setup, State, WindowRect,
+};
+use zutalk_core::capture::tape;
 use zutalk_core::id::keys;
 use zutalk_core::out::host::{
     HOST_LOCK_FILE, HostStepEvent, clear_lock, host_step, is_room_id, link, open, read_lock, seal,
     write_lock,
 };
 use zutalk_core::rt::supervise::End;
+use zutalk_server::ROOM_IDLE_TTL_MS;
 
 const KEY: [u8; 32] = [7; 32];
 
@@ -399,4 +410,605 @@ async fn unauthenticated_host_arm_is_refused_without_touching_server() {
     assert_eq!(app.outlet.state.now().1.host, HostState::Idle);
     assert!(!dir.path().join(HOST_LOCK_FILE).exists());
     server.verify().await;
+}
+
+/// Core wrapper that inherits the caller's active `zutalk_log::files` scope instead of installing
+/// an in-memory `capture()`, so events reach real `<data>/logs/zutalk.jsonl` on disk (`LESSONS.md`).
+struct FileApp {
+    core: Core,
+    outlet: Outlet,
+    said_at: u64,
+}
+
+impl FileApp {
+    fn start(scope: &zutalk_log::Scope, cfg: CoreConfig) -> Self {
+        let (core, outlet) = {
+            let _entered = scope.enter();
+            Core::start(cfg).expect("core starts")
+        };
+        Self { core, outlet, said_at: 0 }
+    }
+
+    fn send(&self, scope: &zutalk_log::Scope, command: Command) {
+        let _entered = scope.enter();
+        self.core.send(command).expect("hub accepts command");
+    }
+
+    async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {
+        let wait = async {
+            let (seq, state) = self.outlet.state.now();
+            if seq > 0 && holds(&state) {
+                return (*state).clone();
+            }
+            while let Some((_, state)) = self.outlet.state.next().await {
+                if holds(&state) {
+                    return (*state).clone();
+                }
+            }
+            panic!("the core stopped");
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("state came in time")
+    }
+
+    async fn session(&mut self, holds: impl Fn(Option<&Session>) -> bool) -> Option<Session> {
+        let wait = async {
+            loop {
+                let (_, current) = self.outlet.session.now();
+                if holds((*current).as_ref()) {
+                    return (*current).clone();
+                }
+                self.outlet.session.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("session came in time")
+    }
+
+    async fn notice(&mut self, code: &str) {
+        let wait = async {
+            loop {
+                let (_, notices) = self.outlet.said.now();
+                let first = notices.next.saturating_sub(notices.codes.len() as u64);
+                if self.said_at < first {
+                    self.said_at = first;
+                }
+                while self.said_at < notices.next {
+                    let idx = (self.said_at - first) as usize;
+                    self.said_at += 1;
+                    if notices.codes[idx] == code {
+                        return;
+                    }
+                }
+                self.outlet.said.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("notice came in time")
+    }
+
+    async fn wait_recording(
+        &self,
+        id: &str,
+        holds: impl Fn(Option<&RecordingView>) -> bool,
+    ) -> Option<RecordingView> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Recording { id: id.into() }).await
+                    && let QueryValue::Recording(view) = reply.value
+                {
+                    let view = view.map(|b| *b);
+                    if holds(view.as_ref()) {
+                        return view;
+                    }
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("recording condition came in time")
+    }
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+const CITY_DID: &str = "did:zu:cityaudit4seas";
+const ORG_DID: &str = "did:zu:orgaudit4seas";
+
+/// Minimal in-memory Zu city host accepting `/.well-known/zu-did` and `/.well-known/zu-recs`.
+#[derive(Clone, Default)]
+struct AuditCity(Arc<Mutex<Held>>);
+
+impl AuditCity {
+    fn with_event(event_key: &str, title: &str) -> Self {
+        let signer = SecretKey::from_seed(&[7; 32]);
+        let body = ZuValue::from_json(
+            &json!({ "title": title, "start": 1_800_000_000_000i64 }).to_string(),
+        )
+        .unwrap();
+        let body_cid = Cid::of(Codec::Drisl, &body.encode());
+        let rec = Record::sign(
+            &signer,
+            zu::Path { by: ORG_DID.into(), ty: "ev/event".into(), key: event_key.into() },
+            Some(body_cid),
+            [],
+            1_800_000_000_000,
+            Some(CITY_DID),
+        )
+        .unwrap();
+        let mut held = Held::default();
+        held.bodies.insert(body_cid, body);
+        held.records.push(rec);
+        Self(Arc::new(Mutex::new(held)))
+    }
+}
+
+impl Respond for AuditCity {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let mut held = self.0.lock().unwrap();
+        let param = |name: &str| {
+            request.url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned())
+        };
+        match (request.method.as_str(), request.url.path()) {
+            ("GET", "/.well-known/zu-did") => ResponseTemplate::new(200).set_body_string(CITY_DID),
+            ("GET", "/.well-known/zu-recs") => {
+                let query = ZuQuery {
+                    by: param("by"),
+                    to: param("to"),
+                    ty: param("type"),
+                    key: param("key"),
+                    ..ZuQuery::default()
+                };
+                let records: Vec<Record> =
+                    held.records.iter().filter(|r| query.matches(r)).cloned().collect();
+                let bodies = records
+                    .iter()
+                    .filter_map(|r| Some((r.body?, held.bodies.get(&r.body?)?.clone())))
+                    .collect();
+                let view = Held { records, bodies };
+                ResponseTemplate::new(200).set_body_bytes(zu::query::answer(&view, None))
+            }
+            ("POST", "/.well-known/zu-recs") => {
+                let Ok((given, _)) = ZuQuery::default().read(&request.body) else {
+                    return ResponseTemplate::new(400);
+                };
+                let mut stat = BTreeMap::new();
+                for rec in given.records {
+                    let key_seed = if rec.path.by == ME { [5; 32] } else { [7; 32] };
+                    let signer = SecretKey::from_seed(&key_seed).public();
+                    let signed = rec.verify(
+                        |by, pubkey: &PublicKey, _| by == ME && *pubkey == signer,
+                        |_| None,
+                    );
+                    let word = if signed.is_ok() && rec.to.as_deref() == Some(CITY_DID) {
+                        "ok"
+                    } else {
+                        "bad"
+                    };
+                    stat.insert(rec.cid().to_string(), ZuValue::Str(word.into()));
+                    if word == "ok"
+                        && let Some(cid) = rec.body
+                        && let Some(val) = given.bodies.get(&cid)
+                    {
+                        held.bodies.insert(cid, val.clone());
+                        held.records.push(rec);
+                    }
+                }
+                let answer = ZuValue::Map([("stat".to_owned(), ZuValue::Map(stat))].into());
+                ResponseTemplate::new(200).set_body_bytes(answer.encode())
+            }
+            _ => ResponseTemplate::new(404),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_crash_recovery_double_insurance_leaves_nothing_outside() {
+    let _store = STORE.lock().await;
+    store(true);
+    keys::set("soniox", Some(b"sk-own-test-key")).expect("soniox key kept");
+    let (origin, srv, srv_dir) = serve_handle().await;
+    let soniox = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("ws port");
+    let realtime = format!("ws://{}", soniox.local_addr().expect("ws addr"));
+
+    // --- Insurance 1: client crash leaves host.lock -> reboot sends `gone`, clears lock ---
+    let dir1 = tempfile::tempdir().expect("dir1");
+    let (link1, room_id_1, mut viewer1) = {
+        let mut app = App::on(dir1.path(), &origin, &realtime);
+        app.until(|_| true).await;
+        let setup =
+            Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
+        app.send(Command::Setup { setup });
+
+        app.send(Command::HostArm { event: Some(sample_event("InsuranceOne")), captions: true });
+        let state = app
+            .until(|s| matches!(s.host, HostState::Armed { captions: true, link: Some(_), .. }))
+            .await;
+        let HostState::Armed { link: Some(live_link), .. } = state.host else {
+            panic!("expected Armed");
+        };
+        let (_, room_id, key_bytes) = from_link(&live_link);
+        let key_frag = BASE64_URL_SAFE_NO_PAD.encode(key_bytes);
+        let lock_body = fs::read_to_string(dir1.path().join(HOST_LOCK_FILE)).expect("lock");
+        assert_eq!(lock_body, room_id);
+        assert!(!lock_body.contains(&key_frag));
+
+        let mut viewer = Viewer::open(&live_link).await;
+        viewer.until(|ev, plain| (ev == "slot" && plain.is_none()).then_some(())).await;
+        app.until(|s| s.host.viewers() == 1).await;
+
+        app.send(Command::Start);
+        app.session(|s| s.is_some_and(|s| s.outbound && s.viewers == 1)).await;
+
+        let (stream, _) = soniox.accept().await.expect("soniox connect");
+        let mut ws = accept_async(stream).await.expect("ws");
+        let _ = ws.next().await;
+        let payload = json!({
+            "tokens": [
+                {"text": "InsuranceLive", "start_ms": 100, "end_ms": 400, "is_final": true, "language": "en", "speaker": "1"},
+                {"text": "<end>", "is_final": true}
+            ],
+            "total_audio_proc_ms": 500
+        });
+        ws.send(Message::text(payload.to_string())).await.expect("sent caption");
+        viewer
+            .until(|ev, plain| {
+                let cols: Json = serde_json::from_slice(plain?).ok()?;
+                (ev == "slot" && cols[0]["lines"][0]["text"] == "InsuranceLive").then_some(())
+            })
+            .await;
+
+        // Drop Core directly without Stop / HostCancel to simulate a process crash.
+        (live_link, room_id, viewer)
+    };
+    let _ = &link1;
+    assert_eq!(read_lock(dir1.path()).as_deref(), Some(room_id_1.as_str()));
+
+    let mut restarted = App::with(config(dir1.path(), &origin));
+    restarted.until(|s| s.me.is_some()).await;
+    viewer1.until(|ev, _| (ev == "gone").then_some(())).await;
+    assert!(viewer1.next().await.is_none(), "viewer stream must close after gone");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while dir1.path().join(HOST_LOCK_FILE).exists() || restarted.seen.of("host.recover").is_empty()
+    {
+        assert!(tokio::time::Instant::now() < deadline, "host.recover timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let status1 = reqwest::get(format!("{origin}/rooms/{room_id_1}/events")).await.unwrap();
+    assert_eq!(status1.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(restarted.seen.of("host.recover").iter().any(|l| l.text("code") == Some("ok")));
+    assert_eq!(restarted.seen.refused(), 0);
+    drop(restarted);
+
+    // --- Insurance 2: client crash WITHOUT reboot -> server 2-minute TTL sweep cleans room ---
+    let dir2 = tempfile::tempdir().expect("dir2");
+    let (room_id_2, mut viewer2) = {
+        let mut app = App::with(config(dir2.path(), &origin));
+        app.until(|_| true).await;
+        app.send(Command::HostArm { event: None, captions: true });
+        let state = app
+            .until(|s| matches!(s.host, HostState::Armed { captions: true, link: Some(_), .. }))
+            .await;
+        let HostState::Armed { link: Some(live_link), .. } = state.host else {
+            panic!("expected Armed");
+        };
+        let (_, room_id, _) = from_link(&live_link);
+        let mut viewer = Viewer::open(&live_link).await;
+        viewer.until(|ev, _| (ev == "slot").then_some(())).await;
+        (room_id, viewer)
+    };
+    // Client is NOT restarted; advance server sweep past ROOM_IDLE_TTL_MS.
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    let (removed, sweep_events) = {
+        let sweep_seen = zutalk_log::capture(zutalk_log::Level::Debug);
+        let removed = srv.sweep(now_ms + ROOM_IDLE_TTL_MS + 1);
+        (removed, sweep_seen.of("server.sweep"))
+    };
+    assert_eq!(removed, 1);
+    assert!(
+        sweep_events.iter().any(|l| l.u64("removed") == Some(1)),
+        "expected server.sweep(removed = 1), saw {sweep_events:?}",
+    );
+    viewer2.until(|ev, _| (ev == "gone").then_some(())).await;
+    assert!(viewer2.next().await.is_none(), "viewer2 stream must close after TTL sweep");
+    let status2 = reqwest::get(format!("{origin}/rooms/{room_id_2}/events")).await.unwrap();
+    assert_eq!(status2.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(
+        !srv_dir.path().join("rooms").exists(),
+        "ephemeral live rooms must never create a rooms/ directory on server disk"
+    );
+    srv.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_city_and_caption_secrets_never_reach_logs_diagnose_lock_or_settings() {
+    let _store = STORE.lock().await;
+    store(true);
+    keys::set("soniox", Some(b"sk-own-privacy-probe-99")).expect("soniox key kept");
+    keys::set("openrouter", Some(b"sk-own-openrouter-probe-99")).expect("openrouter key kept");
+    let refused_before = zutalk_log::refused();
+
+    let transcript_sentinel = "SecretTranscriptPhrase88";
+    let translation_sentinel = "SecretTranslationPhrase99";
+    let event_title_sentinel = "SecretCityEventTitle77";
+    let handle_sentinel = "privacyhostprobe.zuzalu.ink";
+
+    let (origin, srv, srv_dir) = serve_handle().await;
+    let city_server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(AuditCity::with_event("ev-audit-1", event_title_sentinel))
+        .mount(&city_server)
+        .await;
+    let city_addr = city_server.uri();
+
+    let soniox = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("ws port");
+    let realtime = format!("ws://{}", soniox.local_addr().expect("ws addr"));
+
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let log_dir = data_dir.path().join("logs");
+    let (scope, guard) = zutalk_log::files(
+        &log_dir,
+        "zutalk",
+        zutalk_log::Level::Debug,
+        zutalk_log::Limits::default(),
+    )
+    .expect("open client file log");
+
+    let asked = hub::Asked::default();
+    let soniox_http = hub::soniox(&asked).await;
+    let openrouter_http = MockServer::start().await;
+    let mt_body = json!({
+        "lines": [{ "id": 0, "unclear": false, "facts": [], "to": { "zh": "Zuzalu 位于清迈。" } }]
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "choices": [{ "message": { "content": mt_body } }] })),
+        )
+        .mount(&openrouter_http)
+        .await;
+
+    let mut cfg = config(data_dir.path(), &origin);
+    cfg.realtime = realtime;
+    cfg.soniox = format!("{}/v1", soniox_http.uri());
+    cfg.openrouter = format!("{}/api/v1", openrouter_http.uri());
+    let mut app = FileApp::start(&scope, cfg);
+    app.until(|s| s.me.is_some()).await;
+
+    // 1. Update Setup (4-scene CaptionPrefs + remembered city) and CaptionGeometry.
+    let mut caption = CaptionPrefs { scene: CaptionScene::Band, ..CaptionPrefs::default() };
+    caption.scenes.band.bg = CaptionBg::Solid;
+    caption.scenes.band.size = CaptionSize::Large;
+    caption.scenes.band.auto_hide = true;
+    app.send(
+        &scope,
+        Command::Setup {
+            setup: Setup {
+                spoken: vec!["en".into()],
+                shown: vec!["en".into(), "zh".into()],
+                caption,
+                city: Some(city_addr.clone()),
+                ..Setup::default()
+            },
+        },
+    );
+    app.send(
+        &scope,
+        Command::CaptionGeometry {
+            scene: CaptionScene::Band,
+            rect: WindowRect { x: 48, y: 96, width: 820, height: 180 },
+        },
+    );
+    app.until(|s| s.setup.caption.scenes.band.geometry.is_some()).await;
+
+    // 2. Load city calendar and arm hosting with sentinel event title.
+    app.send(&scope, Command::City { address: city_addr.clone() });
+    let cal_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let event_path = loop {
+        if let Ok(reply) = app.core.query(Query::Calendar).await
+            && let QueryValue::Calendar(Some(cal)) = reply.value
+            && let Some(ev) = cal.events.first()
+        {
+            assert_eq!(ev.title, event_title_sentinel);
+            break ev.path.clone();
+        }
+        assert!(tokio::time::Instant::now() < cal_deadline, "city calendar did not load");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
+
+    let host_event = HostEvent {
+        city: city_addr.clone(),
+        event: event_path.clone(),
+        title: event_title_sentinel.into(),
+        start: Some(1_800_000_000_000),
+    };
+    app.send(&scope, Command::HostArm { event: Some(host_event), captions: true });
+    let armed = app
+        .until(|s| matches!(s.host, HostState::Armed { captions: true, link: Some(_), .. }))
+        .await;
+    let HostState::Armed { link: Some(live_link), .. } = armed.host else {
+        panic!("expected Armed");
+    };
+    let (_, room_id, key_bytes) = from_link(&live_link);
+    let key_frag = BASE64_URL_SAFE_NO_PAD.encode(key_bytes);
+    let key_std = BASE64_STANDARD.encode(key_bytes);
+    let lock_snapshot = fs::read_to_string(data_dir.path().join(HOST_LOCK_FILE)).expect("lock");
+    assert_eq!(lock_snapshot, room_id);
+
+    // 3. Start recording, stream encrypted transcript + translation sentinel, stop outbound, stop rec.
+    let mut viewer = Viewer::open(&live_link).await;
+    viewer.until(|ev, plain| (ev == "slot" && plain.is_none()).then_some(())).await;
+
+    app.send(&scope, Command::Start);
+    let rec_id = app.session(|s| s.is_some_and(|s| s.outbound)).await.expect("live session").id;
+
+    let (stream, _) = soniox.accept().await.expect("ws accept");
+    let mut ws = accept_async(stream).await.expect("ws");
+    let _ = ws.next().await;
+    let tokens = json!({
+        "tokens": [
+            {"text": transcript_sentinel, "start_ms": 100, "end_ms": 500, "is_final": true, "language": "en", "speaker": "1"},
+            {"text": translation_sentinel, "is_final": true, "translation_status": "translation", "language": "zh"},
+            {"text": "<end>", "is_final": true}
+        ],
+        "total_audio_proc_ms": 600
+    });
+    ws.send(Message::text(tokens.to_string())).await.expect("send tokens");
+    tokio::spawn(async move {
+        while let Some(Ok(message)) = ws.next().await {
+            if matches!(&message, Message::Text(text) if text.is_empty()) {
+                let _ = ws
+                    .send(Message::text(json!({"tokens": [], "finished": true}).to_string()))
+                    .await;
+            }
+        }
+    });
+
+    viewer
+        .until(|ev, plain| {
+            let cols: Json = serde_json::from_slice(plain?).ok()?;
+            (ev == "slot" && cols[0]["lines"][0]["text"] == transcript_sentinel).then_some(())
+        })
+        .await;
+
+    // Wait for audio tape persistence + 200 ms so seal() never discards as zero-length under load.
+    let tape_dir = data_dir.path().join("tape").join(&rec_id);
+    for _ in 0..100 {
+        if tape::kept(&tape_dir) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    app.send(&scope, Command::StopOutbound);
+    app.notice("host.stopped").await;
+    viewer.until(|ev, _| (ev == "gone").then_some(())).await;
+
+    app.send(&scope, Command::Stop);
+    app.session(|s| s.is_none()).await;
+    app.wait_recording(&rec_id, |v| {
+        v.is_some_and(|r| r.row.length_ms > 0 && r.take == 1 && !r.row.draft)
+    })
+    .await;
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while app.outlet.progress.now().1.refine.is_some() {
+        assert!(tokio::time::Instant::now() < progress_deadline, "refine progress did not clear");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 4. File to city archive and write Diagnose bundle.
+    app.send(&scope, Command::File { id: rec_id.clone(), event: event_path, audio: false });
+    app.notice("city.filed").await;
+
+    std::thread::sleep(Duration::from_millis(50));
+    app.send(&scope, Command::Diagnose);
+    app.notice("diagnose.done").await;
+
+    drop(app);
+    drop(guard);
+    srv.shutdown().await;
+
+    // 5. Byte-scan logs/*.jsonl, diagnose/**/*, host.lock snapshot, settings.json, and server disk.
+    let mut log_lines = Vec::new();
+    for entry in fs::read_dir(&log_dir).expect("read logs dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            let content = fs::read_to_string(&path).expect("read jsonl");
+            for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                log_lines.push(line.to_owned());
+            }
+        }
+    }
+    assert!(!log_lines.is_empty(), "client logs must not be empty");
+
+    let forbidden_everywhere: Vec<String> = vec![
+        key_frag.clone(),
+        key_std.clone(),
+        format!("#{key_frag}"),
+        transcript_sentinel.into(),
+        translation_sentinel.into(),
+        event_title_sentinel.into(),
+        ME.into(),
+        "did:zu:".into(),
+        handle_sentinel.into(),
+        "sk-own-privacy-probe-99".into(),
+        "sk-own-openrouter-probe-99".into(),
+    ];
+    let mut forbidden_no_room_id = forbidden_everywhere.clone();
+    forbidden_no_room_id.push(room_id.clone());
+
+    // host.lock snapshot: holds ONLY room_id, never key/fragment/title/DID.
+    assert_eq!(lock_snapshot, room_id);
+    for needle in &forbidden_everywhere {
+        assert!(!lock_snapshot.contains(needle), "host.lock leaked `{needle}`");
+    }
+
+    // settings.json: holds Setup + CaptionPrefs + city, never room id/key/text/DID.
+    let settings_raw =
+        fs::read_to_string(data_dir.path().join("settings.json")).expect("settings.json exists");
+    for needle in &forbidden_no_room_id {
+        assert!(!settings_raw.contains(needle), "settings.json leaked `{needle}`");
+    }
+
+    // Client logs/*.jsonl: flat JSON, zero "!" refused fields, zero secrets or room_id.
+    for (idx, line) in log_lines.iter().enumerate() {
+        let parsed: Json = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("log line {idx} invalid json: {e}: {line}"));
+        let obj = parsed.as_object().expect("flat json object");
+        for (k, v) in obj {
+            assert!(!v.is_object() && !v.is_array(), "nested value in log line {idx} key `{k}`");
+            assert!(v.as_str() != Some("!"), "refused field `!` in log line {idx} key `{k}`");
+        }
+        for needle in &forbidden_no_room_id {
+            assert!(!line.contains(needle), "log line {idx} leaked `{needle}`: {line}");
+        }
+    }
+
+    // Diagnose bundle: zero secrets/room_id, Tally <= 8192 B.
+    let diagnose_root = data_dir.path().join("diagnose");
+    let mut bundle_dirs: Vec<PathBuf> =
+        fs::read_dir(&diagnose_root).expect("diagnose dir").flatten().map(|e| e.path()).collect();
+    bundle_dirs.sort();
+    assert_eq!(bundle_dirs.len(), 1, "expected 1 diagnose bundle");
+    let tally_raw = fs::read_to_string(bundle_dirs[0].join("stats.json")).expect("stats.json");
+    let tally: Json = serde_json::from_str(&tally_raw).expect("parse Tally JSON");
+    let tally_bytes = serde_json::to_vec(&tally).expect("compact Tally JSON").len();
+    assert!(tally_bytes <= 8192, "Tally must stay <= 8192 B, got {tally_bytes} B");
+
+    let mut bundle_files = Vec::new();
+    collect_files(&diagnose_root, &mut bundle_files);
+    assert!(!bundle_files.is_empty());
+    for file in &bundle_files {
+        let content = fs::read_to_string(file).expect("read diagnose file");
+        for needle in &forbidden_no_room_id {
+            assert!(
+                !content.contains(needle),
+                "diagnose file {} leaked `{needle}`",
+                file.display()
+            );
+        }
+    }
+    assert!(!srv_dir.path().join("rooms").exists(), "server disk must have no rooms/ files");
+
+    // Structured observability assertions.
+    let has_event =
+        |code: &str| log_lines.iter().any(|l| l.contains(&format!(r#""event":"{code}""#)));
+    for required in ["host.state", "host.room", "diagnose.wrote"] {
+        assert!(has_event(required), "expected `{required}` in client logs");
+    }
+    assert!(!has_event("stats.full"), "stats.full must never trigger");
+    assert_eq!(zutalk_log::refused(), refused_before, "zutalk_log::refused() must not increase");
 }
