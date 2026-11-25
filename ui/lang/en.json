@@ -224,5 +224,6 @@
  "code.note.gone": "This note is no longer there",
  "code.tape.none": "No audio left for this recording",
  "code.keys.async_refused": "Not refined · needs a key that can transcribe the whole recording",
+ "code.index": "Local index could not be read or updated",
  "reconnect": "Reconnect"
 }

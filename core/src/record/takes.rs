@@ -31,6 +31,18 @@ pub struct RefineFailure {
     pub at: i64,
 }
 
+/// Reads the persistent refinement failure stored beside a recording's tape (`write.json`), if any.
+/// Returns `None` when the file is absent, unreadable, or has no `failed` entry.
+pub fn read_failure(tape_dir: &std::path::Path) -> Option<RefineFailure> {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct PartialJournal {
+        failed: Option<RefineFailure>,
+    }
+    let bytes = std::fs::read(tape_dir.join("write.json")).ok()?;
+    serde_json::from_slice::<PartialJournal>(&bytes).ok()?.failed
+}
+
 /// Explicit refinement lifecycle state for one recording (`P2.md` §3.3.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]

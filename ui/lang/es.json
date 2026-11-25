@@ -224,5 +224,6 @@
  "code.note.gone": "Esta nota ya no existe",
  "code.tape.none": "No queda audio para esta grabación",
  "code.keys.async_refused": "Sin refinar · se necesita una clave que pueda transcribir la grabación completa",
+ "code.index": "No se pudo leer ni actualizar el índice local",
  "reconnect": "Reconectar"
 }

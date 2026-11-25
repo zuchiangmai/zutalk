@@ -224,5 +224,6 @@
  "code.note.gone": "このメモはもうありません",
  "code.tape.none": "この録音の音声は残っていません",
  "code.keys.async_refused": "未清書 · 録音全体を文字起こしできるキーが必要です",
+ "code.index": "ローカル索引を読み書きできませんでした",
  "reconnect": "再接続"
 }

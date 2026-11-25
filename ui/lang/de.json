@@ -224,5 +224,6 @@
  "code.note.gone": "Diese Notiz ist nicht mehr vorhanden",
  "code.tape.none": "Für diese Aufnahme ist kein Audio mehr vorhanden",
  "code.keys.async_refused": "Nicht verfeinert · ein Schlüssel für die vollständige Transkription ist erforderlich",
+ "code.index": "Lokaler Index konnte nicht gelesen oder aktualisiert werden",
  "reconnect": "Neu verbinden"
 }

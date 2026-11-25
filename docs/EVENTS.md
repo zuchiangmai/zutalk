@@ -137,6 +137,13 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `refine.state` | info；到 `Failed` 时 warn | 整场精修状态机 `RefineStatus` 切换时发出（`Draft` / `Refining` / `Refined` / `Failed`） | `rec` `from` `to` `why` `take` |
 | `diagnose.wrote` | info | `desk` 原子写完一份自检包并清理超额旧包后发出 | `files`（包内文件总数） `bytes`（总字节数） |
 
+### 投影索引与查询（view）
+
+| 事件 | 级别 | 谁在什么时候发 | 字段 |
+|---|---|---|---|
+| `index.open` | info；`why = "corrupt"` 时 warn | 打开或重建本机 SQLite 投影索引完成时发出 | `mode`（`existing` / `rebuilt`） `why`（`ok` / `missing` / `version` / `owner` / `corrupt`） `rows` `ms` |
+| `index.sync` | debug；失败时 warn | 写事实后增量同步 SQLite 索引的一步完成时发出 | `op`（`upsert` / `remove` / `audio` / `filing` / `refine`） `code` `ms` |
+
 ### 采集与落盘
 
 | 事件 | 级别 | 谁在什么时候发 | 字段 |
