@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Open } from '$proto/Open';
-import { text, ui } from '../src/lib/words.svelte';
+import { text, ui } from '../src/bus/words';
 
 const line = (t0: number, speaker: string, text: string, translations: Record<string, string>) =>
   ({ t0, t1: t0 + 1000, speaker, language: 'zh', text, translations, incomplete: false, via: {} });

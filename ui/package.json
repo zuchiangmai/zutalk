@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc -p tsconfig.json",
-    "build": "npm run check && vite build",
+    "check": "tsc -p tsconfig.json && vite build --emptyOutDir --logLevel warn",
+    "build": "npm run check",
     "test": "vitest run"
   },
   "dependencies": {
@@ -17,15 +17,12 @@
     "virtua": "^0.56.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@testing-library/react": "^16.3.3",
     "@types/node": "22.20.5",
     "@types/react": "^19.3.3",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "jsdom": "^31.0.1",
-    "svelte": "5.57.3",
-    "svelte-check": "4.7.8",
     "typescript": "6.0.3",
     "vite": "8.3.8",
     "vitest": "5.1.0"

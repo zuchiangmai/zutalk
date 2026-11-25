@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import en from '../lang/en.json';
-import { LANGS, pick, ui, word } from '../src/lib/words.svelte';
+import { LANGS, pick, ui, word } from '../src/bus/words';
 
 const dir = new URL('../lang/', import.meta.url).pathname;
 const dicts = Object.fromEntries(readdirSync(dir).map((f) => [f.slice(0, -5), JSON.parse(readFileSync(dir + f, 'utf8'))]));

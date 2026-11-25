@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Column } from '$proto/Column';
-import { openFrame, roomKey } from '../src/lib/room.svelte';
+import { openFrame, roomKey } from '../src/viewer/room';
 
 const b64 = (b: Uint8Array) => Buffer.from(b).toString('base64');
 const b64url = (b: Uint8Array) => Buffer.from(b).toString('base64url');

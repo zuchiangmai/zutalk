@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emptyVitals, FRAME_GAP_MS, frame, REPORT_EVERY_MS, report } from '../src/lib/vitals';
+import { emptyVitals, FRAME_GAP_MS, frame, REPORT_EVERY_MS, report } from '../src/bus/vitals';
 
 describe('vitals', () => {
   it('records each gap over FRAME_GAP_MS and keeps the longest', () => {

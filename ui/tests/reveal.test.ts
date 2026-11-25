@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { carry, reveal, upTo } from '../src/lib/reveal';
+import { carry, reveal, upTo } from '../src/bus/reveal';
 
 // Units as the core cuts them (core/tests/lang.rs).
 const shown = (text: string, units: number[], from: number, ms: number, rate: number) =>
