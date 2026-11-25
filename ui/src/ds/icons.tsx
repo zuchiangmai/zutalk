@@ -32,7 +32,8 @@ export type IconName =
   | 'folder'
   | 'sun'
   | 'moon'
-  | 'check';
+  | 'check'
+  | 'copy';
 
 const PATHS: Record<IconName, ReactNode> = {
   lock: (
@@ -125,6 +126,12 @@ const PATHS: Record<IconName, ReactNode> = {
   ),
   moon: <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />,
   check: <path d="m5 13 4 4L19 7" />,
+  copy: (
+    <>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V6a2 2 0 0 1 2-2h9" />
+    </>
+  ),
 };
 
 export type IconProps = {

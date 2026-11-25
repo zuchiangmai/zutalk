@@ -22,6 +22,8 @@ import {
 } from '../bus';
 import { HomePage } from '../pages/HomePage';
 import { LivePage } from '../pages/LivePage';
+import { ReaderPage } from '../pages/ReaderPage';
+import { ResultPage } from '../pages/ResultPage';
 import { CommandPalette } from './CommandPalette';
 import { HealthOverlay } from './HealthOverlay';
 import { NoticeToast } from './NoticeToast';
@@ -114,6 +116,16 @@ export function Shell() {
           <HomePage />
         ) : route.page === 'live' ? (
           <LivePage />
+        ) : route.page === 'result' ? (
+          <ResultPage id={route.id} />
+        ) : route.page === 'reader' ? (
+          <ReaderPage
+            id={route.id}
+            tab={route.tab}
+            take={route.take}
+            compare={route.compare}
+            lineKey={route.lineKey}
+          />
         ) : (
           <section className="page" data-testid="route-view">
             <h1 className="page-t">{route.page}</h1>

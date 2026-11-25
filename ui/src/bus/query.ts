@@ -283,3 +283,38 @@ export function useQuery<Q extends Query>(query: Q | null): QueryState<QueryData
   );
   return useSource(source);
 }
+
+/** React hook subscribing to a bounded list of Queries (e.g. visible transcript chunks) via QueryCache. */
+export function useQueries<Q extends Query>(queries: readonly Q[]): readonly QueryState<QueryDataFor<Q>>[] {
+  const compositeKey = queries.map(queryKey).join('|');
+  const source = useMemo<Source<readonly QueryState<QueryDataFor<Q>>[]>>(() => {
+    const childSources = queries.map((q) => queryCache.sourceFor(q));
+    let cached: QueryState<QueryDataFor<Q>>[] = childSources.map((s) => s.getSnapshot());
+    const getSnapshot = (): readonly QueryState<QueryDataFor<Q>>[] => {
+      let changed = cached.length !== childSources.length;
+      if (!changed) {
+        for (let i = 0; i < childSources.length; i++) {
+          if (!Object.is(cached[i], childSources[i].getSnapshot())) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (changed) {
+        cached = childSources.map((s) => s.getSnapshot());
+      }
+      return cached;
+    };
+    return {
+      getSnapshot,
+      subscribe(listener) {
+        const unsubs = childSources.map((s) => s.subscribe(listener));
+        return () => {
+          for (const unsub of unsubs) unsub();
+        };
+      },
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `compositeKey` uniquely identifies `queries`
+  }, [compositeKey]);
+  return useSource(source);
+}

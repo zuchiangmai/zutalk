@@ -19,35 +19,62 @@ export function installDomMocks(opts: DomMockOptions = {}): () => void {
 
   const origResizeObserver = globalThis.ResizeObserver;
   const origMatchMedia = globalThis.matchMedia;
+  const origOffsetParent = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetParent');
+
+  // jsdom always reports offsetParent === null; virtua relies on offsetParent to measure mounted items
+  // and clear initial `visibility: hidden` once an item enters the viewport.
+  Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.isConnected ? document.body : null;
+    },
+  });
+
+  const DEFAULT_ITEM_HEIGHT_PX = 80;
 
   class DeterministicResizeObserver implements ResizeObserver {
     private readonly cb: ResizeObserverCallback;
+    private readonly observed = new Set<Element>();
+    private disconnected = false;
     constructor(cb: ResizeObserverCallback) {
       this.cb = cb;
     }
     observe(target: Element): void {
+      this.observed.add(target);
+      const isVirtualItem = target instanceof HTMLElement && target.style.position === 'absolute';
+      const measuredHeight = isVirtualItem ? DEFAULT_ITEM_HEIGHT_PX : height;
       const rect = {
         x: 0,
         y: 0,
         top: 0,
         left: 0,
-        bottom: height,
+        bottom: measuredHeight,
         right: width,
         width,
-        height,
+        height: measuredHeight,
         toJSON: () => ({}),
       } as DOMRectReadOnly;
       const entry = {
         target,
         contentRect: rect,
-        borderBoxSize: [{ inlineSize: width, blockSize: height }],
-        contentBoxSize: [{ inlineSize: width, blockSize: height }],
-        devicePixelContentBoxSize: [{ inlineSize: width, blockSize: height }],
+        borderBoxSize: [{ inlineSize: width, blockSize: measuredHeight }],
+        contentBoxSize: [{ inlineSize: width, blockSize: measuredHeight }],
+        devicePixelContentBoxSize: [{ inlineSize: width, blockSize: measuredHeight }],
       } as unknown as ResizeObserverEntry;
-      this.cb([entry], this);
+      // Deliver asynchronously on microtask like real browsers so callers finish setup after observe().
+      queueMicrotask(() => {
+        if (!this.disconnected && this.observed.has(target)) {
+          this.cb([entry], this);
+        }
+      });
     }
-    unobserve(): void {}
-    disconnect(): void {}
+    unobserve(target: Element): void {
+      this.observed.delete(target);
+    }
+    disconnect(): void {
+      this.disconnected = true;
+      this.observed.clear();
+    }
   }
 
   const mockMatchMedia = (query: string): MediaQueryList => {
@@ -75,5 +102,10 @@ export function installDomMocks(opts: DomMockOptions = {}): () => void {
   return () => {
     globalThis.ResizeObserver = origResizeObserver;
     globalThis.matchMedia = origMatchMedia;
+    if (origOffsetParent) {
+      Object.defineProperty(HTMLElement.prototype, 'offsetParent', origOffsetParent);
+    } else {
+      delete (HTMLElement.prototype as { offsetParent?: unknown }).offsetParent;
+    }
   };
 }
