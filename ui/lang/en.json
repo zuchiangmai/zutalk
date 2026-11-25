@@ -318,5 +318,8 @@
  "code.id.signed_in": "Already signed in",
  "code.id.no_pending": "No sign-in waiting to be confirmed",
  "code.id.cancelled": "Sign-in cancelled",
- "code.quota.refreshed": "Quota updated"
+ "code.quota.refreshed": "Quota updated",
+ "code.adopt.failed": "Could not bring local recordings into your identity",
+ "code.discard.busy": "Finish recording before removing the local backup",
+ "code.local.discarded": "Local backup removed"
 }

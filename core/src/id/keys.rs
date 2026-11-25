@@ -218,6 +218,16 @@ pub(crate) fn save_unsaved_rotation(secret: &[u8; 32]) -> Result<(), End> {
     set(UNSAVED, Some(secret.as_slice()))
 }
 
+/// The device's own identity if one was already made on this device, without creating a new seed.
+pub fn local_kept() -> Result<Option<Me>, End> {
+    let Some(kept) = get("identity.local")? else { return Ok(None) };
+    let seed: [u8; 32] = kept.as_slice().try_into().map_err(|_| End::Fatal("keys.store"))?;
+    let seed = Zeroizing::new(seed);
+    let key = Arc::new(SecretKey::from_seed(&seed));
+    let did = did::local(&key.public());
+    Ok(Some(Me { did, key }))
+}
+
 /// The device's own identity, made the first time it is asked for and kept with the secrets
 /// as `identity.local` (a 32-byte seed). No network. `true`: it was made just now.
 pub fn local() -> Result<(Me, bool), End> {

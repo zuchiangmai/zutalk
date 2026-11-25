@@ -392,7 +392,7 @@ async fn qr_sign_in_waits_for_confirmation_before_keeping_identity() {
         .expect("seal");
     let relay_post = scanned.room.replacen("https://", "http://", 1);
     let resp = http.post(relay_post).body(sealed).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
 
     let confirm = app.until(|s| matches!(s.auth, AuthFlow::Confirm { .. })).await;
     assert_eq!(
@@ -420,7 +420,7 @@ async fn qr_sign_in_waits_for_confirmation_before_keeping_identity() {
     let relay_post = scanned.room.replacen("https://", "http://", 1);
     assert_eq!(
         http.post(relay_post).body(sealed).send().await.unwrap().status(),
-        reqwest::StatusCode::OK
+        reqwest::StatusCode::NO_CONTENT
     );
 
     app.until(|s| matches!(s.auth, AuthFlow::Confirm { .. })).await;

@@ -318,5 +318,8 @@
  "code.id.signed_in": "이미 로그인되어 있습니다",
  "code.id.no_pending": "확인 대기 중인 로그인이 없습니다",
  "code.id.cancelled": "로그인이 취소되었습니다",
- "code.quota.refreshed": "할당량이 업데이트되었습니다"
+ "code.quota.refreshed": "할당량이 업데이트되었습니다",
+ "code.adopt.failed": "로컬 녹음을 내 신원으로 가져오지 못했습니다",
+ "code.discard.busy": "로컬 백업을 지우기 전에 녹음을 먼저 중지하세요",
+ "code.local.discarded": "로컬 백업을 삭제했습니다"
 }

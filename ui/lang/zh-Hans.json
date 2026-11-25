@@ -318,5 +318,8 @@
  "code.id.signed_in": "已经登录了",
  "code.id.no_pending": "没有待确认的登录",
  "code.id.cancelled": "登录已取消",
- "code.quota.refreshed": "额度已更新"
+ "code.quota.refreshed": "额度已更新",
+ "code.adopt.failed": "没能把本机录音领回你的身份下",
+ "code.discard.busy": "请先停止录音，再清理本机备份",
+ "code.local.discarded": "本机备份已清理"
 }

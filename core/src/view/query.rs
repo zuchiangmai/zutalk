@@ -374,6 +374,11 @@ impl ViewEngine {
         src.active_recording = id;
     }
 
+    pub fn active_recording(&self) -> Option<String> {
+        let src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner);
+        src.active_recording.clone()
+    }
+
     /// Tracks active refinement progress for `id` (`None` clears it once refinement ends).
     pub fn set_active_refine(&self, id: String, progress: Option<(String, u32, u32)>) {
         let mut src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner);

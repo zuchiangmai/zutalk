@@ -8,6 +8,7 @@ pub use crate::id::keys::From;
 pub use crate::id::quota::{Quota, ServiceQuota};
 pub use crate::live::frame::{Caption, Column, Frame, Status};
 use crate::out::city::Filing;
+pub use crate::record::adopt::LocalShelf;
 pub use crate::record::notes::Note;
 use crate::record::shelf::Said;
 pub use crate::record::takes::{RefineFailure, RefineStatus, TakeInfo};
@@ -46,6 +47,7 @@ pub struct State {
     pub exporters: Vec<String>,
     pub rooms: Vec<Room>,
     pub unmoved: Vec<(String, String)>, // what 0.8 handed over that did not move: title, why
+    pub local_shelf: LocalShelf,        // bounded summary of the device-local shelf
     pub captions: bool,                 // the captions window is on screen
 }
 
@@ -271,6 +273,7 @@ pub enum Command {
     CreateIdentity { handle: Option<String> },
     RecoverIdentity { did: String, key: String },
     RefreshQuota,
+    DiscardLocal,
     SignOut,
     RotationSaved,
     CopyRotation,
@@ -310,6 +313,7 @@ impl Command {
             Command::CreateIdentity { .. } => "CreateIdentity",
             Command::RecoverIdentity { .. } => "RecoverIdentity",
             Command::RefreshQuota => "RefreshQuota",
+            Command::DiscardLocal => "DiscardLocal",
             Command::SignOut => "SignOut",
             Command::RotationSaved => "RotationSaved",
             Command::CopyRotation => "CopyRotation",
@@ -331,7 +335,8 @@ impl Command {
             Command::Share { .. }
             | Command::Unshare { .. }
             | Command::File { .. }
-            | Command::RefreshQuota => true,
+            | Command::RefreshQuota
+            | Command::DiscardLocal => true,
             Command::Start
             | Command::Import { .. }
             | Command::Pause

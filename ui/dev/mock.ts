@@ -53,6 +53,7 @@ export const EMPTY: State = {
   exporters: ['markdown', 'srt', 'vtt'],
   rooms: [],
   unmoved: [],
+  local_shelf: { recordings: 0, adopted: false },
   captions: false,
 };
 
@@ -472,6 +473,14 @@ export function mockBus(recording = false): Bus {
         ],
       };
       on({ kind: 'Notice', is: 'quota.refreshed' });
+    },
+    DiscardLocal: () => {
+      if (session) {
+        on({ kind: 'Notice', is: 'discard.busy' });
+        return;
+      }
+      s.local_shelf = { recordings: 0, adopted: s.local_shelf.adopted };
+      on({ kind: 'Notice', is: 'local.discarded' });
     },
     SignOut: () => {
       s.me = null;

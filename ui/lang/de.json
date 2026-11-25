@@ -318,5 +318,8 @@
  "code.id.signed_in": "Bereits angemeldet",
  "code.id.no_pending": "Keine Anmeldung zur Bestätigung offen",
  "code.id.cancelled": "Anmeldung abgebrochen",
- "code.quota.refreshed": "Kontingent aktualisiert"
+ "code.quota.refreshed": "Kontingent aktualisiert",
+ "code.adopt.failed": "Lokale Aufnahmen konnten nicht übernommen werden",
+ "code.discard.busy": "Aufnahme beenden, bevor die lokale Sicherung entfernt wird",
+ "code.local.discarded": "Lokale Sicherung entfernt"
 }

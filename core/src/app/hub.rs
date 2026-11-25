@@ -8,8 +8,8 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    AuthFlow, Change, Command, Device, From, Level as SoundLevel, Quota, Room, Session, Sound,
-    State, Status,
+    AuthFlow, Change, Command, Device, From, Level as SoundLevel, LocalShelf, Quota, Room, Session,
+    Sound, State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -108,6 +108,8 @@ pub(crate) enum Msg {
     QuotaUpdated { left: u64, quota: Quota, notify: bool },
     QuotaFailed(&'static str),
     HandleResolved(Option<String>),
+    LocalShelf(LocalShelf),
+    LocalDiscarded(Result<LocalShelf, &'static str>),
     Copied,
     Diagnosed,
     RotationSaved,
@@ -140,6 +142,8 @@ impl Msg {
             Msg::QuotaUpdated { .. } => "QuotaUpdated",
             Msg::QuotaFailed(_) => "QuotaFailed",
             Msg::HandleResolved(_) => "HandleResolved",
+            Msg::LocalShelf(_) => "LocalShelf",
+            Msg::LocalDiscarded(_) => "LocalDiscarded",
             Msg::Copied => "Copied",
             Msg::Diagnosed => "Diagnosed",
             Msg::RotationSaved => "RotationSaved",
@@ -386,6 +390,7 @@ impl Hub {
             self.state.quota = None;
         }
         self.state.rotation_unsaved = out.rotation_unsaved;
+        self.state.local_shelf = out.local_shelf;
         self.apply_refreshed(out.refreshed);
         self.state.rooms = out.rooms;
         let live = self.state.rooms.iter().find(|r| r.recording.is_none()).map(|r| r.id.clone());
@@ -445,6 +450,14 @@ impl Hub {
                     self.state.handle = handle;
                 }
             }
+            Msg::LocalShelf(local_shelf) => self.state.local_shelf = local_shelf,
+            Msg::LocalDiscarded(res) => match res {
+                Ok(local_shelf) => {
+                    self.state.local_shelf = local_shelf;
+                    self.said.say("local.discarded");
+                }
+                Err(c) => return Err(c),
+            },
             Msg::Copied => self.said.say("copied"),
             Msg::Diagnosed => self.said.say("diagnose.done"),
             Msg::RotationSaved => self.state.rotation_unsaved = false,
@@ -606,6 +619,12 @@ impl Hub {
                 self.set_auth(AuthEvent::BeginRecover, "recover");
             }
             Command::RefreshQuota => self.work.refresh_quota()?,
+            Command::DiscardLocal => {
+                if self.recording.is_some() {
+                    return Err("discard.busy");
+                }
+                self.work.discard_local()?;
+            }
             Command::SignOut => {
                 self.set_auth(AuthEvent::Cancelled, "sign_out");
                 self.state.handle = None;

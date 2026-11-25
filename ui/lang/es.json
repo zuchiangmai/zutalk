@@ -318,5 +318,8 @@
  "code.id.signed_in": "Ya has iniciado sesión",
  "code.id.no_pending": "No hay ningún inicio de sesión pendiente",
  "code.id.cancelled": "Inicio de sesión cancelado",
- "code.quota.refreshed": "Cuota actualizada"
+ "code.quota.refreshed": "Cuota actualizada",
+ "code.adopt.failed": "No se pudieron incorporar las grabaciones locales a tu identidad",
+ "code.discard.busy": "Detén la grabación antes de eliminar la copia local",
+ "code.local.discarded": "Copia local eliminada"
 }

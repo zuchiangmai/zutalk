@@ -318,5 +318,8 @@
  "code.id.signed_in": "すでにサインインしています",
  "code.id.no_pending": "確認待ちのサインインはありません",
  "code.id.cancelled": "サインインをキャンセルしました",
- "code.quota.refreshed": "利用枠を更新しました"
+ "code.quota.refreshed": "利用枠を更新しました",
+ "code.adopt.failed": "この端末の録音をあなたのアイデンティティへ取り込めませんでした",
+ "code.discard.busy": "録音を停止してからローカルバックアップを削除してください",
+ "code.local.discarded": "ローカルバックアップを削除しました"
 }

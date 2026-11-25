@@ -127,12 +127,14 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `boot.step` | info；失败时 warn | 启动流程里每一步做完时发出（`devices` 另带设备个数，不含设备名） | `step`（P1 全部 4 个：`settings`、`identity`、`invites`、`devices`） `code` `ms`（`devices` 另带 `n`） |
 | `identity.who` | info；`to = "nobody"` 时 warn | 启动、登录或登出切换签名身份时发出；非首次启动而 `made = true` 表示秘密曾丢失 | `from` `to`（`nobody` / `local` / `person`） `why`（`boot` / `sign_in` / `sign_out`） `made` |
 | `identity.auth` | info；失败时 warn | 身份登录/建号/恢复状态机 `AuthFlow` 每次状态转换时发出 | `from` `to`（`Idle` / `Scanning` / `Confirm` / `Creating` / `Recovering`） `why` |
+| `identity.adopt` | info；失败时 warn | 首次登录或进行中本机录音封盘后，把本机 `did:key` 记录与词表重签领回本人书架时发出 | `recordings` `terms` `code`（`ok` 或失败码） |
+| `identity.discard_local` | info；失败时 warn | 用户显式清理本机 `did:key` 备份书架与本机索引时发出 | `code`（`ok` 或失败码） |
 | `quota.updated` | info；失败时 warn | 向服务器拉取或刷新按服务每日额度结束时发出 | `soniox_left` `openrouter_left` `code`（`ok` 或失败码） |
 | `command.done` | info；被拒绝时 warn | hub 同步处理完一条界面命令时发出（带 IO 的命令随后看 `job.done`） | `kind`（`Command` 变体名） `code`（`ok` 或拒绝码） `took_us` |
 | `command.refused` | warn | `Core::send` 遇到 hub 邮箱满或已关闭，命令未能入队时发出 | `kind` `code`（`busy`） |
 | `hub.turn.slow` | warn | hub 单次消息处理超过预算 `HUB_TURN_BUDGET_US`（1000 µs）时发出 | `kind` `took_us` |
 | `notice.said` | info | 核心通过 `Voice::say` 向界面发出一条稳定提示代码时发出 | `code` |
-| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（`boot`、`settings`、`sign`、`confirm_signin`、`signout`、`signin`、`create`、`recover`、`quota`、`profile`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`note`、`refine.prepare`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`diagnose`、`index.sync`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
+| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（`boot`、`settings`、`sign`、`confirm_signin`、`signout`、`discard_local`、`signin`、`create`、`recover`、`quota`、`profile`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`note`、`refine.prepare`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`diagnose`、`index.sync`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
 | `job.done` | info；`code != "ok"` 时 warn | `desk` 或 `Work` 的一件活结束时发出 | `kind`（同上） `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败码） `ms` |
 | `job.again` | warn | 后台或重试任务（`write`、`file`、`create`、`claim`）遇可恢复失败，退避等待下一次重试时发出 | `kind` `why` `wait_ms` `n` |
 | `write.skipped` | info | 有音频的草稿因无钥匙可取（`keys.none`）未送去整场转写，留在现场稿等待时发出 | `n` `why`（`keys.none`） |

@@ -7,7 +7,7 @@ use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
 use crate::app::proto::{
-    Change, From, NoteOp, Open, Progress, Quota, Room, Row, Setup, Sound, Writing,
+    Change, From, LocalShelf, NoteOp, Open, Progress, Quota, Room, Row, Setup, Sound, Writing,
 };
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
@@ -28,7 +28,7 @@ use crate::record::shelf::{
 use crate::record::takes::{
     RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
 };
-use crate::record::{migrate, retain};
+use crate::record::{adopt, migrate, retain};
 use crate::rt::queue::{self, Full, Tx};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::Counter;
@@ -202,6 +202,7 @@ pub(crate) struct SignedOut {
     pub me: Option<String>,
     pub handle: Option<String>,
     pub rotation_unsaved: bool,
+    pub local_shelf: LocalShelf,
     pub refreshed: Refreshed,
     pub rooms: Vec<Room>,
     pub survey: Survey,
@@ -255,7 +256,7 @@ struct Snapshot {
 
 enum SyncKind {
     RecordingOpened { id: String },
-    RecordingSealed { id: String },
+    RecordingSealed { id: String, started_by: String },
     Refined { id: String },
     RefineFailed { id: String, failure: RefineFailure },
     FilingUpdated { id: String, state: String },
@@ -283,9 +284,9 @@ impl IndexSync {
         self.run(SyncKind::RecordingOpened { id }).await;
     }
 
-    pub(crate) async fn recording_sealed(&self, id: String) {
+    pub(crate) async fn recording_sealed(&self, id: String, started_by: String) {
         self.views.set_active_recording(None);
-        self.run(SyncKind::RecordingSealed { id }).await;
+        self.run(SyncKind::RecordingSealed { id, started_by }).await;
     }
 
     pub(crate) async fn refined(&self, id: String) {
@@ -328,6 +329,7 @@ enum Job {
         keep: Option<u32>,
         busy: Vec<String>,
     },
+    DiscardLocal,
     Clip,
     RotationSaved,
     Refresh {
@@ -408,6 +410,7 @@ impl DeskJob for Job {
             Job::Sign { .. } => "sign",
             Job::ConfirmSignIn { .. } => "confirm_signin",
             Job::SignOut { .. } => "signout",
+            Job::DiscardLocal => "discard_local",
             Job::Clip => "clip",
             Job::RotationSaved => "rotation_saved",
             Job::Refresh { .. } => "refresh",
@@ -472,6 +475,8 @@ enum DeskOut {
         from: RefineStatus,
     },
     OwnKey(OwnKeyOut),
+    LocalShelf(LocalShelf),
+    LocalDiscarded(LocalShelf),
 }
 
 struct DeskEnv {
@@ -834,11 +839,18 @@ impl Work {
                         Ok(DeskOut::OwnKey(out)) => {
                             let _ = results.send(Msg::OwnKeyDone(Ok(out))).await; // dropped: the hub has ended
                         }
+                        Ok(DeskOut::LocalShelf(local_shelf)) => {
+                            let _ = results.send(Msg::LocalShelf(local_shelf)).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::LocalDiscarded(local_shelf)) => {
+                            let _ = results.send(Msg::LocalDiscarded(Ok(local_shelf))).await; // dropped: the hub has ended
+                        }
                         Err(code) => {
                             let msg = match kind {
                                 "refresh" => Msg::Refreshed(Err(code)),
                                 "sign" | "signout" => Msg::Signed(Err(code)),
                                 "confirm_signin" => Msg::SignInFailed(code),
+                                "discard_local" => Msg::LocalDiscarded(Err(code)),
                                 "own_key" => Msg::OwnKeyDone(Err(code)),
                                 _ => Msg::DeskFailed(code),
                             };
@@ -1097,6 +1109,10 @@ impl Work {
         self.desk.offer(Job::SignOut { keep, busy }).map(|_| ())
     }
 
+    pub(crate) fn discard_local(&self) -> Result<(), &'static str> {
+        self.desk.offer(Job::DiscardLocal).map(|_| ())
+    }
+
     pub(crate) fn copy_rotation(&self) -> Result<(), &'static str> {
         self.desk.offer(Job::Clip).map(|_| ())
     }
@@ -1314,6 +1330,7 @@ impl Work {
         };
         let post = WriteCtx {
             id,
+            started_by: shelf.by().to_owned(),
             shelf,
             keys,
             config: self.config.clone(),
@@ -1379,6 +1396,7 @@ impl Work {
             for id in ids {
                 let ctx = WriteCtx {
                     id,
+                    started_by: shelf.by().to_owned(),
                     shelf: shelf.clone(),
                     keys: keys.clone(),
                     config: config.clone(),
@@ -1417,6 +1435,7 @@ impl Work {
         let terms = self.current_terms();
         let ctx = WriteCtx {
             id,
+            started_by: shelf.by().to_owned(),
             shelf,
             keys: snap.keys,
             config: self.config.clone(),
@@ -1653,6 +1672,31 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             let local = keys::local().map(|(me, _)| me);
             let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
             Ok(DeskOut::Signed { out, start_claim: None })
+        }
+        Job::DiscardLocal => {
+            let person_did = {
+                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.who.person().map(|me| me.did.clone())
+            }
+            .ok_or("sign_in.first")?;
+            let local_me = keys::local_kept().map_err(code)?;
+            let local_shelf = if let Some(local_me) = local_me {
+                if let Err(c) = adopt::discard_local(&config.data, &local_me.did) {
+                    warn!("identity.discard_local", code = c);
+                    return Err(c);
+                }
+                info!("identity.discard_local", code = "ok");
+                let shelf = Shelf::new(
+                    config.data.join("records").join(local_me.did.replace(':', "-")),
+                    &local_me.did,
+                    local_me.key,
+                );
+                adopt::status(&config.data, Some(&shelf), Some(&person_did))
+            } else {
+                info!("identity.discard_local", code = "ok");
+                LocalShelf::default()
+            };
+            Ok(DeskOut::LocalDiscarded(local_shelf))
         }
         Job::Clip => {
             let key = keys::rotation().map_err(code)?.ok_or("rotation.none")?;
@@ -1898,16 +1942,16 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             run_diagnose(env, spoken, shown, sound, captions)
         }
         Job::IndexSync { kind, done } => {
-            run_index_sync(env, kind);
+            let local_shelf = run_index_sync(env, kind);
             let _ = done.send(()); // dropped: background caller was cancelled
-            Ok(DeskOut::Silent)
+            Ok(local_shelf.map_or(DeskOut::Silent, DeskOut::LocalShelf))
         }
     }
 }
 
-fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
+fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
     let snap = snapshot(&env.identity);
-    let Ok(shelf) = snap.shelf else { return };
+    let Ok(shelf) = snap.shelf else { return None };
     let tapes = env.config.tapes();
     match kind {
         SyncKind::RecordingOpened { id } => {
@@ -1916,15 +1960,63 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
+            None
         }
-        SyncKind::RecordingSealed { id } => {
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
-            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-            env.views.invalidate(ViewKind::Transcript, Some(id));
+        SyncKind::RecordingSealed { id, started_by } => {
+            let person_did = {
+                let guard = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.who.person().map(|me| me.did.clone())
+            };
+            if started_by.starts_with("did:key:")
+                && let Some(person_did) = person_did
+            {
+                if let Ok(Some(local_me)) = keys::local_kept()
+                    && local_me.did == started_by
+                {
+                    let local_shelf = Shelf::new(
+                        env.config.data.join("records").join(local_me.did.replace(':', "-")),
+                        &local_me.did,
+                        local_me.key,
+                    );
+                    match adopt::run_one(&env.config.data, &local_shelf, &shelf, &id, now()) {
+                        Ok(sum) if sum.recordings > 0 => {
+                            info!(
+                                "identity.adopt",
+                                recordings = sum.recordings,
+                                terms = sum.terms,
+                                code = "ok"
+                            );
+                            env.with_index(|idx| {
+                                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+                            });
+                            env.views.invalidate(ViewKind::Library, None);
+                            env.views.invalidate(ViewKind::Search, None);
+                            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+                            env.views.invalidate(ViewKind::Transcript, Some(id));
+                            return Some(adopt::status(
+                                &env.config.data,
+                                Some(&local_shelf),
+                                Some(&person_did),
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(c) => {
+                            warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
+                        }
+                    }
+                }
+                return None;
+            }
+            if shelf.by() == started_by {
+                env.with_index(|idx| {
+                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+                });
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Search, None);
+                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+                env.views.invalidate(ViewKind::Transcript, Some(id));
+            }
+            None
         }
         SyncKind::Refined { id } => {
             env.with_index(|idx| {
@@ -1934,6 +2026,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
             env.views.invalidate(ViewKind::Search, None);
             env.views.invalidate(ViewKind::Recording, Some(id.clone()));
             env.views.invalidate(ViewKind::Transcript, Some(id));
+            None
         }
         SyncKind::RefineFailed { id, failure } => {
             env.with_index(|idx| {
@@ -1941,6 +2034,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
+            None
         }
         SyncKind::FilingUpdated { id, state } => {
             env.with_index(|idx| {
@@ -1949,6 +2043,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
             env.views.invalidate(ViewKind::Outbound, None);
+            None
         }
         SyncKind::Migrated => {
             env.with_index(|idx| {
@@ -1956,6 +2051,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Search, None);
+            None
         }
     }
 }
@@ -2227,6 +2323,47 @@ fn run_sign(
         None
     };
 
+    // Adopt any existing device-local (`did:key`) records and terms into the first signed-in
+    // person's shelf before opening the SQLite index and loading the glossary (`P4.md` §3.4).
+    let local_shelf = match (&who, shelf.as_deref()) {
+        (Who::Person(person), Some(person_shelf)) => {
+            if let Ok(Some(local_me)) = keys::local_kept() {
+                let local = make_shelf(&local_me);
+                if local.root().is_dir() {
+                    let mut exclude: Vec<String> = busy.to_vec();
+                    if let Some(active) = env.views.active_recording()
+                        && !exclude.contains(&active)
+                    {
+                        exclude.push(active);
+                    }
+                    match adopt::run(&config.data, &local, person_shelf, &exclude, now()) {
+                        Ok(sum) => {
+                            if sum.plan == adopt::AdoptPlan::Adopt
+                                && (sum.recordings > 0 || sum.terms > 0)
+                            {
+                                info!(
+                                    "identity.adopt",
+                                    recordings = sum.recordings,
+                                    terms = sum.terms,
+                                    code = "ok"
+                                );
+                            }
+                        }
+                        Err(c) => {
+                            warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
+                            say.push(c);
+                        }
+                    }
+                }
+                adopt::status(&config.data, Some(&local), Some(&person.did))
+            } else {
+                LocalShelf::default()
+            }
+        }
+        (Who::Local(_), Some(local)) => adopt::status(&config.data, Some(local), None),
+        _ => LocalShelf::default(),
+    };
+
     {
         let mut guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
         let (from, to) = (guard.who.code(), who.code());
@@ -2293,7 +2430,7 @@ fn run_sign(
         }
     };
 
-    Ok(SignedOut { me, handle, rotation_unsaved, refreshed, rooms, survey, say })
+    Ok(SignedOut { me, handle, rotation_unsaved, local_shelf, refreshed, rooms, survey, say })
 }
 
 fn run_refresh(
@@ -2811,6 +2948,7 @@ async fn slot_loop(ours: Ours, id: String, mut live: Reading<Frame>, voice: Voic
 
 struct WriteCtx {
     id: String,
+    started_by: String,
     shelf: Arc<Shelf>,
     keys: Arc<Chain>,
     config: Arc<Config>,
@@ -2866,7 +3004,7 @@ impl WriteCtx {
                 if matches!(destroyed, Ok(Err(_))) {
                     self.said.say("tape.destroy");
                 }
-                self.index_sync.recording_sealed(self.id.clone()).await;
+                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
             }
             Ok(Some(about)) => {
                 let tape_dir = self.tape();
@@ -2875,7 +3013,7 @@ impl WriteCtx {
                     .blocking("tape.kept", move || tape::kept(&tape_dir))
                     .await
                     .unwrap_or(false);
-                self.index_sync.recording_sealed(self.id.clone()).await;
+                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
                 let key = self.keys.from(Service::Soniox) != From::Nowhere;
                 match write::owed(about.take == 0, audio, about.moved, key) {
                     write::Owed::Yes => {
@@ -2895,10 +3033,10 @@ impl WriteCtx {
                 }
             }
             Ok(None) => {
-                self.index_sync.recording_sealed(self.id.clone()).await;
+                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
             } // removed meanwhile: the tape stays for a restore
             Err(_) => {
-                self.index_sync.recording_sealed(self.id.clone()).await;
+                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
             }
         }
         let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended

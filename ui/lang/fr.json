@@ -318,5 +318,8 @@
  "code.id.signed_in": "Déjà connecté",
  "code.id.no_pending": "Aucune connexion en attente de confirmation",
  "code.id.cancelled": "Connexion annulée",
- "code.quota.refreshed": "Quota mis à jour"
+ "code.quota.refreshed": "Quota mis à jour",
+ "code.adopt.failed": "Impossible de rattacher les enregistrements locaux à votre identité",
+ "code.discard.busy": "Arrêtez l’enregistrement avant de supprimer la copie locale",
+ "code.local.discarded": "Copie locale supprimée"
 }

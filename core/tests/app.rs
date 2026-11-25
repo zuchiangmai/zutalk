@@ -130,6 +130,7 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::CreateIdentity { handle: None }, false),
         (Command::RecoverIdentity { did: "did:zu:made-up-1".into(), key: "z".into() }, false),
         (Command::RefreshQuota, true),
+        (Command::DiscardLocal, true),
         (Command::SignOut, false),
         (Command::RotationSaved, false),
         (Command::CopyRotation, false),
@@ -457,14 +458,17 @@ async fn signing_in_and_out_changes_whose_shelf_is_open_and_moves_nothing() {
     let kept = [&[5; 32][..], ME.as_bytes()].concat();
     keys::set("identity", Some(&kept)).expect("the identity is kept");
 
+    // P4-03: first sign-in adopts the local recording into the person's shelf while keeping the
+    // local shelf bytes untouched.
     let mut app = App::start(dir.path());
     app.until(|s| s.me.as_deref() == Some(ME)).await;
-    assert!(app.library().await.is_empty());
+    let adopted = app.wait_library(|rows| rows.len() == 1).await;
+    assert_eq!(adopted[0].id, id);
+    assert_eq!(snapshot(&local_dir), before, "local shelf bytes must stay intact after adoption");
 
     app.send(Command::SignOut);
     app.until(|s| s.me.is_none()).await;
     let back = app.wait_library(|rows| rows.len() == 1).await;
-    app.wait_progress(|p| p.refine.is_none()).await;
     assert_eq!(back[0].id, id);
     assert_eq!(snapshot(&local_dir), before, "local shelf changed across sign-in and sign-out");
 
@@ -2716,7 +2720,9 @@ async fn signing_out_goes_back_to_the_device_off_the_hub() {
 
     let mut app = App::start(dir.path());
     app.until(|s| s.me.as_deref() == Some(ME)).await;
-    assert!(app.library().await.is_empty());
+    // P4-03: first sign-in adopts `local_id` into `ME`'s shelf while leaving local shelf intact.
+    let adopted = app.wait_library(|rows| rows.iter().any(|r| r.id == local_id)).await;
+    assert_eq!(adopted.len(), 1);
 
     app.send(Command::SignOut);
     app.until(|s| s.me.is_none()).await;
