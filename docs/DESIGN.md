@@ -11,15 +11,17 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 ```text
 现场  声音 → audio：每个声源一个线程拿着设备，泵只读环 → 100 ms 的块
-             ├→ tape：加密的分钟块（音频只经 tape::Pass 离开）
-             └→ live：Soniox 实时，每栏一条流 → lines → 字幕栏 → 界面 · 字幕窗 · 直播房间的槽
-                                              └→ 第一条流说完的行 → shelf：第 0 次转写，一行一条记录
-散场  tape → write：整场转写 → lines 重跑 → 整场翻译与检查 → shelf：第 n 次转写
+             ├→ 队列 tape（600 块）→ keep 写盘任务（分批阻塞写）→ tape：加密的分钟块（音频只经 tape::Pass 离开）
+             └→ 广播 audio（64 块）→ live::lane（每流一任务）→ 队列 lane.events → 帧任务（Composer / fit）
+                                                                                ├→ Register<Frame> → 外壳 shell.pump → 窗口 · 直播房间的槽
+                                                                                └→ 队列 draft（256 行）→ keep 写盘任务 → shelf：第 0 次转写
+      （hub 不在现场的路上；电平、状态句、水位线、统计、提示也都经各自寄存器直出）
+散场  tape → write（后台一次一件）→ lines 重跑 → 整场翻译与检查 → shelf：第 n 次转写
 导入  音频文件 → audio::file：按样本数计时，不看墙上时钟 → 同一条路，只是没有现场字幕
-导出  shelf → export 表里的一行：Markdown、SRT、VTT → 文件
+导出  shelf → desk 渲染（export 表里的一行：Markdown、SRT、VTT）→ 独立写文件任务 → 文件
 出口  一条录音或现场字幕 → room：在本机封好 → 我们服务器上的房间（只有密文）→ 拿到链接的人用观看页打开
-交城  一条录音 → city：本人签名、写明给哪座城的记录 → 城的 Zu 主机；音频经 tape::Pass::City 分段作文件
-搬入  0.8 交接的正文 → migrate：签成本人的记录，音频解开后重新封进 tape → shelf
+交城  一条录音 → city（后台一次一件）：本人签名、写明给哪座城的记录 → 城的 Zu 主机；音频经 tape::Pass::City 分段作文件
+搬入  0.8 交接的正文 → migrate（后台一次一件）：签成本人的记录，音频解开后重新封进 tape → shelf
 ```
 
 ## 3. 概念，各只有一个家
@@ -41,33 +43,36 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 词表 | 本人要听对、写对的人名和词：怎么说，各语言怎么写。一个词一条记录 | `glossary`、`shelf` |
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
 | 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
-| 状态 | 界面画的唯一一个值，变了就整份发过去 | `app`、`proto` |
+| 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：小状态（`State`，P2 瘦身成 `Shell`）变了整份发；信号（`Frame`、`Session`、`Level`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs` |
+| 寄存器 | `Register<T>` / `Reading<T>`：最新值加单调序号的 `watch` 薄包装，非阻塞、多写多读，晚来的读者立刻拿到最新一份 | `rt/signal.rs` |
+| 水位线与判断 | 各部件只原子写进度位置（`Gauge`）；录音看守 1 Hz 采样得 `Water`，纯函数 `judge` 对照预算表 `BUDGETS` 得出 `Live` / `Slow` / `Stalled` / `Dead` 与动作，`due` 保证同一停滞只行动与留现场一次 | `rt/water.rs`、`app/recording.rs` |
+| 端口（声音、连接、带子） | `Hear`、`Dial`、`Reels`（外加 `Drafts`、`Devices`、`Clip`、`Install`）：挂在 `Config` 上的薄端口，生产接真实设备/网络/磁盘，测试换暂停时钟下的确定替身 | `capture/audio.rs`、`live/wire.rs`、`capture/tape.rs`、`app/core.rs` |
+| 重启上限 | `Restarts`（1 分钟 8 次或 120 秒无健康运行）：`Watch` 状态机到限后以 `End::Fatal` 放弃自愈并发 `part.gave_up`，交由人按 `Command::Reconnect` 重拉 | `rt/supervise.rs` |
 | 事件 | 发生了什么：一个稳定的代码，后面跟着平铺的字段，只能是数、布尔、源码里写死的代码和明写的 id，一句话放不进去（编不过）。一行一个 JSON，写在 `<数据目录>/logs/zutalk.jsonl`，按大小轮换；发事件的人从不等磁盘。词典是 `docs/EVENTS.md` | `log/`（`zutalk-log`） |
+| 统计 | 每个核心一份的 `Stats`：无锁原子计数、高水位、固定 13 桶延迟分布和每条队列状态；每秒作 `Stats` 信号发布，每分钟把动过的行写入 `stats.summary` | `rt/stats.rs` |
+| 有名字的队列 | 全仓通道只经 `rt::queue`（`bounded` / `threads` / `fanout`）构造，写明带单位上限常量与 `Full` 策略（`Wait` / `Drop` / `Reject` / `End`），自动入统计并发边沿 `queue.full` / `queue.clear` | `rt/queue.rs` |
+| 树 | `Tree`：`TaskTracker` 加 `CancellationToken` 的具名监督树，统一 `spawn` / `keep` / `blocking`（及具名 `thread`），自动带走日志接收者并维护 `Tree::running()` 运行表 | `rt/supervise.rs` |
+| 自检包 | `Command::Diagnose` 在 desk 上原子写出 `<数据目录>/diagnose/<毫秒>/`（只留最新 3 份）：`about.json`、`water.json`、`stats.json`、`tasks.json` 与最近 2 份日志，按构造不含内容与秘密 | `app/work.rs` |
 
 ## 4. 模块
 
-文件的路径相对于 `core/src`（`shell`、`ui`、`server`、`log` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`live`、`record`、`knowledge`、`ai`、`out`、`id`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
+文件的路径相对于 `core/src`（`log`、`shell`、`ui`、`server` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`id`、`live`、`record`、`knowledge`、`ai`、`out`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
 
 | 模块 | 文件 | 做什么 |
 |---|---|---|
-| `audio` | `capture/audio.rs`、`capture/audio/file.rs`、`capture/clock.rs`、`rt/supervise.rs` | 麦克风、电脑声音（cpal）、音频文件；重采样、混音、补静音、重开；采集时钟；恢复规则 |
-| `tape` | `capture/tape.rs` | 加密的分钟块，崩溃后截掉残尾，销毁 |
-| `retain` | `record/retain.rs` | 音频留多久的规则；启动时和写好记录后清扫；按本人的话销毁 |
-| `live` | `live/lane.rs` | Soniox 实时：每栏一条流、重连、换钥匙、落后时跳到直播沿 |
-| `lines` | `live/lines.rs`、`live/lang.rs` | 断句规则；每种语言一行的语言档案（含逐字显现的单位和速度） |
-| `write` | `ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾 |
-| `shelf` | `record/shelf.rs` | 一个人的记录：列表、读、改、删与撤销、搜索；`Writer` 往一个 pack 里接着写；不属于录音的记录（房间清单、词表、交城去向）一个读法 `Shelf::kept` |
-| `glossary` | `knowledge/glossary.rs` | 词表：读写；给现场每条流的 `terms`、`translation_terms`，给整场转写的 `Plan.terms` |
-| `export` | `out/export.rs` | 导出器表：Markdown、SRT、VTT |
-| `room` | `out/room.rs` | 封帧、开帧、链接、把一条录音分页、写房间 |
-| `city` | `out/city.rs` | 交到城的档案馆：读城的日历、把录音作为本人的记录交给城的主机、音频分段上传 |
-| `keys` | `id/keys.rs` | 身份（收到的或本机造的，含没登录时签记录的本机身份与 `Who`）、秘密的存放、各服务钥匙、派生密钥、随机键（`fresh`）、对服务器的签名请求、旧版邀请的认领 |
-| `migrate` | `record/migrate.rs` | 旧版录音搬过来：读 0.8 交接的文件，签成本人的记录，音频解开后重新封进 tape |
-| `app` | `lib.rs`、`app/hub.rs`、`app/proto.rs` | 枢纽：命令、状态、录音任务、房间任务、交城任务、搬运；什么时候装更新；与界面之间的协议 |
-| `shell` | `app/src` | Tauri 外壳：两个窗口、对话框插件；应用自己的更新：看、下、装、重启 |
-| `ui` | `ui/src` | 主窗口、字幕窗、观看页（同一个入口，按 `body` 上的标记分） |
-| `server` | `server/src` | 授予、取钥与认领的账本、登录中继、房间 |
-| `log` | `log/src`（单独的 crate `zutalk-log`） | 事件的四个宏和字段的类型；写文件的口（有上限的队列、写线程 `log.writer`、轮换）；panic 钩子；测试用的捕获和「带着走」。核心、外壳、服务器都用它；只有它依赖 `tracing` |
+| `log` | `log/src/lib.rs`、`log/src/line.rs`、`log/src/sink.rs`、`log/src/hear.rs`、`log/src/capture.rs` | 独立 crate `zutalk-log`：四个事件宏与 `Plain` 类型、平铺 JSONL 写线程 `log.writer` 与轮换、panic 钩子、测试捕获与任务/线程透传；全仓仅它依赖 `tracing` |
+| `rt` | `rt.rs`、`rt/signal.rs`、`rt/water.rs`、`rt/supervise.rs`、`rt/queue.rs`、`rt/stats.rs`、`rt/keep.rs` | 运行时地基（不认识业务）：最新值寄存器、水位线与 `judge`、具名监督树与重启上限、有名字有界队列、统计与分桶分布、泛型批量阻塞落盘部件 |
+| `capture` | `capture.rs`、`capture/audio.rs`、`capture/audio/file.rs`、`capture/clock.rs`、`capture/tape.rs` | 麦克风/电脑声音（cpal）与音频文件；重采样、混音、补静音、具名线程与重开；采集时钟与 `wall_clock_policy`；加密分钟块 `tape`、静音补洞、崩溃截尾与销毁 |
+| `id` | `id.rs`、`id/keys.rs` | 身份（本机 `did:key` 与登录 `did:zu`，状态机 `Who`）、秘密文件与钥匙库、各服务钥匙来源（`From`）与 `Chain`、派生密钥、对服务器的签名请求、旧版邀请认领 |
+| `live` | `live.rs`、`live/wire.rs`、`live/lane.rs`、`live/frame.rs`、`live/lines.rs`、`live/lang.rs` | 实时连接端口 `Dial`、每栏一条 `lane`（重连、换钥匙、取钥匙时限、跳直播沿）、增量组帧器 `Composer` 与 8 KB `fit`、断句规则、各语言档案与逐字显现单位 |
+| `record` | `record.rs`、`record/shelf.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录列表、读、改、删与撤销、搜索、`Writer` 与草稿空缺 `DraftGap`）；音频保留与销毁清扫；0.8 交接搬运 |
+| `knowledge` | `knowledge.rs`、`knowledge/glossary.rs` | 词表（读写、给现场各流的 `terms`/`translation_terms` 与整场转写的 `Plan.terms`；P6 升级为 `topic.rs`） |
+| `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed` |
+| `out` | `out.rs`、`out/export.rs`、`out/room.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；房间密文封帧与写槽；交城日历、签名上传与分段音频 |
+| `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口；零 IO 状态机 `hub`（含 `Boot`）；与界面协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`、并发搜索/导出、串行后台与自检包 `work` |
+| `shell` | `app/src/lib.rs`、`app/src/main.rs`、`app/src/pump.rs`、`app/src/beat.rs`、`app/src/windows.rs`、`app/src/updates.rs` | 无锁全 async 的 Tauri 外壳：独占推送状态机 `Fan`、非阻塞主线程心跳 `Beat` 与帧间隔记账、不查询主线程的字幕窗显隐、无锁更新检查与安装任务 |
+| `ui` | `ui/src`（含 `ui/src/lib/vitals.ts`） | 主窗口、字幕窗、观看页；rAF 帧间隔采样与每秒 `drawn` 回报 |
+| `server` | `server/src/lib.rs`、`server/src/main.rs`、`server/src/ledger.rs`、`server/src/relay.rs`、`server/src/room.rs` | 授予、取钥与认领账本、登录中继、密文房间与结构化请求日志 |
 
 ## 5. 补回的功能，各落在哪里
 
@@ -125,8 +130,8 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 - **同一个应用。** Tauri 的 `identifier` 是旧版的 bundle id `xyz.voice.zutalk`：新版作为旧版的更新装上，系统授权不用重来。
 - **秘密。** `keys::get`/`set` 不变。macOS 上发布仍是 ad-hoc 签名，每次更新签名都变，钥匙串就会要密码；所以那里的秘密放在数据目录 `Secrets/secrets.json` 一个文件里（文件夹 0700，文件 0600，整份写好再改名替换）。Windows 与 Linux 仍用系统钥匙库。
-- **旧令牌。** 外壳只在 macOS 上把旧版的数据目录 `~/Library/Application Support/ZuTalk` 交给核心（`Config.old`，§5.12 的搬运也从这里读）；邀请只读其中 `Secrets/community-invite.json` 这一个文件，不改不删。没有邀请就不造 `did:zu`，记录照常由本机身份签。
-- **造身份。** 有令牌、本机没有身份时，核心造一个 `did:zu`：内核的 `zu::did::create` 是纯函数，用一把新的 P-256 轮换钥匙签创世操作，本人的 Zu 签名钥匙挂在 `zu-` 加由这把钥匙算出的八个字符下，没有 handle、没有服务。核心把它 POST 到 `Config.directory`，目录收下才存身份和轮换钥匙。did.md 要求先存好轮换钥匙再往下走，负责人选了以后再提醒：`State.rotation_unsaved` 让界面不挡路地提醒，`Command::RotationSaved` 说已经存好（钥匙仍留在本机）。读不出的身份不会被新造的顶替。
+- **旧令牌。** 外壳只在 macOS 上把旧版的数据目录 `~/Library/Application Support/ZuTalk` 交给核心（`Config.old`，§5.12 的搬运也从这里读）；邀请只读其中 `Secrets/community-invite.json` 这一个文件，不改不删。没有邀请就不造 `did:zu`，记录照常由本机身份签（§5.15）。
+- **造身份。** 有令牌、本机没有登录身份（`did:zu`）时，核心造一个 `did:zu`：内核的 `zu::did::create` 是纯函数，用一把新的 P-256 轮换钥匙签创世操作，本人的 Zu 签名钥匙挂在 `zu-` 加由这把钥匙算出的八个字符下，没有 handle、没有服务。核心把它 POST 到 `Config.directory`，目录收下才存身份和轮换钥匙。did.md 要求先存好轮换钥匙再往下走，负责人选了以后再提醒：`State.rotation_unsaved` 让界面不挡路地提醒，`Command::RotationSaved` 说已经存好（钥匙仍留在本机）。读不出的身份不会被新造的顶替。（注：0.8 邀请无感搬运会主动找目录与服务器，与「没登录不发请求」的取舍见 `P1.md` §4 第 8 条。）
 - **认领。** 本人签一条 `talk/claim` 记录 `{ token, aud }`，走 `keys::Ours::ask`，和别的请求同一种认证。成功或被明确拒绝（`invite.claimed`、`invite.unknown`）后，本机记下令牌的 SHA-256，不再发；会过去的失败按 `AGAIN` 起越等越久地再试，和整场转写、交城共用一个 `again`。
 - **服务器。** `POST /claim` 照常核对记录，再用运营者配置的管理令牌请旧服务 `POST /v1/retire`。旧服务在一个事务里答出剩余秒数（配额 − 已用 − 预留，不小于 0）并停用邀请，再问只答「已退役」和 0；所以同一个令牌第二次认领得到稳定的 `claimed`。账本记下认领（不带正文，令牌不落盘），旁边是服务器自己的一句 `{ claim, to, seconds }`。折算时按实时价 `Upstream::per_second` 把秒换成 µ$，和取钥一样按现价算，所以剩下的仍是实时字幕的小时数。这笔额度不过期，排在所有会到期的授予之后用。
 
@@ -197,10 +202,36 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 - **越不过交接。** 新版在 appcast 的 `zu` 频道上，0.8.6（构建号 66）交接完才允许这个频道，所以自动更新到新版（构建号 67 起）的人都已交接。手动装了新版、跳过 0.8.6 的，新版说 `migrate.missing`，不猜。
 - **一条录音整条搬或不搬。** id 由旧 id 定（和本机造的 id 同形），先封音频，再写各次转写、说话人、笔记，最后写 `talk/recording`；书架上有这条记录就是搬过了，删了也不再搬。断在半路，下次从头来。没搬成的以代码列在 `State.unmoved`，进度在 `State.moving`。
 - **不替本人送出声音。** 搬来的草稿 `About.moved`，不算欠着整场转写：0.8 里整场转写要本人点了才写。也因此，照 §5.8 的规则，它的音频一直留到本人销毁。
-- **只搬给一个人。** 第一次搬时记下 DID（`moved.json`），换了身份登录不再搬。
+- **只搬给登录的人。** 没登录时不搬 0.8 资料库（避免把 `moved.json` 锁死在临时本机身份上）；第一次以登录身份搬时记下 DID（`moved.json`），换了身份登录不再搬。P4 做领回时再一并定是否允许先搬到本机身份再领回（§5.15）。
 - 现场草稿是第 0 次转写（订正在 `via` 里记为 `hand`），0.8 的整场转写是第 1 次并成为录音的文字；标记的笔记接在录音笔记后面。回收站里的录音、笔记本本身、不属于录音的笔记、术语表、分享、城的记录都不搬。
 
 测试：`core/tests/migrate.rs`（夹具的音频和钥匙由旧仓库代码写成）、`core/tests/app.rs` 的 `the_old_library_moves_in_on_its_own_and_nothing_of_it_leaves`。
+
+### 5.13 运行时（P1）
+
+P1 已将 `PLAN.md` §4 与 `docs/build/phases/P1.md` §3 落地：现场路径（采集 → 队列/广播 → `tape`/`lane`/`frame` → 寄存器 → 外壳 `shell.pump` → 窗口）绕开 `hub` 与磁盘；`hub` 成为纯内存状态机（`hub.sh` 守零 IO），磁盘与网络活分别落在 `Work` 的顺序 `desk`、独立搜索/导出/网络任务及串行（许可 1）后台任务里；全仓通道收进 `rt::queue` 并用 `clippy.toml` 禁用无界通道；所有任务挂在具名监督树 `Tree` 上；`water.rs` 与看守在 1 Hz 采样、判定停滞并自动重开或按上限放弃；外壳改为无锁全 `async` 的 `shell.pump`（状态机 `Fan`）、非阻塞心跳 `shell.beat`（状态机 `Beat`）与 `updates` 任务（`shell.sh` 守零锁零同步命令）。
+
+与 `PLAN.md` 字面不同的实现取舍及理由（详见 `P1.md` §2、§3.6、§3.9、§3.13.15）：
+
+- **落盘改用「async 任务 + 分批阻塞调用（`rt::keep`）」而非独立线程**：同样与采集泵和现场路径隔着有界队列；且 tokio 暂停时钟会等阻塞调用而不等裸线程，台架虚拟时间因此确定不抖。
+- **外壳推送用单任务独占 `Fan` 而非 `arc-swap`**：订阅表和最新信号只归 `shell.pump` 一个任务所有，彻底无共享锁，也就不需要 `loom` 建模交错（由 `app/tests/pump.rs` 穷举交错覆盖）。
+- **不用 `turmoil`、`loom`、`hdrhistogram`、`tokio-metrics`、`statig`**：`Dial`/`Keys` 替身在暂停时钟下即可确定模拟不回话、断网与取钥匙超时；分布用固定 13 桶无分配实现；10 个状态机体积小，手写枚举 + 纯函数 `step` 更清晰。
+- **显式与可观测细节差异（`P1.md` §3.13.15）**：`rt::queue` 显式传入 `&Stats`，`Full` 为 `Wait`/`Drop`/`Reject`/`End`（`Coalesce` 由寄存器承担）；`stall.snapshot` 与每分钟汇总按平铺行输出（前者用递增 `snap` 号串联，后者以 `stats.summary` 领头）；日志独立为 `log/` crate（服务器也要装），靠宏写入 callsite 的 `zutalk:<代码>` 记号而非模块前缀过滤外部库日志；界面画帧序号与帧间隔合并为 1 Hz 单命令 `drawn(seq, gap_ms, gaps)`；取消 `ZUTALK_WATER_LOG`，改由 `ZUTALK_LOG=debug` 写 `water.mark`；规则脚本同步管 `app/src`、`server/src`、`log/src`（服务器的 3 处 `spawn` 与 1 处房间 `broadcast` 记在 `later` 表，P4/P5 还）；`zu/` 的 `Path::new` 仅放开 Ed25519 `did:key` 作本机作者（§5.15）。
+
+### 5.14 显式与可观测
+
+- **日志**：写到 `<数据目录>/logs/zutalk.jsonl`（服务器为 `<ZUTALK_DATA>/logs/zutalk-server.jsonl`），每行平铺 JSON（`t_ms`、`seq`、`level`、`component`、`event` 加事件字段），按 8 MB 轮换、留 5 个；发事件的人走 4096 行有界队列，从不等磁盘。
+- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节与自检包。全部 66 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`pending.sh` 共 9 个规则脚本在门禁里守着。
+- **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
+
+### 5.15 不登录也能录
+
+照 `PLAN.md` §2.7 与 `P1.md` §3.14：
+
+- **本机身份与 `Who`**：首次启动时核心在唯一秘密文件/钥匙库生成 `identity.local`（32 字节 Ed25519 种子，不联网不登记），其 `did:key`（`zu::did::local`）作本机记录作者，书架放在 `records/did-key-…/`。签名身份由状态机 `Who`（`Nobody(code)` / `Local` / `Person`）表达，DID 永不进 `State` 或日志（日志只发 `identity.who` 的代码）。`zu::did::is_did` 不变，任何 Zu 主机按构造拒绝本机身份记录。
+- **要登录的命令是一张表**：`Command::needs_person`（P1 为 `Share`、`Unshare`、`File`）在 hub 分派前拦下并回 `sign_in.first`，什么都不写；录音、导入、改标题、搜索、导出、词表、销毁音频、开字幕窗均不需登录，且没登录不向我们的服务器发任何请求。
+- **没有钥匙是一种录法，不是故障**：各服务钥匙来源收口在 `id/keys.rs::From`（`Nowhere` / `Own` / `Granted`）；开录前由 `lane::captions` 决定是否开流，无钥匙时不开 lane、状态为 `AudioOnly { why: "captions.no_key" }`、全程安静只录音；散场后由 `write::owed` 判为 `Waits("keys.none")`，草稿静候（发 `write.skipped`），设置里填入自有钥匙后自动清点补写。
+- **P1 到 P4 之间的过渡**：登录后把本机书架领回本人 DID 留在 P4（`DECISIONS.md` 第 11 条）。在此之前，登录看到本人 DID 的书架、登出回到本机书架，两边互不挪动、什么都不丢；一场录音由开始时的身份签到底。
 
 ## 6. 各模块的大小（上限已取消）
 
@@ -249,7 +280,7 @@ Zu 内核另计：1,550 / 1,550（为造 `did:zu` 从 1,500 调高，负责人�
 ## 7. 留给负责人定的
 
 1. **`clock::wall_clock_policy` 已照临时决定实现，数字等负责人确认。** 照 `docs/build/DECISIONS.md` 第 3 条：落后 ≤ 300 ms 不动（`JITTER_MS`），到 60 s 补上落后的静音，更长（`ASLEEP_MS`，多半是合盖睡眠）结束录音。一个后果：同时录麦克风和电脑声音、电脑不出声时，混音要等电脑那一路的时钟补静音，最多晚约 0.45 秒才交出（测试 `with_the_app_policy_a_quiet_source_holds_the_mix_back_under_half_a_second`，按 20 ms 一步量到 300 ms）。改数字只改 `clock.rs` 里两个常量。
-2. **只用协调员额度的人写不出整场记录。** Soniox 临时钥匙只能用于实时（`transcribe_websocket`），异步转写会被拒，所以他们的记录停在现场草稿上。现在草稿逐行落盘，至少不会因崩溃丢失。从旧版邀请搬来的额度也一样只用于实时字幕。照 §5.8 的规则，这些草稿的音频也一直留到本人销毁。
+2. **只用协调员额度的人写不出整场记录。** Soniox 临时钥匙只能用于实时（`transcribe_websocket`），异步转写会被拒，所以他们的记录停在现场草稿上。现在草稿逐行落盘，至少不会因崩溃丢失；没有钥匙的草稿现在是静候（`Waits("keys.none")`、`write.skipped`），不报错，填上自己的钥匙后再清点补写。从旧版邀请搬来的额度也一样只用于实时字幕。照 §5.8 的规则，这些草稿的音频也一直留到本人销毁。
 3. **轮换钥匙怎么交到本人手里。** 状态只说「还没存」，命令只说「存好了」。原则 6 不许钥匙到界面，所以给本人看或复制这把钥匙的办法由负责人定。
 4. **音频默认留多久。** 照 0.8 默认一直保留，和「音频默认不长留」对不上。要改只改一个值：`Setup.keep` 的默认（比如 0 天，写好文字稿就删）。另：偏好对本机所有录音生效，不再每场冻结；移走的录音音频留着等撤销，不受规则管。
 5. **销毁挡不住备份。** 录音的密钥由本机一个秘密派生（`keys::derive("tape", id)`），删不掉单独一把；备份里留下的密文，拿着这个秘密仍能解开。旧版销毁时连这条录音的密钥一起删。要做到这一点，需要每条录音一把随机密钥存进秘密库，会改到录音的加密和旧录音的迁移。
@@ -293,3 +324,6 @@ Zu 内核另计：1,550 / 1,550（为造 `did:zu` 从 1,500 调高，负责人�
 8. 真的目录（`plc.zuzalu.ink`）、真的旧服务和 Sparkle 更新都没有跑过；ad-hoc 签名的新版作为旧版的更新装上，要在真机上验。Tauri 更新插件在真机上替换应用、重启，也没有跑过。
 9. 0.8 那边的补丁没有编译，也没有对真数据跑过；Sparkle 频道挡住越过交接的更新，没有在真机上验。新版这边只用合成的交接验过，175 条的真库没有跑过。
 10. 真的城没有收过：交城只对本机端口上的替身跑过（§5.11）。
+11. 真机 1 小时实录没有跑过（出口 E9，待负责人按 `docs/build/reports/P1-26-close.md` 清单在 macOS / Windows / Linux 上执行）。
+12. I2 的大数据规模（10 万行搜索、175 条真库搬运）没有量过：P1 只证明了互不相干，规模留到 P2（1,000 条录音索引）和 P7（175 条真数据副本）量。
+13. 本机身份（`did:key`）签出的记录没有交给任何真的 Zu 主机试过：照规范它们会拒绝，仓库里只对本机服务器替身测过。

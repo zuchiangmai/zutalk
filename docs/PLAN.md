@@ -128,24 +128,24 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
 
 ### 2.7 不登录也能录（2026-11-21 负责人：「不登录，也可以录音。登录只是有额外的功能。」）
 
-- **本机身份**：第一次打开时，核心在本机造一把签名钥匙，用它的 `did:key` 作本机身份。不联网，也不登记。钥匙放在唯一的秘密文件里。没登录时，所有记录都用它签，放在 `records/<本机身份>/`。
+- **本机身份**：第一次打开时，核心在本机造一把签名钥匙，用它的 `did:key` 作本机身份。不联网，也不登记。钥匙放在唯一的秘密文件里。没登录时，所有记录都用它签，放在 `records/<本机身份>/`。（P1-06 已做：`keys::local`、`Who`、`zu::did::local`。）
 - **不登录能做的**：
-  - 录音、导入；
-  - 现场字幕：设置里填了自己的 Soniox 钥匙就有；没有钥匙就是「正在录音 · 只录音」，代码 `captions.no_key`，声音照录；
-  - 精修：要自己的钥匙；
-  - 笔记、标题、说话人、知识库、导出、字幕窗、音频留多久。
+  - 录音、导入；（P1-06 已做：不再回 `sign_in.first`。）
+  - 现场字幕：设置里填了自己的 Soniox 钥匙就有；没有钥匙就是「正在录音 · 只录音」，代码 `captions.no_key`，声音照录；（P1-07 已做：`lane::captions`。）
+  - 精修：要自己的钥匙；（P1-07 做到有钥匙就写、没有就静候发 `write.skipped`；「没精修」状态与手动再试在 P2。）
+  - 笔记、标题、说话人、知识库、导出、字幕窗、音频留多久。（P1-06 已做：变更/搜索/导出/词表/销毁音频/字幕窗均不需登录。）
 - **要登录的**：
   - 主持和对外（直播房间）；
   - 交到档案馆；
   - 城给的额度；
-  - 恢复密钥和换设备。
-- 按下这些功能时才弹登录的纸，没有登录墙。设计稿里「按下开始录音时弹出」那一张，改为在按下要登录的功能时弹。
-- **登录以后：领回本机的记录。** 第一次以某个 DID 登录时，把本机身份名下的记录全部用这个 DID 重新签一遍，放进这个人的书架（和 §5.12 搬运 0.8 录音的路一样：签成本人的记录）。音频不动：tape 的钥匙由本机秘密派生，与身份无关。
-  - 领完记下「本机身份已归某个 DID」，之后不再领给别人。
-  - 本机身份的书架留着，等本人删除，以便撤销。
-  - 登录前正在录的那一场，录完再领。
-- **退出登录**：回到本机身份。已领走的记录只在那个 DID 的书架里。
-- **服务器**：没登录不向我们的服务器发任何请求。
+  - 恢复密钥和换设备。（P1-06 已做：`Command::needs_person` 拦下 `Share`/`Unshare`/`File`，回 `sign_in.first` 且不写任何东西；其余随 P4/P5 补行。）
+- 按下这些功能时才弹登录的纸，没有登录墙。设计稿里「按下开始录音时弹出」那一张，改为在按下要登录的功能时弹。（P1 未做：界面的事，P3 画、P4 接。）
+- **登录以后：领回本机的记录。** 第一次以某个 DID 登录时，把本机身份名下的记录全部用这个 DID 重新签一遍，放进这个人的书架（和 §5.12 搬运 0.8 录音的路一样：签成本人的记录）。音频不动：tape 的钥匙由本机秘密派生，与身份无关。（P1 未做，放在 P4，见 `DECISIONS.md` 第 11 条。）
+  - 领完记下「本机身份已归某个 DID」，之后不再领给别人。（P4）
+  - 本机身份的书架留着，等本人删除，以便撤销。（P4）
+  - 登录前正在录的那一场，录完再领。（P4；P1-06 已保证一场录音由开始时的身份签到底。）
+- **退出登录**：回到本机身份。已领走的记录只在那个 DID 的书架里。（P1-06 已做；P1 到 P4 之间登录/登出各自打开对应书架，互不挪动。）
+- **服务器**：没登录不向我们的服务器发任何请求。（P1-06 已做，由 `nobody_signed_in_nothing_is_asked_of_our_server` 守着。）
 
 ## 3. 界面重设计逐屏对照
 
@@ -195,15 +195,15 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
 
 ### 4.2 现在的代码要动的地方
 
-| 现在 | 改成 |
-|---|---|
-| `Msg::Live` 经过 hub 的无上限邮箱 | 录音任务直接写 `Frame` 寄存器（`watch`）；房间的 `slot()` 和外壳的推送任务都读它。房间现在已经是这样写的，照抄过来 |
-| hub 在 `refresh()`、`Search`、`Export` 里同步读写磁盘 | 交给 L3 工作池；结果作为消息回到 hub；刷新先标「脏」，再合并成一次 |
-| `mpsc::unbounded_channel` | 全部换成有上限的；用 clippy 的 `disallowed-methods` 禁掉 |
-| 外壳 `fan` 拿着锁调用 `is_visible()`；`subscribe` 是同步命令 | 外壳不持锁（用 `arc-swap` 存订阅者和最后一份状态）；所有命令 async；字幕窗该不该显示由自己记住，不去问系统；页面重新加载后清掉旧的 Channel |
-| 泵线程直接写 tape（`write_all`，每分钟同步一次磁盘） | 泵只往有上限的队列里放，由写 tape 的线程落盘 |
-| `State` 里装着 library、open、hits、terms | 移到视图（§2.5） |
-| `Backoff` 封顶 8 秒，然后无限重试 | 加「重启次数上限」：一分钟内失败 N 次，或停滞超过 T，就把这条判为「停了」，界面显示原因并给出「重连」 |
+| 现在 | 改成 | P1 之后 |
+|---|---|---|
+| `Msg::Live` 经过 hub 的无上限邮箱 | 录音任务直接写 `Frame` 寄存器（`watch`）；房间的 `slot()` 和外壳的推送任务都读它。房间现在已经是这样写的，照抄过来 | 已做（P1-11、P1-12）：`Frame`、`Session`、`Level`、`Water`、`Stats`、`Notices` 全由寄存器（`Outlet`）直出，绕开 hub |
+| hub 在 `refresh()`、`Search`、`Export` 里同步读写磁盘 | 交给 L3 工作池；结果作为消息回到 hub；刷新先标「脏」，再合并成一次 | 已做（P1-19、P1-20）：`hub.rs` 零 IO（`hub.sh` 守着），读写与刷新合并在 `Work` 的顺序 `desk`，搜索与导出写盘在独立任务 |
+| `mpsc::unbounded_channel` | 全部换成有上限的；用 clippy 的 `disallowed-methods` 禁掉 | 已做（P1-04、P1-13、P1-14、P1-21）：全仓核心与外壳通道收进 `rt::queue`，`clippy.toml` 与 `bounded.sh` 守着 |
+| 外壳 `fan` 拿着锁调用 `is_visible()`；`subscribe` 是同步命令 | 外壳不持锁（用 `arc-swap` 存订阅者和最后一份状态）；所有命令 async；字幕窗该不该显示由自己记住，不去问系统；页面重新加载后清掉旧的 Channel | 已做（P1-23、P1-24）：改为单任务独占状态机 `Fan`（未用 `arc-swap`），零锁全 async，`windows.rs` 不查询系统，`shell.sh` 守着 |
+| 泵线程直接写 tape（`write_all`，每分钟同步一次磁盘） | 泵只往有上限的队列里放，由写 tape 的线程落盘 | 已做（P1-15）：经 600 块有界队列交给 `rt::keep`（async 任务 + 分批阻塞调用，而非独立线程），坏了重开静音补洞 |
+| `State` 里装着 library、open、hits、terms | 移到视图（§2.5） | 留给 P2（P1-12 已先将 `session` 移出 `State`，并留 `i8_*` 标记测试） |
+| `Backoff` 封顶 8 秒，然后无限重试 | 加「重启次数上限」：一分钟内失败 N 次，或停滞超过 T，就把这条判为「停了」，界面显示原因并给出「重连」 | 已做（P1-09、P1-17、P1-18）：`Restarts`（1 分钟 8 次或 120 秒无健康运行）到限转 `Dead` 发 `part.gave_up`，`Command::Reconnect` 重拉 |
 
 ### 4.3 活性：水位线与判断
 
@@ -249,6 +249,8 @@ judge(&Water, now, &Budgets) -> Vec<(Stage, Health, Action)>
 | 丢弃要写理由 | `let _ = …` 丢掉一个 `Result` 或发送失败，同一行写 `// dropped: <为什么没关系>`；不能没关系的就当失败报出来 | 规则脚本 `dropped.sh` |
 | 副作用只走有名字的端口 | 磁盘、网络、设备、时钟、随机数，都是 `Config` 上有名字的端口；规则函数的参数里看得到它用到的一切 | 已有：规则不做 IO；`hub.sh` |
 | 配置一处写全 | `Config` 的每个字段都有注释；没有藏在别处的环境变量（只允许 `ZUTALK_` 开头、并列在 `Config::from_env` 一处） | 审查 |
+
+> **P1 实际做法（§4.5.1）**：10 个状态机均用手写枚举 + 纯函数 `step` 并配转换表测试（未引 `statig`）；`rt::queue` 的构造额外传入 `&Stats` 以自动登记统计，`Full` 为 `Wait`/`Drop`/`Reject`/`End`（`Coalesce` 归最新值寄存器 `rt::signal::Register`）；五个规则脚本同步覆盖 `core/src`、`app/src`、`server/src`、`log/src`（`spawn.sh`、`bounded.sh` 对 `server/src` 的 4 处既有项记在 `later` 表，留待 P4/P5 还）。
 
 #### 4.5.2 可观测：不用调试器，就知道它在做什么、卡在哪里
 
@@ -299,6 +301,8 @@ judge(&Water, now, &Budgets) -> Vec<(Stage, Health, Action)>
 - 台架里每种注入的故障，除了断言「恢复了」，还要断言「看得见」：日志里有对应的事件代码，`Water` 里有对应的判断。
 - 审查时，「出了这种事，看日志能不能知道」是一条必查项。
 
+> **P1 实际做法（§4.5.2，详见 `P1.md` §3.13.15）**：日志独立成 crate `log/`（`zutalk-log`，服务器共用，全仓仅它依赖 `tracing`），靠宏写入 callsite 记号 `zutalk:<代码>` 过滤外部库事件；66 个稳定事件全登记在 `docs/EVENTS.md` 并由 `events.sh` 双向守卫；统计用固定 13 桶（未引 `hdrhistogram`）；`stall.snapshot` 与每分钟汇总按平铺行输出（分别以递增 `snap` 号和 `stats.summary` 串联）；界面帧序号与帧间隔合并为 1 Hz 单命令 `drawn(seq, gap_ms, gaps)`；取消独立 `ZUTALK_WATER_LOG`，改由 `ZUTALK_LOG=debug` 输出每秒 `water.mark`；E10 已在 P1-25 逐项核对（含三场故障「只看日志」序列测试与两条落盘隐私测试）。
+
 ---
 
 ## 5. 模块
@@ -306,7 +310,7 @@ judge(&Water, now, &Budgets) -> Vec<(Stage, Health, Action)>
 ### 5.1 目录
 
 ```text
-zu/                     Zu 协议内核（不变）
+zu/                     Zu 协议内核（不变；P1-06 为本机身份开窄口：`zu::did::local` / `local_key`，仅 `Path::new` 接受 Ed25519 `did:key` 作作者，`is_did` 不变，任何主机不收，见 `P1.md` §3.14.2）
 core/src/
   rt/                   运行时，不认识任何业务
     signal.rs           Register<T>：最新值 + seq；watch 的薄包装，带大小断言
@@ -370,6 +374,8 @@ server/src/
 - 可选：`statig`（录音和 lane 的状态机）；
 - 界面：`virtua`（虚拟列表）。
 
+> **P1 实际变更**：新增工作区 crate `log/`（`zutalk-log`，依赖 `tracing` 与 `serde_json`，`tracing` 本已是间接依赖）；核心加 `zutalk-log`、`tokio-util`（`rt`），`serde` 开 `rc` 特性；外壳加 `zutalk-log`、`tokio`（`sync`、`macros`）；服务器加 `zutalk-log`。**P1 未引入**：`arc-swap`（外壳改为单任务独占 `Fan`，无共享状态）、`hdrhistogram`（固定 13 桶无分配实现）、`loom`（无共享锁，由 `app/tests/pump.rs` 穷举交错）、`turmoil`（`Dial`/`Keys` 替身在暂停时钟下确定模拟断网/不回话/超时）、`tokio-metrics`（已有 `Tree::running()` 与 `rt::stats`）、`statig`（状态机小，手写枚举 + `step`）、`assert_no_alloc`（未需新加依赖，回调零分配由 `core/tests/callback.rs` 测）；`rusqlite` 留给 P2，`virtua` 留给 P3。
+
 ### 5.4 写法规矩（加进 `CLAUDE.md` 的 Rules）
 
 - 没有无上限的队列；每个队列写明满了以后怎么办。
@@ -426,14 +432,15 @@ ui/src/
 
 | 不变量 | 怎么测 |
 |---|---|
-| I1 说出到上屏 p99 ≤ 1 秒，与录音时长无关 | 模拟台架：暂停的 tokio 时间，用 0.8 的回放夹具拼成 8 小时；按小时分段，p99 不能上升 |
-| I2 后台再忙也不影响字幕 | 同一台架上同时跑：10 万行的搜索、175 条搬运、导出、精修 |
+| I1 说出到上屏 p99 ≤ 1 秒，与录音时长无关 | 模拟台架：暂停的 tokio 时间，用 0.8 的回放夹具拼成 8 小时；按小时分段，p99 不能上升。**P1 实测**：`core/tests/liveness.rs::i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first`（8 虚拟小时双语，每小时 p99=321 ms，最大帧 6125 B ≤ 8192 B）与 `i1_three_languages_fit_a_frame`（30 虚拟分钟三语） |
+| I2 后台再忙也不影响字幕 | 同一台架上同时跑：10 万行的搜索、175 条搬运、导出、精修。**P1 实测**：`i2_a_tape_that_stands_still_holds_no_caption_back`、`i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands`、`i2_background_work_runs_beside_a_recording` 加 `scripts/build/rules/hub.sh`（证明隔离；10 万行/175 条规模留 P2/P7） |
 | I3 内存有上限 | 长跑测试中各进程的内存不增长；所有队列的长度都有记录 |
-| I4 没有无上限的队列，外壳没有同步命令 | clippy 的 `disallowed-methods`，加一个检查脚本 |
-| I5 外壳不会死锁 | 用 `loom` 给外壳的订阅和推送协议建模；也测「页面重新加载时正好在推送」 |
-| I6 任何部件都能被杀掉并自愈 | 随机杀掉 lane、帧任务、写盘线程、网页，N 秒内恢复，事实不丢失 |
-| I7 停滞一定被看见 | 用 `turmoil` 模拟：Soniox 连着但不回话、取钥匙卡住、断网；`judge` 在预算内给出 `Stalled` 并采取动作 |
-| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1 |
+| I4 没有无上限的队列，外壳没有同步命令 | clippy 的 `disallowed-methods`，加一个检查脚本（`clippy.toml` + `bounded.sh` + `shell.sh`） |
+| I5 外壳不会死锁 | 用 `loom` 给外壳的订阅和推送协议建模；也测「页面重新加载时正好在推送」。**P1 实测**：单任务独占 `Fan` 无锁，`app/tests/pump.rs::every_interleaving_ends_with_each_window_holding_the_latest` 穷举交错 + `a_reload_while_frames_are_coming_loses_nothing_and_the_old_channel_goes_quiet` + `shell.sh` |
+| I6 任何部件都能被杀掉并自愈 | 随机杀掉 lane、帧任务、写盘线程、网页，N 秒内恢复，事实不丢失。**P1 实测**：`i6_a_lane_that_dies_comes_back_and_marks_what_it_missed`、`i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence`、`core/tests/supervise.rs::a_part_that_panics_is_opened_again`、`core/tests/keep.rs`、`app/tests/pump.rs::a_pump_that_dies_is_started_again_and_no_window_has_to_join_again` |
+| I7 停滞一定被看见 | 用 `turmoil` 模拟：Soniox 连着但不回话、取钥匙卡住、断网；`judge` 在预算内给出 `Stalled` 并采取动作。**P1 实测**：暂停时钟 + `Dial`/`Keys` 替身：`core/tests/water.rs`、`i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection`、`i7_a_capture_that_stops_delivering_ends_the_recording_out_loud`、`i7_offline_is_said_and_captions_stop_trying_until_asked`、`core/tests/live.rs::a_lease_that_never_comes_is_given_up_on` |
+| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1（P1 已留标记测试 `i8_what_one_change_sends_does_not_grow_with_the_library`，P2 转正） |
+| **I9 显式与可观测**（原则 10，§4.5） | **P1 实测**：5 个规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`，核心与外壳欠账清零）；10 个状态机转换表测试；全部故障测试断言「看得见」；两条落盘与自检包隐私测试（`nothing_said_or_secret_reaches_the_log`、`a_diagnosis_holds_nothing_that_was_said_and_no_secret`）；三场故障日志序列测试与词典自检 `every_event_in_the_catalogue_can_be_told_apart` |
 | 真机 | `core/tests/audio.rs` 开头的手工清单，三个系统；8 小时实录一次 |
 
 **先写测试**：P1 的第一件事是让台架在现在的代码上跑起来，并且让它失败。失败的地方就是要改的地方。
@@ -447,10 +454,10 @@ ui/src/
 | 期 | 内容 | 出口 | 估计 |
 |---|---|---|---|
 | **P0 定稿** | 负责人定 §9 的几件事；本文并入 `DESIGN.md`；`CLAUDE.md` 加原则 8、9 和 §5.4 的规矩；设计稿进仓库（已复制到 `docs/ui-2026-11-21/`） | 文档定稿 | 1–2 天 |
-| **P1 运行时地基** | 模拟台架和 I1–I8（先让它失败）；`rt/`（signal、water、supervise）；`Frame` 绕开 hub；外壳无锁、全部 async、`pump.rs`；hub 不再读写磁盘；有上限的队列加 lint；tape 写盘线程；`wall_clock_policy`（照临时决定实现，数字等负责人确认） | I1、I2、I4、I5、I6 通过；真机录 1 小时不卡 | 1.5 周 |
+| **P1 运行时地基** | 模拟台架和 I1–I8（先让它失败）；`rt/`（signal、water、supervise）；`Frame` 绕开 hub；外壳无锁、全部 async、`pump.rs`；hub 不再读写磁盘；有上限的队列加 lint；tape 写盘线程；`wall_clock_policy`（照临时决定实现，数字等负责人确认）。**已做（P1-01 至 P1-26）**：补齐显式与可观测（`zutalk-log`、9 个规则脚本、自检包、心跳）与不登录也能录（§2.7 归 P1 部分） | I1、I2、I4、I5、I6、I7（核心）、I9、E11 全在门禁通过；**出口 E9（真机录 1 小时不卡）等负责人执行**（见 `docs/build/reports/P1-26-close.md`） | 1.5 周 |
 | **P2 数据层** | `view/`（SQLite 索引、FTS、分块、compare）；`Query` 与 `Invalidate`；状态瘦身；能读旧版本；带时间的笔记；精修可以手动触发、失败会留下状态 | I3、I8 通过；1,000 条录音、10 小时的正文，翻页和搜索都在 100 ms 内 | 1.5 周 |
 | **P3 界面主流程** | 框架定下；`ds/` 设计系统；两栏版面；首页、录音中、边录边记、停止以后、精修稿、读一场录音、全部录音；字幕窗基本款；状态一览里各种状态都有画法 | 设计稿主流程的画板都能在真数据上走通；I1 在真机界面上成立 | 2 周（可以和 P2 后半并行：先用假数据） |
-| **P4 身份与额度** | 需要时才问；扫码登录加核对数字（要先补 zu `login.md`，§9 第 5 条）；新建身份、恢复密钥、句柄；额度按服务、按天（服务器 + 城） | 新设备从零到第一次录音，全程不用读说明 | 1–1.5 周（服务器部分可以和 P3 并行） |
+| **P4 身份与额度** | 需要时才问；扫码登录加核对数字（要先补 zu `login.md`，§9 第 5 条）；新建身份、恢复密钥、句柄；额度按服务、按天（服务器 + 城）；**领回本机身份名下的记录（§2.7）** | 新设备从零到第一次录音，全程不用读说明 | 1–1.5 周（服务器部分可以和 P3 并行） |
 | **P5 主持与对外** | `out/host.rs`（不落盘、人数、两道保险）；房间只留槽；删掉单条录音的分享；色带；字幕窗的场合、大小、穿透点击、舞台全屏；观众页；按住交档案馆、8 秒撤销；记录类型和档案馆对齐 | 主持一场、崩溃一次、重开应用：外面不留任何东西 | 1.5 周 |
 | **P6 知识库与 AI** | `talk/topic` 与知识库页；主题送进现场和精修的 context；标题与话题；「记进知识库」；只用额度的人怎么精修（§9 第 4 条） | 一场读书会：专有名词识别对、标题像人写的 | 1.5 周 |
 | **P7 搬家与发布** | 打上并发布 0.8.6 交接补丁；在 175 条真数据的副本上搬一遍；更新签名钥匙；Sparkle 的 `zu` 频道；三个系统的手工清单；8 小时实录 | 发布清单（`RELEASE.md`）全部打钩 | 1 周 |
