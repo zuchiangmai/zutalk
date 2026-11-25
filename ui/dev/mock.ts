@@ -272,15 +272,23 @@ export function mockBus(recording = false): Bus {
     length_ms: number,
     title: string,
     spoken: string[],
-    opts: { draft?: boolean; audio?: boolean; filed?: boolean; refine_failed?: string | null; title_by?: TitleBy } = {},
+    opts: {
+      draft?: boolean;
+      audio?: boolean;
+      filed?: boolean;
+      refine_failed?: string | null;
+      title_by?: TitleBy;
+      tags?: { label: string; at_ms: number }[];
+      topics?: string[];
+    } = {},
   ): LibraryRow => ({
     id,
     started,
     length_ms,
     title,
     title_by: opts.title_by ?? (title ? 'Ai' : 'None'),
-    tags: [],
-    topics: [],
+    tags: opts.tags ?? [],
+    topics: opts.topics ?? [],
     preview: sayScript(spoken[0])[0],
     spoken,
     draft: opts.draft ?? false,
@@ -291,7 +299,14 @@ export function mockBus(recording = false): Bus {
 
   const buildRec = (
     r: LibraryRow,
-    opts: { refined: boolean; notes?: Note[]; speakers?: Record<string, string>; filed?: Filing | null; refine?: RefineStatus },
+    opts: {
+      refined: boolean;
+      notes?: Note[];
+      speakers?: Record<string, string>;
+      filed?: Filing | null;
+      refine?: RefineStatus;
+      title_candidates?: TitleCandidate[];
+    },
   ): MockRec => {
     const takes = new Map<number, { lines: [string, Said][]; is_live: boolean; written_at: number }>();
     takes.set(0, { lines: makeLines(r.spoken, false), is_live: true, written_at: r.started + r.length_ms });
@@ -309,7 +324,7 @@ export function mockBus(recording = false): Bus {
       note: '',
       filed: opts.filed ?? null,
       refine: opts.refine ?? (opts.refined ? { is: 'Refined', take: 1 } : { is: 'Draft', why: null }),
-      title_candidates: r.title ? [{ by: r.title_by, text: r.title }] : [],
+      title_candidates: opts.title_candidates ?? (r.title ? [{ by: r.title_by, text: r.title }] : []),
     };
   };
 
@@ -323,26 +338,55 @@ export function mockBus(recording = false): Bus {
     state: 'city.filed',
   };
 
+  const bookTopicId = 'b00c10b0000000000000000000000001';
+  const kitchenTopicId = 'c0000000000000000000000000000002';
+  s.setup.topics = [bookTopicId];
+
   let recs: MockRec[] = [
-    buildRec(makeRow('r1', now - 2 * HOUR_MS, 1_820_000, 'Quarterly review', ['zh', 'th']), {
-      refined: true,
-      speakers: { '1': 'Host', '2': 'Guest' },
-      notes: [
-        { key: 'n1', at_ms: 4_200, text: 'Follow up on Thailand pilot numbers', anchor: 'k1' },
-        { key: 'n2', at_ms: 12_600, text: '', anchor: 'k3' },
-      ],
-    }),
+    buildRec(
+      makeRow('r1', now - 2 * HOUR_MS, 1_820_000, 'Book club: Invisible Cities night three', ['zh', 'th'], {
+        title_by: 'Ai',
+        topics: [bookTopicId],
+        tags: [
+          { label: 'Cities of memory', at_ms: 4_200 },
+          { label: 'Valdrada', at_ms: 12_600 },
+          { label: 'Reading aloud', at_ms: 25_200 },
+        ],
+      }),
+      {
+        refined: true,
+        speakers: { '1': 'Host', '2': 'Reader' },
+        notes: [
+          { key: 'n1', at_ms: 4_200, text: 'Save this Thailand reading chapter for the final night', anchor: 'k1' },
+          { key: 'n2', at_ms: 12_600, text: '', anchor: 'k3' },
+        ],
+        title_candidates: [
+          { by: 'Ai', text: 'Book club: Invisible Cities night three' },
+          { by: 'Ai', text: 'Cities of memory and Valdrada' },
+          { by: 'Opening', text: sayScript('zh')[0] },
+        ],
+      },
+    ),
     buildRec(makeRow('r2', now - 26 * HOUR_MS, 312_000, '', ['en'], { draft: true }), {
       refined: false,
     }),
     buildRec(
-      makeRow('r3', now - 3 * DAY_MS, 2_700_000, 'Community kitchen sharing', ['th', 'en'], { filed: true }),
+      makeRow('r3', now - 3 * DAY_MS, 2_700_000, 'Community kitchen sharing', ['th', 'en'], {
+        filed: true,
+        title_by: 'Hand',
+        topics: [kitchenTopicId],
+        tags: [
+          { label: 'Shift schedule', at_ms: 4_200 },
+          { label: 'Pantry budget', at_ms: 16_800 },
+        ],
+      }),
       { refined: true, filed: filingR3 },
     ),
     buildRec(
-      makeRow('r4', now - 35 * DAY_MS, 1_140_000, 'Field interview · workshop', ['zh', 'en'], {
+      makeRow('r4', now - 35 * DAY_MS, 1_140_000, 'Field interview · woodshop', ['zh', 'en'], {
         draft: true,
         refine_failed: 'keys.async_refused',
+        tags: [{ label: 'Safety briefing', at_ms: 0 }],
       }),
       {
         refined: false,
@@ -355,20 +399,55 @@ export function mockBus(recording = false): Bus {
   ];
 
   const gone = new Map<string, MockRec>();
-  let terms: Term[] = [{ said: 'Zuzalu', written: { th: 'ซูซาลู' } }];
+  let terms: Term[] = [
+    { said: 'Chiang Mai', written: { zh: '清迈', th: 'เชียงใหม่' } },
+    { said: 'Shared kitchen', written: { zh: '共享厨房', th: 'ครัวรวม' } },
+  ];
   let topics: Topic[] = [
     {
       id: 'always',
       name: '',
       domain: '',
       facts: [],
-      background: '',
+      background: 'Words used in every session: local places and community spaces.',
       terms: structuredClone(terms),
       translation_terms: [],
       source_file: null,
       suggested_terms: [],
       pinned: true,
       updated_at: now - DAY_MS,
+    },
+    {
+      id: bookTopicId,
+      name: 'Book club · Invisible Cities',
+      domain: 'Literature',
+      facts: [
+        { key: 'Work', value: 'Invisible Cities' },
+        { key: 'Location', value: 'Chiang Mai' },
+      ],
+      background: 'Weekly reading group reading chapters aloud and discussing imaginary cities in Chinese and English.',
+      terms: [
+        { said: 'Kublai Khan', written: { zh: '忽必烈', th: 'กุบไลข่าน' } },
+        { said: 'Venice', written: { zh: '威尼斯' } },
+      ],
+      translation_terms: [{ source: 'Invisible Cities', target: '看不见的城市' }],
+      source_file: 'night-three-handout.md',
+      suggested_terms: ['Valdrada', 'Isidora', 'Zenobia'],
+      pinned: false,
+      updated_at: now - 3 * HOUR_MS,
+    },
+    {
+      id: kitchenTopicId,
+      name: 'Community weekly sync',
+      domain: 'Community',
+      facts: [{ key: 'Focus', value: 'Kitchen & woodshop' }],
+      background: 'Weekly community sync covering kitchen shifts, pantry shopping, and woodshop maintenance.',
+      terms: [{ said: 'Woodshop', written: { zh: '木工坊' } }],
+      translation_terms: [],
+      source_file: null,
+      suggested_terms: [],
+      pinned: false,
+      updated_at: now - 2 * DAY_MS,
     },
   ];
   const topicSizeChars = (t: Topic): number =>
@@ -737,6 +816,7 @@ export function mockBus(recording = false): Bus {
         return;
       }
       topics = topics.filter((t) => t.id !== c.id);
+      s.setup.topics = s.setup.topics.filter((id) => id !== c.id);
       emitInvalidate('Knowledge');
     },
     ImportTopicFile: (c) => {
@@ -747,6 +827,9 @@ export function mockBus(recording = false): Bus {
       }
       const name = c.path.split(/[\\/]/).pop() || c.path;
       target.source_file = name;
+      if (!target.suggested_terms.includes('Valdrada')) {
+        target.suggested_terms = [...target.suggested_terms, 'Valdrada', 'Armilla'];
+      }
       target.updated_at = Date.now();
       emitInvalidate('Knowledge');
     },

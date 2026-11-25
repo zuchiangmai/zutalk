@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import type { ContentTag } from '$proto/ContentTag';
 import type { Note } from '$proto/Note';
 import type { RecordingView } from '$proto/RecordingView';
 import type { Said } from '$proto/Said';
+import type { TitleBy } from '$proto/TitleBy';
+import type { TopicSummary } from '$proto/TopicSummary';
 import type { Writing } from '$proto/Writing';
 import {
   clock,
@@ -46,21 +49,45 @@ export function parseLineIndex(key: string | null | undefined): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** Pure helper finding the transcript line index containing or closest to `atMs` (Titles.dc.html tag jump). */
+export function findLineIndexForTime(lines: readonly [string, Said][], atMs: number): number | null {
+  if (lines.length === 0) return null;
+  for (let i = 0; i < lines.length; i++) {
+    const { t0, t1 } = lines[i][1];
+    if (atMs >= t0 && atMs <= t1) return i;
+  }
+  let bestIdx = 0;
+  let bestDist = Math.abs(lines[0][1].t0 - atMs);
+  for (let i = 1; i < lines.length; i++) {
+    const dist = Math.abs(lines[i][1].t0 - atMs);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
 export type ReaderViewProps = {
   recording: RecordingView;
   progressRefine: Writing | null;
+  progressTitle?: Writing | null;
   exporters: readonly string[];
   isRecordingThis: boolean;
+  topics?: readonly TopicSummary[];
   initialTab?: 'transcript' | 'notes';
   initialTake?: number;
   initialCompare?: boolean;
   highlightLineKey?: string | null;
   onChangeTitle: (text: string) => void;
+  onPickTitle?: (title: string, by: TitleBy) => void;
+  onGenerateTitle?: () => void;
   onEditLine: (key: string, language: string, text: string) => void;
   onEditSpeaker: (label: string, name: string) => void;
   onAddNote: (at_ms: number, text: string, anchor: string | null) => void;
   onEditNote: (key: string, text: string) => void;
   onRemoveNote: (key: string) => void;
+  onRememberTerm?: (topicId: string, said: string, written: Record<string, string>) => void;
   onRefine: () => void;
   onOpenSettings: () => void;
   onCopy: (langs: string[]) => void;
@@ -71,22 +98,27 @@ export type ReaderViewProps = {
   archiveSlot?: ReactNode;
 };
 
-/** Pure presentational Reader page with virtualized chunked transcript, Compare, and Notes (Reader.dc.html + Refine.dc.html). */
+/** Pure presentational Reader page with virtualized chunked transcript, Compare, titles/tags, and Notes (Reader.dc.html + Titles.dc.html + Refine.dc.html). */
 export function ReaderView({
   recording,
   progressRefine,
+  progressTitle = null,
   exporters,
   isRecordingThis,
+  topics = [],
   initialTab = 'transcript',
   initialTake,
   initialCompare = false,
   highlightLineKey = null,
   onChangeTitle,
+  onPickTitle,
+  onGenerateTitle,
   onEditLine,
   onEditSpeaker,
   onAddNote,
   onEditNote,
   onRemoveNote,
+  onRememberTerm,
   onRefine,
   onOpenSettings,
   onCopy,
@@ -101,6 +133,9 @@ export function ReaderView({
   const [selectedTake, setSelectedTake] = useState<number>(initialTake ?? recording.take);
   const [compare, setCompare] = useState<boolean>(initialCompare);
   const [titleDraft, setTitleDraft] = useState(row.title);
+  const [titleMenuOpen, setTitleMenuOpen] = useState(false);
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [pendingTagAtMs, setPendingTagAtMs] = useState<number | null>(null);
   const [activeLangs, setActiveLangs] = useState<string[]>(recording.shown);
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -108,6 +143,7 @@ export function ReaderView({
   const [scrollToIndex, setScrollToIndex] = useState<number | null>(() =>
     parseLineIndex(highlightLineKey),
   );
+  const loadedLinesRef = useRef<[string, Said][]>([]);
 
   // Notes tab editing state
   const [editingNoteKey, setEditingNoteKey] = useState<string | null>(null);
@@ -118,6 +154,12 @@ export function ReaderView({
   useEffect(() => {
     setTitleDraft(row.title);
   }, [row.id, row.title]);
+
+  useEffect(() => {
+    setTitleMenuOpen(false);
+    setActiveTag(null);
+    setPendingTagAtMs(null);
+  }, [row.id]);
 
   useEffect(() => {
     setSelectedTake(initialTake ?? recording.take);
@@ -215,9 +257,64 @@ export function ReaderView({
     setEditingNoteKey(null);
   };
 
+  const isTitling = progressTitle?.id === row.id;
+
+  const handleLoadedLines = useCallback(
+    (lines: [string, Said][]) => {
+      loadedLinesRef.current = lines;
+      onLoadedLinesChange?.(lines);
+      if (pendingTagAtMs !== null && lines.length > 0) {
+        const idx = findLineIndexForTime(lines, pendingTagAtMs);
+        if (idx !== null) {
+          setFocusLineKey(lines[idx][0]);
+          setPendingTagAtMs(null);
+        }
+      }
+    },
+    [onLoadedLinesChange, pendingTagAtMs],
+  );
+
+  const handleTagClick = (tag: ContentTag) => {
+    if (activeTag === tag.label) {
+      setActiveTag(null);
+      setPendingTagAtMs(null);
+      setFocusLineKey(null);
+      setScrollToIndex(null);
+      return;
+    }
+    setActiveTag(tag.label);
+    setTab('transcript');
+    setCompare(false);
+    const loaded = loadedLinesRef.current;
+    const idx = findLineIndexForTime(loaded, tag.at_ms);
+    if (idx !== null) {
+      const [lineKey, said] = loaded[idx];
+      const totalTakeLines = recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? loaded.length;
+      if (loaded.length < totalTakeLines && row.length_ms > 0 && Math.abs(said.t0 - tag.at_ms) > 30_000) {
+        // Estimate row index proportionally so VList loads the target chunk without scanning all chunks.
+        const est = Math.min(totalTakeLines - 1, Math.max(0, Math.floor((tag.at_ms / row.length_ms) * totalTakeLines)));
+        setScrollToIndex(est);
+        setPendingTagAtMs(tag.at_ms);
+      } else {
+        setFocusLineKey(lineKey);
+        setScrollToIndex(parseLineIndex(lineKey) ?? idx);
+        setPendingTagAtMs(null);
+      }
+    } else if (row.length_ms > 0) {
+      const totalTakeLines = recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? 0;
+      if (totalTakeLines > 0) {
+        const est = Math.min(totalTakeLines - 1, Math.max(0, Math.floor((tag.at_ms / row.length_ms) * totalTakeLines)));
+        setScrollToIndex(est);
+        setPendingTagAtMs(tag.at_ms);
+      }
+    }
+  };
+
   const jumpToNote = (note: Note) => {
     setTab('transcript');
     setCompare(false);
+    setActiveTag(null);
+    setPendingTagAtMs(null);
     setFocusLineKey(note.anchor);
     setScrollToIndex(parseLineIndex(note.anchor));
   };
@@ -272,16 +369,78 @@ export function ReaderView({
         )}
       </div>
 
-      <input
-        className="title"
-        type="text"
-        aria-label={t('title')}
-        placeholder={row.preview || t('untitled')}
-        value={titleDraft}
-        onChange={(e) => setTitleDraft(e.target.value)}
-        onBlur={commitTitle}
-        onKeyDown={onTitleKeyDown}
-      />
+      <div className="title-row">
+        <input
+          className={row.title_by === 'Hand' ? 'title' : 'title auto'}
+          type="text"
+          aria-label={t('title')}
+          placeholder={row.preview || t('untitled')}
+          value={titleDraft}
+          onChange={(e) => setTitleDraft(e.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={onTitleKeyDown}
+        />
+        {isTitling && <Tag>{t('step.titling')}</Tag>}
+        {!isRecordingThis && (onPickTitle || onGenerateTitle) && (
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={t('titles.pick')}
+            aria-expanded={titleMenuOpen}
+            onClick={() => setTitleMenuOpen((v) => !v)}
+          >
+            <Icon name="refresh" />
+          </button>
+        )}
+        {titleMenuOpen && (
+          <div className="pop pop-right title-pop" role="menu">
+            <div className="menu" style={{ minWidth: 0, padding: 0 }}>
+              {recording.title_candidates.length > 0 ? (
+                recording.title_candidates.map((cand, idx) => (
+                  <button
+                    key={`${cand.by}:${cand.text}:${idx}`}
+                    type="button"
+                    role="menuitem"
+                    className="menu-i title-cand"
+                    onClick={() => {
+                      setTitleMenuOpen(false);
+                      onPickTitle?.(cand.text, cand.by);
+                    }}
+                  >
+                    <Tag>{t(`titles.source.${cand.by}`)}</Tag>
+                    <span className="read" style={{ flex: 1, fontSize: 15, lineHeight: 1.4 }}>
+                      {cand.text}
+                    </span>
+                    {cand.text === row.title && <Icon name="check" size="s" />}
+                  </button>
+                ))
+              ) : (
+                <div className="k" style={{ padding: '8px 10px' }}>
+                  {t('titles.empty_candidates')}
+                </div>
+              )}
+              {onGenerateTitle && (
+                <>
+                  <hr />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="menu-i"
+                    disabled={isTitling}
+                    onClick={() => {
+                      setTitleMenuOpen(false);
+                      onGenerateTitle();
+                    }}
+                  >
+                    <Icon name="sparkles" size="s" />
+                    {isTitling ? t('step.titling') : t('titles.regenerate')}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="meta">
         <span>{when(row.started)}</span>
@@ -291,6 +450,26 @@ export function ReaderView({
         {row.audio && <Tag title={t('audio.tip')}>{t('audio')}</Tag>}
         {row.filed && <Tag tone="out">{t('code.city.filed')}</Tag>}
       </div>
+
+      {row.tags.length > 0 && (
+        <div className="topics" aria-label={t('tags.label')}>
+          {row.tags.map((tag, idx) => {
+            const on = activeTag === tag.label;
+            return (
+              <button
+                key={`${tag.label}:${tag.at_ms}:${idx}`}
+                type="button"
+                className={`topic${on ? ' on' : ''}`}
+                aria-pressed={on}
+                onClick={() => handleTagClick(tag)}
+              >
+                <span>{tag.label}</span>
+                <span className="num">{clock(tag.at_ms)}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {!isRecordingThis && archiveSlot}
 
@@ -441,12 +620,15 @@ export function ReaderView({
             speakers={recording.speakers}
             notes={recording.notes}
             activeLangs={activeLangs}
+            topics={topics}
+            recordingTopics={recording.topics}
             highlightLineKey={focusLineKey}
             scrollToIndex={scrollToIndex}
             onEditLine={onEditLine}
             onEditSpeaker={onEditSpeaker}
             onAddNote={onAddNote}
-            onLoadedLinesChange={onLoadedLinesChange}
+            onRememberTerm={onRememberTerm}
+            onLoadedLinesChange={handleLoadedLines}
           />
         </>
       ) : (
@@ -563,6 +745,7 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
   const progress = useSource(progressSource);
   useSource(langSource);
   const recQuery = useQuery({ view: 'Recording', id });
+  const topicsQuery = useQuery({ view: 'Topics' });
   const loadedLinesRef = useRef<[string, Said][]>([]);
 
   const recording = recQuery.data;
@@ -618,13 +801,17 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
     <ReaderView
       recording={recording}
       progressRefine={progress.refine}
+      progressTitle={progress.title}
       exporters={state?.exporters ?? ['markdown', 'srt', 'vtt']}
       isRecordingThis={session?.id === id}
+      topics={Array.isArray(topicsQuery.data) ? topicsQuery.data : []}
       initialTab={tab}
       initialTake={take}
       initialCompare={compare}
       highlightLineKey={lineKey ?? null}
       onChangeTitle={(text) => void send({ do: 'Change', id, change: { what: 'Title', text } })}
+      onPickTitle={(title, by) => void send({ do: 'PickTitle', id, title, by })}
+      onGenerateTitle={() => void send({ do: 'GenerateTitle', id })}
       onEditLine={(key, language, text) =>
         void send({ do: 'Change', id, change: { what: 'Line', key, language, text } })
       }
@@ -639,6 +826,9 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
       }
       onRemoveNote={(key) =>
         void send({ do: 'Note', id, op: { op: 'Remove', key } })
+      }
+      onRememberTerm={(topic_id, said, written) =>
+        void send({ do: 'RememberTerm', topic_id, said, written })
       }
       onRefine={() => void send({ do: 'Refine', id })}
       onOpenSettings={() => go({ page: 'settings' })}

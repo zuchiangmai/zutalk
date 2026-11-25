@@ -5,10 +5,12 @@ import type { CompareRow } from '$proto/CompareRow';
 import type { Note } from '$proto/Note';
 import type { Query } from '$proto/Query';
 import type { Said } from '$proto/Said';
+import type { TopicSummary } from '$proto/TopicSummary';
 import type { TranscriptChunk } from '$proto/TranscriptChunk';
-import { clock, t, useQueries, word } from '../bus';
+import { clock, langName, t, useQueries, word } from '../bus';
 import { Icon } from '../ds/icons';
 import { Pill, Tag } from '../ds/primitives';
+import { ALWAYS_TOPIC_ID } from './KnowledgePage';
 
 /** Matches core/src/view/transcript.rs chunk size (64 lines per chunk). */
 export const TRANSCRIPT_CHUNK_LINES = 64;
@@ -67,11 +69,14 @@ export type TranscriptListProps = {
   speakers: Record<string, string>;
   notes: readonly Note[];
   activeLangs: readonly string[];
+  topics?: readonly TopicSummary[];
+  recordingTopics?: readonly string[];
   highlightLineKey?: string | null;
   scrollToIndex?: number | null;
   onEditLine?: (key: string, language: string, text: string) => void;
   onEditSpeaker?: (label: string, name: string) => void;
   onAddNote?: (at_ms: number, text: string, anchor: string | null) => void;
+  onRememberTerm?: (topicId: string, said: string, written: Record<string, string>) => void;
   onLoadedLinesChange?: (lines: [string, Said][]) => void;
 };
 
@@ -85,11 +90,14 @@ export function TranscriptList({
   speakers,
   notes,
   activeLangs,
+  topics = [],
+  recordingTopics = [],
   highlightLineKey = null,
   scrollToIndex = null,
   onEditLine,
   onEditSpeaker,
   onAddNote,
+  onRememberTerm,
   onLoadedLinesChange,
 }: TranscriptListProps) {
   const vlistRef = useRef<VListHandle | null>(null);
@@ -102,8 +110,45 @@ export function TranscriptList({
   const [editingSpeaker, setEditingSpeaker] = useState<SpeakerEditTarget | null>(null);
   const [addingNoteKey, setAddingNoteKey] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState('');
+  const [rememberingKey, setRememberingKey] = useState<string | null>(null);
+  const [rememberSaid, setRememberSaid] = useState('');
+  const [rememberTopicId, setRememberTopicId] = useState<string>(ALWAYS_TOPIC_ID);
+  const [rememberLang, setRememberLang] = useState('');
+  const [rememberWritten, setRememberWritten] = useState('');
   const skipLineBlurRef = useRef(false);
   const skipSpeakerBlurRef = useRef(false);
+
+  const defaultRememberTopic = recordingTopics[0] || ALWAYS_TOPIC_ID;
+  const topicOptions = useMemo(() => {
+    const hasAlways = topics.some((x) => x.id === ALWAYS_TOPIC_ID);
+    const list: { id: string; label: string }[] = [];
+    if (!hasAlways) {
+      list.push({ id: ALWAYS_TOPIC_ID, label: t('knowledge.always_name') });
+    }
+    for (const item of topics) {
+      list.push({
+        id: item.id,
+        label: item.name || (item.pinned ? t('knowledge.always_name') : item.id),
+      });
+    }
+    return list;
+  }, [topics]);
+
+  const openRemember = (lineKey: string, initialText: string) => {
+    setAddingNoteKey(null);
+    setRememberingKey(lineKey);
+    setRememberSaid(initialText);
+    setRememberTopicId(defaultRememberTopic);
+    setRememberLang('');
+    setRememberWritten('');
+  };
+
+  const closeRemember = () => {
+    setRememberingKey(null);
+    setRememberSaid('');
+    setRememberLang('');
+    setRememberWritten('');
+  };
 
   // Reset range and edit targets when switching recording, take, or compare mode.
   useEffect(() => {
@@ -113,6 +158,10 @@ export function TranscriptList({
     setEditingSpeaker(null);
     setAddingNoteKey(null);
     setNoteDraft('');
+    setRememberingKey(null);
+    setRememberSaid('');
+    setRememberLang('');
+    setRememberWritten('');
   }, [id, take, compare, compareTakeA]);
 
   const neededChunks = useMemo(() => {
@@ -385,6 +434,9 @@ export function TranscriptList({
           editingSpeaker.label === said.speaker &&
           editingSpeaker.label !== '';
         const visibleTranslations = activeLangs.filter((lang) => lang !== said.language && lang in said.translations);
+        const isHandEdited =
+          said.via.text === 'hand' ||
+          Object.entries(said.via).some(([k, v]) => k !== 'text' && v === 'hand');
 
         return (
           <li
@@ -492,7 +544,22 @@ export function TranscriptList({
                     {said.text}
                   </span>
                   {said.via.text === 'hand' && (
-                    <Tag className="tag-inline">{t('via.hand')}</Tag>
+                    <>
+                      <Tag className="tag-inline">{t('via.hand')}</Tag>
+                      {onRememberTerm && (
+                        <Pill
+                          quiet
+                          className="remember-chip"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRemember(lineKey, said.text);
+                          }}
+                        >
+                          <Icon name="plus" size="s" />
+                          {t('reader.remember_term')}
+                        </Pill>
+                      )}
+                    </>
                   )}
                   {said.via.text === 'unclear' && (
                     <Tag tone="warn" className="tag-inline">
@@ -567,7 +634,24 @@ export function TranscriptList({
                     <span className={trVia === 'unclear' ? 'unclear' : undefined}>
                       {trText}
                     </span>
-                    {trVia === 'hand' && <Tag>{t('via.hand')}</Tag>}
+                    {trVia === 'hand' && (
+                      <>
+                        <Tag className="tag-inline">{t('via.hand')}</Tag>
+                        {onRememberTerm && said.via.text !== 'hand' && (
+                          <Pill
+                            quiet
+                            className="remember-chip"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openRemember(lineKey, trText);
+                            }}
+                          >
+                            <Icon name="plus" size="s" />
+                            {t('reader.remember_term')}
+                          </Pill>
+                        )}
+                      </>
+                    )}
                     {trVia === 'unclear' && <Tag tone="warn">{t('via.unclear')}</Tag>}
                   </p>
                 );
@@ -587,14 +671,94 @@ export function TranscriptList({
                 ),
               )}
 
-              {onAddNote &&
+              {onRememberTerm && rememberingKey === lineKey && (
+                <form
+                  className="remember-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trimmed = rememberSaid.trim();
+                    if (!trimmed) return;
+                    const written: Record<string, string> = {};
+                    if (rememberLang && rememberWritten.trim()) {
+                      written[rememberLang] = rememberWritten.trim();
+                    }
+                    onRememberTerm(rememberTopicId, trimmed, written);
+                    closeRemember();
+                  }}
+                >
+                  <input
+                    className="field"
+                    type="text"
+                    aria-label={t('term')}
+                    placeholder={t('knowledge.term_said_placeholder')}
+                    value={rememberSaid}
+                    autoFocus
+                    style={{ width: 170 }}
+                    onChange={(e) => setRememberSaid(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (isImeComposing(e)) return;
+                      if (e.key === 'Escape') closeRemember();
+                    }}
+                  />
+                  <select
+                    className="field"
+                    aria-label={t('reader.remember_target')}
+                    value={rememberTopicId}
+                    onChange={(e) => setRememberTopicId(e.target.value)}
+                  >
+                    {topicOptions.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  {activeLangs.length > 0 && (
+                    <>
+                      <select
+                        className="field"
+                        aria-label={t('knowledge.term_lang_placeholder')}
+                        value={rememberLang}
+                        onChange={(e) => setRememberLang(e.target.value)}
+                      >
+                        <option value="">{t('knowledge.term_lang_placeholder')}</option>
+                        {activeLangs.map((code) => (
+                          <option key={code} value={code}>
+                            {langName(code, code)}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        className="field"
+                        type="text"
+                        aria-label={t('knowledge.term_written_placeholder')}
+                        placeholder={t('knowledge.term_written_placeholder')}
+                        value={rememberWritten}
+                        style={{ width: 140 }}
+                        onChange={(e) => setRememberWritten(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (isImeComposing(e)) return;
+                          if (e.key === 'Escape') closeRemember();
+                        }}
+                      />
+                    </>
+                  )}
+                  <Pill type="submit" active disabled={!rememberSaid.trim()}>
+                    {t('reader.remember_submit')}
+                  </Pill>
+                  <Pill quiet onClick={closeRemember}>
+                    {t('reader.cancel')}
+                  </Pill>
+                </form>
+              )}
+
+              {(onAddNote || onRememberTerm) &&
                 (addingNoteKey === lineKey ? (
                   <form
                     className="composer"
                     style={{ marginTop: 8 }}
                     onSubmit={(e) => {
                       e.preventDefault();
-                      onAddNote(said.t0, noteDraft.trim(), lineKey);
+                      onAddNote?.(said.t0, noteDraft.trim(), lineKey);
                       setNoteDraft('');
                       setAddingNoteKey(null);
                     }}
@@ -607,6 +771,7 @@ export function TranscriptList({
                       autoFocus
                       onChange={(e) => setNoteDraft(e.target.value)}
                       onKeyDown={(e) => {
+                        if (isImeComposing(e)) return;
                         if (e.key === 'Escape') {
                           setAddingNoteKey(null);
                           setNoteDraft('');
@@ -626,16 +791,25 @@ export function TranscriptList({
                   </form>
                 ) : (
                   <div className="row-actions">
-                    <Pill
-                      quiet
-                      onClick={() => {
-                        setAddingNoteKey(lineKey);
-                        setNoteDraft('');
-                      }}
-                    >
-                      <Icon name="plus" size="s" />
-                      {t('reader.add_note')}
-                    </Pill>
+                    {onAddNote && (
+                      <Pill
+                        quiet
+                        onClick={() => {
+                          closeRemember();
+                          setAddingNoteKey(lineKey);
+                          setNoteDraft('');
+                        }}
+                      >
+                        <Icon name="plus" size="s" />
+                        {t('reader.add_note')}
+                      </Pill>
+                    )}
+                    {onRememberTerm && !isHandEdited && rememberingKey !== lineKey && (
+                      <Pill quiet onClick={() => openRemember(lineKey, said.text)}>
+                        <Icon name="plus" size="s" />
+                        {t('reader.remember_term')}
+                      </Pill>
+                    )}
                   </div>
                 ))}
             </div>

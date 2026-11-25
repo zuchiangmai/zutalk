@@ -379,10 +379,32 @@ describe('SettingsPage', () => {
         sent.push(cmd);
       },
       async query(q): Promise<QueryReply> {
-        if (q.view === 'Glossary') {
+        if (q.view === 'Topics') {
           return {
             version: 1,
-            value: { view: 'Glossary', data: [{ said: 'Zuzalu', written: { th: 'ซูซาลู' } }] },
+            value: {
+              view: 'Topics',
+              data: [
+                {
+                  id: 'always',
+                  name: '',
+                  domain: '',
+                  pinned: true,
+                  terms_count: 2,
+                  size_chars: 40,
+                  updated_at: 1_760_000_000_000,
+                },
+                {
+                  id: 'b00c10b0',
+                  name: 'Book club',
+                  domain: 'Literature',
+                  pinned: false,
+                  terms_count: 3,
+                  size_chars: 180,
+                  updated_at: 1_760_001_000_000,
+                },
+              ],
+            },
           };
         }
         return { version: 1, value: { view: 'Outbound', data: [] } };
@@ -439,8 +461,10 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hidden' }));
     expect(overlaySource.getSnapshot()).toBe(true);
 
-    // Glossary term loaded & removable
-    await waitFor(() => expect(screen.getByText('Zuzalu')).toBeTruthy());
+    // Knowledge base entry card shows topic count and navigates to Knowledge page
+    await waitFor(() => expect(screen.getByText('2 topics')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Open knowledge base' }));
+    expect(routeSource.getSnapshot()).toEqual({ page: 'knowledge' });
   });
 
   it('settings_shows_handle_daily_quota_bars_and_refresh', () => {

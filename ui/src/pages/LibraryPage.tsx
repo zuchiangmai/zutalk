@@ -221,6 +221,16 @@ export function LibraryView({
               </Pill>
             );
           })}
+          {filter.tag && (
+            <Pill
+              active
+              aria-label={t('library.filter.tag_clear', filter.tag)}
+              onClick={() => onFilterChange({ ...filter, tag: null })}
+            >
+              {filter.tag}
+              <Icon name="x" size="s" />
+            </Pill>
+          )}
         </div>
       </div>
 
@@ -333,14 +343,38 @@ export function LibraryView({
                 {(row, index) => (
                   <div key={row.id} data-lib-row-index={index} className="lrow">
                     <span className="num">{formatRowTime(row.started, tzOffsetMin)}</span>
-                    <button
-                      type="button"
-                      className="lrow-main"
-                      onClick={() => onOpenRecording(row.id)}
-                    >
-                      <span className="lrow-t">{row.title || row.preview || t('untitled')}</span>
-                      {row.title && row.preview && <span className="lrow-s">{row.preview}</span>}
-                    </button>
+                    <div className="lrow-main">
+                      <button
+                        type="button"
+                        className="lrow-title-btn"
+                        onClick={() => onOpenRecording(row.id)}
+                      >
+                        <span className="lrow-t">{row.title || row.preview || t('untitled')}</span>
+                      </button>
+                      {row.tags.length > 0 ? (
+                        <div className="lrow-s lrow-tags">
+                          {row.tags.map((tag, tagIdx) => (
+                            <span key={`${tag.label}:${tag.at_ms}:${tagIdx}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                              {tagIdx > 0 && <span aria-hidden="true">·</span>}
+                              <button
+                                type="button"
+                                className="lrow-tag-btn"
+                                onClick={() =>
+                                  onFilterChange({
+                                    ...filter,
+                                    tag: filter.tag === tag.label ? null : tag.label,
+                                  })
+                                }
+                              >
+                                {tag.label}
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        row.title && row.preview && <span className="lrow-s">{row.preview}</span>
+                      )}
+                    </div>
                     <span className="set-v">
                       <span className="k">
                         {row.spoken.map((l) => langName(l, l)).join(' · ')}

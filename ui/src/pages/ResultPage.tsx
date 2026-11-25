@@ -47,6 +47,7 @@ function exportExtension(exporter: string): string {
 export type ResultViewProps = {
   recording: RecordingView;
   progressRefine: Writing | null;
+  progressTitle?: Writing | null;
   exporters: readonly string[];
   onChangeTitle: (text: string) => void;
   onRefine: () => void;
@@ -65,6 +66,7 @@ export type ResultViewProps = {
 export function ResultView({
   recording,
   progressRefine,
+  progressTitle = null,
   exporters,
   onChangeTitle,
   onRefine,
@@ -118,18 +120,23 @@ export function ResultView({
     }
   };
 
+  const isTitling = progressTitle?.id === row.id;
+
   return (
     <article className="doc">
-      <input
-        className="title"
-        type="text"
-        aria-label={t('title')}
-        placeholder={row.preview || t('untitled')}
-        value={titleDraft}
-        onChange={(e) => setTitleDraft(e.target.value)}
-        onBlur={commitTitle}
-        onKeyDown={onTitleKeyDown}
-      />
+      <div className="title-row">
+        <input
+          className={row.title_by === 'Hand' ? 'title' : 'title auto'}
+          type="text"
+          aria-label={t('title')}
+          placeholder={row.preview || t('untitled')}
+          value={titleDraft}
+          onChange={(e) => setTitleDraft(e.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={onTitleKeyDown}
+        />
+        {isTitling && <Tag>{t('step.titling')}</Tag>}
+      </div>
 
       <div className="meta">
         <span>{when(row.started)}</span>
@@ -138,6 +145,17 @@ export function ResultView({
         {row.draft && <Tag title={t('draft.tip')}>{t('draft')}</Tag>}
         {row.audio && <Tag title={t('audio.tip')}>{t('audio')}</Tag>}
       </div>
+
+      {row.tags.length > 0 && (
+        <div className="topics" aria-label={t('tags.label')}>
+          {row.tags.map((tag, idx) => (
+            <span key={`${tag.label}:${tag.at_ms}:${idx}`} className="topic" style={{ cursor: 'default' }}>
+              <span>{tag.label}</span>
+              <span className="num">{clock(tag.at_ms)}</span>
+            </span>
+          ))}
+        </div>
+      )}
 
       <Card className="result-card">
         <div className="result-head">
@@ -336,6 +354,7 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
     <ResultView
       recording={recording}
       progressRefine={progress.refine}
+      progressTitle={progress.title}
       exporters={state?.exporters ?? ['markdown', 'srt', 'vtt']}
       onChangeTitle={(text) => void send({ do: 'Change', id, change: { what: 'Title', text } })}
       onRefine={() => void send({ do: 'Refine', id })}

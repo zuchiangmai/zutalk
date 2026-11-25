@@ -9,6 +9,7 @@ export type Route =
   | { page: 'reader'; id: string; tab?: 'transcript' | 'notes'; take?: number; compare?: boolean; lineKey?: string }
   | { page: 'library'; month?: string | null }
   | { page: 'settings' }
+  | { page: 'knowledge'; topicId?: string }
   | { page: 'captions' }
   | { page: 'outbound' };
 

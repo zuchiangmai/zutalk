@@ -38,7 +38,11 @@ export type IconName =
   | 'sun'
   | 'moon'
   | 'check'
-  | 'copy';
+  | 'copy'
+  | 'book'
+  | 'file-text'
+  | 'arrow-right'
+  | 'sparkles';
 
 const PATHS: Record<IconName, ReactNode> = {
   lock: (
@@ -155,6 +159,17 @@ const PATHS: Record<IconName, ReactNode> = {
       <rect x="9" y="9" width="11" height="11" rx="2" />
       <path d="M5 15V6a2 2 0 0 1 2-2h9" />
     </>
+  ),
+  book: (
+    <>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </>
+  ),
+  'file-text': <path d="M7 3h7l5 5v13H7zM14 3v5h5" />,
+  'arrow-right': <path d="M5 12h14M13 6l6 6-6 6" />,
+  sparkles: (
+    <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3zM5 17l.8 2.2L8 20l-2.2.8L5 23l-.8-2.2L2 20l2.2-.8L5 17z" />
   ),
 };
 

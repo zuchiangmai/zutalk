@@ -3,7 +3,6 @@ import type { Quota } from '$proto/Quota';
 import type { ServiceQuota } from '$proto/ServiceQuota';
 import type { Setup } from '$proto/Setup';
 import type { State } from '$proto/State';
-import type { Term } from '$proto/Term';
 import {
   LANGS,
   type ThemePref,
@@ -63,7 +62,7 @@ function decodeKeep(val: string): number | null {
 
 export type SettingsViewProps = {
   state: State;
-  terms: readonly Term[];
+  topicsCount: number;
   theme: ThemePref;
   overlayOpen: boolean;
   recording: boolean;
@@ -76,8 +75,7 @@ export type SettingsViewProps = {
   onOwnKey: (service: string, key: string | null) => void;
   onSetup: (setup: Setup) => void;
   onThemeChange: (pref: ThemePref) => void;
-  onAddTerm: (said: string, written: Record<string, string>) => void;
-  onRemoveTerm: (said: string) => void;
+  onOpenKnowledge: () => void;
   onDiagnose: () => void;
   onToggleOverlay: () => void;
   onUpdate: () => void;
@@ -88,7 +86,7 @@ export type SettingsViewProps = {
 /** Pure presentational Settings page (Settings.dc.html + P4 identity, daily quota, and local adoption). */
 export function SettingsView({
   state,
-  terms,
+  topicsCount,
   theme,
   overlayOpen,
   recording,
@@ -101,8 +99,7 @@ export function SettingsView({
   onOwnKey,
   onSetup,
   onThemeChange,
-  onAddTerm,
-  onRemoveTerm,
+  onOpenKnowledge,
   onDiagnose,
   onToggleOverlay,
   onUpdate,
@@ -110,7 +107,6 @@ export function SettingsView({
   onOpenCaptions,
 }: SettingsViewProps) {
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
-  const [termSaid, setTermSaid] = useState('');
 
   const keepOptions: SegOption<string>[] = KEEP_OPTIONS.map((k) => ({
     value: encodeKeep(k),
@@ -369,47 +365,24 @@ export function SettingsView({
         </div>
       </section>
 
-      {/* Glossary */}
+      {/* Knowledge base entry card */}
       <section className="group">
-        <h2 className="h">{t('s.terms')}</h2>
-        <p className="k" style={{ marginTop: 0 }}>
-          {t('terms.tip')}
-        </p>
-        <form
-          className="line"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const trimmed = termSaid.trim();
-            if (!trimmed) return;
-            onAddTerm(trimmed, {});
-            setTermSaid('');
-          }}
-        >
-          <input
-            className="field"
-            type="text"
-            aria-label={t('term')}
-            placeholder={t('term')}
-            value={termSaid}
-            onChange={(e) => setTermSaid(e.target.value)}
-          />
-          <Pill type="submit" disabled={!termSaid.trim()}>
-            {t('add')}
-          </Pill>
-        </form>
-        {terms.map((term) => (
-          <div key={term.said} className="line">
-            <span className="grow">{term.said}</span>
-            {Object.entries(term.written).map(([lang, text]) => (
-              <Tag key={lang}>
-                {lang}: {text}
-              </Tag>
-            ))}
-            <Pill quiet onClick={() => onRemoveTerm(term.said)}>
-              {t('remove')}
+        <h2 className="h">{t('knowledge.title')}</h2>
+        <div className="card">
+          <div className="line" style={{ minHeight: 0 }}>
+            <span className="grow" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{t('knowledge.title')}</span>
+                <Tag>{t('knowledge.topics_count', topicsCount)}</Tag>
+              </span>
+              <span className="k">{t('knowledge.send_notice')}</span>
+            </span>
+            <Pill onClick={onOpenKnowledge}>
+              {t('knowledge.open')}
+              <Icon name="chevron-right" size="s" />
             </Pill>
           </div>
-        ))}
+        </div>
       </section>
 
       {/* Caption window scenes */}
@@ -476,7 +449,8 @@ export function SettingsPage() {
   const theme = useSource(themeSource);
   const overlayOpen = useSource(overlaySource);
   useSource(langSource);
-  const glossaryQuery = useQuery({ view: 'Glossary' });
+  const topicsQuery = useQuery({ view: 'Topics' });
+  const topicsCount = Array.isArray(topicsQuery.data) ? topicsQuery.data.length : 0;
 
   if (!state) {
     return (
@@ -489,7 +463,7 @@ export function SettingsPage() {
   return (
     <SettingsView
       state={state}
-      terms={glossaryQuery.data ?? []}
+      topicsCount={topicsCount}
       theme={theme}
       overlayOpen={overlayOpen}
       recording={session !== null}
@@ -502,8 +476,7 @@ export function SettingsPage() {
       onOwnKey={(service, key) => void send({ do: 'OwnKey', service, key })}
       onSetup={(setup) => void send({ do: 'Setup', setup })}
       onThemeChange={setTheme}
-      onAddTerm={(said, written) => void send({ do: 'Term', said, written })}
-      onRemoveTerm={(said) => void send({ do: 'Term', said, written: null })}
+      onOpenKnowledge={() => go({ page: 'knowledge' })}
       onDiagnose={() => void diagnose()}
       onToggleOverlay={() => setOverlay(!overlayOpen)}
       onUpdate={() => void send({ do: 'Update' })}

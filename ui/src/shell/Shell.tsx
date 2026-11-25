@@ -25,6 +25,7 @@ import { CaptionScenesPage } from '../pages/CaptionScenesPanel';
 import { HomePage } from '../pages/HomePage';
 import { HostPage } from '../pages/HostPage';
 import { IdentitySheet } from '../pages/IdentitySheet';
+import { KnowledgePage } from '../pages/KnowledgePage';
 import { LibraryPage } from '../pages/LibraryPage';
 import { LivePage } from '../pages/LivePage';
 import { OutboundPage } from '../pages/OutboundPage';
@@ -116,7 +117,8 @@ export function Shell() {
         {route.page !== 'live' &&
           route.page !== 'host' &&
           route.page !== 'outbound' &&
-          route.page !== 'captions' && (
+          route.page !== 'captions' &&
+          route.page !== 'knowledge' && (
           <TopBar
             host={state?.host ?? { is: 'Idle' }}
             session={session}
@@ -160,6 +162,8 @@ export function Shell() {
           <OutboundPage />
         ) : route.page === 'captions' ? (
           <CaptionScenesPage />
+        ) : route.page === 'knowledge' ? (
+          <KnowledgePage initialTopicId={route.topicId} />
         ) : (
           <SettingsPage />
         )}
