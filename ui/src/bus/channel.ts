@@ -224,6 +224,13 @@ export function take(event: Event): void {
 /** Attaches a Bus, connects QueryCache, and starts the rAF signal + vitals loop. */
 export function startBus(bus: Bus): () => void {
   activeBus = bus;
+  // Reset per-signal sequence watermarks and buffered frames so a fresh bus starts cleanly from seq 1.
+  if (flushRaf && typeof globalThis.cancelAnimationFrame === 'function') {
+    globalThis.cancelAnimationFrame(flushRaf);
+  }
+  flushRaf = 0;
+  for (const k of Object.keys(seenSeq) as Signal['of'][]) delete seenSeq[k];
+  for (const k of Object.keys(pendingSignals) as Signal['of'][]) delete pendingSignals[k];
   queryCache.clear();
   queryCache.setExecutor(bus.query ? (q) => bus.query!(q) : null);
 

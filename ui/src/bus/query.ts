@@ -17,6 +17,12 @@ import { createCell, type Cell, type Source, useSource } from './source';
 /** Upper bound on cached query entries to keep UI memory independent of history (P3.md §3.3). */
 export const QUERY_CACHE_MAX_ENTRIES = 128;
 
+/** Maximum automatic re-enqueue attempts when an active query unexpectedly receives query.cancelled. */
+export const QUERY_CANCEL_RETRY_LIMIT = 1;
+
+/** Core cancellation slots matching core/src/view/query.rs::QuerySlot. */
+export type QuerySlot = 'Library' | 'Search' | 'Recording' | 'Transcript' | 'Compare' | 'Other';
+
 export type QueryStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export type QueryState<T> = {
@@ -82,6 +88,28 @@ export function queryViewKind(q: Query): ViewKind {
   }
 }
 
+/** Maps a Query to the core cancellation slot matching core/src/view/query.rs::Query::slot(). */
+export function querySlot(q: Query): QuerySlot {
+  switch (q.view) {
+    case 'LibrarySummary':
+    case 'LibraryMonth':
+    case 'LibraryRecent':
+      return 'Library';
+    case 'Search':
+      return 'Search';
+    case 'Recording':
+      return 'Recording';
+    case 'Transcript':
+      return 'Transcript';
+    case 'Compare':
+      return 'Compare';
+    case 'Glossary':
+    case 'Calendar':
+    case 'Outbound':
+      return 'Other';
+  }
+}
+
 /** Extracts the recording id scope of a recording-bound Query, or null for whole-view queries. */
 export function queryRecordingId(q: Query): string | null {
   switch (q.view) {
@@ -104,6 +132,7 @@ type CacheEntry = {
   key: string;
   query: Query;
   viewKind: ViewKind;
+  slot: QuerySlot;
   recId: string | null;
   cell: Cell<QueryState<unknown>>;
   version: number;
@@ -112,12 +141,15 @@ type CacheEntry = {
   lastUsed: number;
   reqSeq: number;
   acceptedReqSeq: number;
+  cancelRetries: number;
   epoch: number;
 };
 
-/** Versioned, bounded view cache that only refetches views with active subscribers. */
+/** Versioned, bounded view cache that serializes non-Search slots to match core QuerySlot cancellation. */
 export class QueryCache {
   private readonly entries = new Map<string, CacheEntry>();
+  private readonly slotInFlight = new Map<QuerySlot, string>();
+  private readonly slotQueues = new Map<QuerySlot, string[]>();
   private readonly maxEntries: number;
   private executor: QueryExecutor | null = null;
   private clock = 0;
@@ -137,11 +169,15 @@ export class QueryCache {
 
   setExecutor(executor: QueryExecutor | null): void {
     this.executor = executor;
-    if (executor) {
-      for (const entry of this.entries.values()) {
-        if (entry.subscribers > 0 && (entry.cell.getSnapshot().status === 'idle' || entry.stale)) {
-          void this.fetchEntry(entry);
-        }
+    if (!executor) {
+      this.slotInFlight.clear();
+      this.slotQueues.clear();
+      return;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.subscribers > 0 && (entry.cell.getSnapshot().status === 'idle' || entry.stale)) {
+        entry.cancelRetries = 0;
+        this.enqueueFetch(entry);
       }
     }
   }
@@ -149,6 +185,8 @@ export class QueryCache {
   clear(): void {
     this.epoch++;
     this.entries.clear();
+    this.slotInFlight.clear();
+    this.slotQueues.clear();
   }
 
   /** Returns a Source for `query`; fetches on first active subscribe or when invalidated. */
@@ -161,6 +199,7 @@ export class QueryCache {
         key,
         query,
         viewKind: queryViewKind(query),
+        slot: querySlot(query),
         recId: queryRecordingId(query),
         cell: createCell<QueryState<unknown>>({ status: 'idle', data: null, version: -1, error: null }),
         version: -1,
@@ -169,6 +208,7 @@ export class QueryCache {
         lastUsed: ++this.clock,
         reqSeq: 0,
         acceptedReqSeq: 0,
+        cancelRetries: 0,
         epoch: this.epoch,
       };
       this.entries.set(key, entry);
@@ -192,7 +232,8 @@ export class QueryCache {
         const unsub = bound.cell.subscribe(listener);
         const snap = bound.cell.getSnapshot();
         if (snap.status === 'idle' || bound.stale) {
-          void this.fetchEntry(bound);
+          bound.cancelRetries = 0;
+          this.enqueueFetch(bound);
         }
         return () => {
           unsub();
@@ -212,7 +253,8 @@ export class QueryCache {
       if (!matchesView || !matchesKey) continue;
       if (entry.version >= inv.version) continue;
       if (entry.subscribers > 0) {
-        void this.fetchEntry(entry);
+        entry.cancelRetries = 0;
+        this.enqueueFetch(entry);
       } else {
         entry.stale = true;
       }
@@ -222,7 +264,10 @@ export class QueryCache {
   /** Forces an immediate refresh of a cached query if currently present. */
   refresh(query: Query): void {
     const entry = this.entries.get(queryKey(query));
-    if (entry) void this.fetchEntry(entry);
+    if (entry) {
+      entry.cancelRetries = 0;
+      this.enqueueFetch(entry);
+    }
   }
 
   private evictIfNeeded(): void {
@@ -237,11 +282,64 @@ export class QueryCache {
     }
   }
 
-  private async fetchEntry(entry: CacheEntry): Promise<void> {
+  private queueKey(slot: QuerySlot, key: string): void {
+    let queue = this.slotQueues.get(slot);
+    if (!queue) {
+      queue = [];
+      this.slotQueues.set(slot, queue);
+    }
+    // Deduplicate per-key within the slot queue; bounded by QUERY_CACHE_MAX_ENTRIES.
+    if (!queue.includes(key)) {
+      queue.push(key);
+    }
+  }
+
+  private enqueueFetch(entry: CacheEntry): void {
     if (!this.executor) return;
+    const prev = entry.cell.getSnapshot();
+    if (prev.data === null && prev.status !== 'loading') {
+      entry.cell.set({ ...prev, status: 'loading', error: null });
+    }
+    // Search stays preemptive so newer search keystrokes cancel stale SQLite scans in core.
+    if (entry.slot === 'Search') {
+      void this.runFetch(entry);
+      return;
+    }
+    if (!this.slotInFlight.has(entry.slot)) {
+      this.slotInFlight.set(entry.slot, entry.key);
+      void this.runFetch(entry);
+    } else {
+      this.queueKey(entry.slot, entry.key);
+    }
+  }
+
+  private drainSlot(slot: QuerySlot): void {
+    if (!this.executor || this.slotInFlight.has(slot)) return;
+    const queue = this.slotQueues.get(slot);
+    if (!queue) return;
+    while (queue.length > 0) {
+      const nextKey = queue.shift()!;
+      const next = this.entries.get(nextKey);
+      if (!next) continue;
+      if (next.subscribers <= 0) {
+        // Skipped because all subscribers detached while queued; mark stale for next subscribe.
+        next.stale = true;
+        continue;
+      }
+      this.slotInFlight.set(slot, next.key);
+      void this.runFetch(next);
+      return;
+    }
+    this.slotQueues.delete(slot);
+  }
+
+  private async runFetch(entry: CacheEntry): Promise<void> {
+    if (!this.executor) return;
+    const slot = entry.slot;
     const reqEpoch = entry.epoch;
     const reqId = ++entry.reqSeq;
     entry.stale = false;
+    let shouldRetryCancel = false;
     const prev = entry.cell.getSnapshot();
     if (prev.data === null && prev.status !== 'loading') {
       entry.cell.set({ ...prev, status: 'loading', error: null });
@@ -252,6 +350,7 @@ export class QueryCache {
       if (reply.version < entry.version || reqId < entry.acceptedReqSeq) return;
       entry.version = reply.version;
       entry.acceptedReqSeq = reqId;
+      entry.cancelRetries = 0;
       entry.lastUsed = ++this.clock;
       entry.cell.set({
         status: 'ready',
@@ -262,11 +361,35 @@ export class QueryCache {
     } catch (err) {
       if (this.epoch !== reqEpoch || this.entries.get(entry.key) !== entry) return;
       const code = errorCode(err);
-      // Superseded or boot-time transient cancellations stay silent so visible data is not flashed.
-      if (code === 'query.cancelled' || code === 'starting') return;
+      if (code === 'starting') return;
+      if (code === 'query.cancelled') {
+        if (entry.subscribers > 0 && reqId === entry.reqSeq) {
+          entry.stale = true;
+          // Search cancellations are intentional preemption by a newer query; only non-Search slots retry once.
+          if (slot !== 'Search' && entry.cancelRetries < QUERY_CANCEL_RETRY_LIMIT) {
+            entry.cancelRetries++;
+            shouldRetryCancel = true;
+          } else {
+            // Do not strand an empty entry in permanent loading.
+            const cur = entry.cell.getSnapshot();
+            if (cur.data === null && cur.status === 'loading') {
+              entry.cell.set({ ...cur, status: 'idle', error: null });
+            }
+          }
+        }
+        return;
+      }
       if (reqId < entry.acceptedReqSeq) return;
       const cur = entry.cell.getSnapshot();
       entry.cell.set({ ...cur, status: 'error', error: code });
+    } finally {
+      if (slot !== 'Search' && this.epoch === reqEpoch && this.slotInFlight.get(slot) === entry.key) {
+        this.slotInFlight.delete(slot);
+        if (shouldRetryCancel && this.entries.get(entry.key) === entry && entry.subscribers > 0) {
+          this.queueKey(slot, entry.key);
+        }
+        this.drainSlot(slot);
+      }
     }
   }
 }

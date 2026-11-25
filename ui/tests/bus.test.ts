@@ -264,6 +264,38 @@ describe('bus channel and state semantics', () => {
       (globalThis as unknown as { document: Document }).document = origDoc;
     }
   });
+  it('resets seenSeq when startBus attaches a new bus instance', () => {
+    let emit1: (e: Parameters<typeof take>[0]) => void = () => {};
+    let emit2: (e: Parameters<typeof take>[0]) => void = () => {};
+
+    const stop1 = startBus({
+      send: () => Promise.resolve(),
+      listen(on) {
+        emit1 = on;
+        return () => {};
+      },
+    });
+    emit1({
+      kind: 'Signal',
+      is: { seq: 5, signal: { of: 'Frame', is: { t_audio: 5000, columns: [] } } },
+    });
+    expect(frameSource.getSnapshot()?.t_audio).toBe(5000);
+    stop1();
+
+    const stop2 = startBus({
+      send: () => Promise.resolve(),
+      listen(on) {
+        emit2 = on;
+        return () => {};
+      },
+    });
+    emit2({
+      kind: 'Signal',
+      is: { seq: 1, signal: { of: 'Frame', is: { t_audio: 1000, columns: [] } } },
+    });
+    expect(frameSource.getSnapshot()?.t_audio).toBe(1000);
+    stop2();
+  });
 });
 
 describe('QueryCache', () => {
@@ -317,17 +349,20 @@ describe('QueryCache', () => {
     take({ kind: 'Invalidate', is: { view: 'Glossary', key: null, version: 2 } });
     expect(asked.map((q) => q.view)).toEqual(['LibraryRecent']);
 
-    // Invalidate Library twice -> triggers two fetches (resolvers 1 and 2).
+    // Invalidate Library twice -> Library slot serializes the second refetch until the first completes.
     take({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 5 } });
     take({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 6 } });
-    expect(asked.map((q) => q.view)).toEqual(['LibraryRecent', 'LibraryRecent', 'LibraryRecent']);
+    expect(asked.map((q) => q.view)).toEqual(['LibraryRecent', 'LibraryRecent']);
 
-    // Newer version (6) resolves first; stale version (5) resolves later and is dropped.
-    resolvers[2]({ version: 6, value: { view: 'LibraryPage', data: { total: 1, rows: [rowNew], has_more: false } } });
+    // Newer version (6) resolves first, draining the queued follow-up fetch (resolvers[2]).
+    resolvers[1]({ version: 6, value: { view: 'LibraryPage', data: { total: 1, rows: [rowNew], has_more: false } } });
+    await Promise.resolve();
     await Promise.resolve();
     expect(recentSource.getSnapshot().data?.rows).toEqual([rowNew]);
+    expect(asked.map((q) => q.view)).toEqual(['LibraryRecent', 'LibraryRecent', 'LibraryRecent']);
 
-    resolvers[1]({ version: 5, value: { view: 'LibraryPage', data: { total: 1, rows: [rowOld], has_more: false } } });
+    // Stale version (5) resolves later and is dropped.
+    resolvers[2]({ version: 5, value: { view: 'LibraryPage', data: { total: 1, rows: [rowOld], has_more: false } } });
     await Promise.resolve();
     expect(recentSource.getSnapshot().data?.rows).toEqual([rowNew]);
 
@@ -342,12 +377,12 @@ describe('QueryCache', () => {
 
     const src = cache.sourceFor({ view: 'Glossary' });
     const unsub = src.subscribe(() => {});
-    await Promise.resolve();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
     expect(src.getSnapshot().error).toBeNull();
 
     mode = 'fail';
     cache.invalidate({ view: 'Glossary', key: null, version: 2 });
-    await Promise.resolve();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
     expect(src.getSnapshot().status).toBe('error');
     expect(src.getSnapshot().error).toBe('index');
 
@@ -371,6 +406,154 @@ describe('QueryCache', () => {
 
     unsubA();
     unsubB();
+  });
+
+  it('serializes same-slot Library and Transcript queries against Rust claim_slot cancellation while keeping Search preemptive', async () => {
+    const slotOf = (q: Query): string => {
+      switch (q.view) {
+        case 'LibrarySummary':
+        case 'LibraryMonth':
+        case 'LibraryRecent':
+          return 'Library';
+        case 'Search':
+          return 'Search';
+        case 'Recording':
+          return 'Recording';
+        case 'Transcript':
+          return 'Transcript';
+        case 'Compare':
+          return 'Compare';
+        default:
+          return 'Other';
+      }
+    };
+
+    // Strict replica of core/src/view/query.rs::claim_slot: a newer in-flight query in the same slot cancels the older one.
+    const inFlight = new Map<string, { reject: (reason: string) => void }>();
+    const cancelledSlots: string[] = [];
+    let version = 1;
+
+    const cache = new QueryCache(QUERY_CACHE_MAX_ENTRIES);
+    cache.setExecutor((q) => {
+      const slot = slotOf(q);
+      const prev = inFlight.get(slot);
+      if (prev) {
+        cancelledSlots.push(slot);
+        prev.reject('query.cancelled');
+      }
+      return new Promise<QueryReply>((resolve, reject) => {
+        const token = { reject };
+        inFlight.set(slot, token);
+        queueMicrotask(() => {
+          if (inFlight.get(slot) !== token) return;
+          inFlight.delete(slot);
+          if (q.view === 'LibrarySummary') {
+            resolve({ version, value: { view: 'LibrarySummary', data: { total: 1, months: [{ month: '2026-11', count: 1 }] } } });
+          } else if (q.view === 'LibraryRecent' || q.view === 'LibraryMonth') {
+            resolve({ version, value: { view: 'LibraryPage', data: { total: 0, rows: [], has_more: false } } });
+          } else if (q.view === 'Transcript') {
+            resolve({
+              version,
+              value: {
+                view: 'Transcript',
+                data: { id: q.id, take: q.take ?? 1, chunk: q.chunk, total_lines: 192, total_chunks: 3, lines: [] },
+              },
+            });
+          } else if (q.view === 'Search') {
+            resolve({
+              version,
+              value: {
+                view: 'Search',
+                data: {
+                  hits: [{ recording_id: 'r1', kind: 'Title', key: 'title', lang: 'en', snippet: q.query }],
+                  truncated: false,
+                },
+              },
+            });
+          } else {
+            resolve({ version, value: { view: 'Glossary', data: [] } });
+          }
+        });
+      });
+    });
+
+    const flush = async () => {
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+    };
+
+    // 1. Subscribe synchronously to 3 Library-slot queries (Shell + LibraryPage pattern).
+    const sRecent = cache.sourceFor({ view: 'LibraryRecent', filter: EMPTY_FILTER, limit: 12, offset: 0 });
+    const sSummary = cache.sourceFor({ view: 'LibrarySummary', tz_offset_min: 0 });
+    const sMonth = cache.sourceFor({
+      view: 'LibraryMonth',
+      month: '2026-11',
+      tz_offset_min: 0,
+      filter: EMPTY_FILTER,
+      limit: 50,
+      offset: 0,
+    });
+    const unsubs = [sRecent.subscribe(() => {}), sSummary.subscribe(() => {}), sMonth.subscribe(() => {})];
+    await flush();
+
+    expect(sRecent.getSnapshot().status).toBe('ready');
+    expect(sSummary.getSnapshot().status).toBe('ready');
+    expect(sMonth.getSnapshot().status).toBe('ready');
+    expect(cancelledSlots).toEqual([]);
+
+    // 2. Invalidate Library -> all 3 active queries refetch cleanly to version 2 with zero cancellations.
+    version = 2;
+    cache.invalidate({ view: 'Library', key: null, version: 2 });
+    await flush();
+
+    expect(sRecent.getSnapshot().version).toBe(2);
+    expect(sSummary.getSnapshot().version).toBe(2);
+    expect(sMonth.getSnapshot().version).toBe(2);
+    expect(cancelledSlots).toEqual([]);
+
+    // 3. Subscribe synchronously to 3 Transcript chunks (0, 1, 2) -> all 3 become ready with zero cancellations.
+    const t0 = cache.sourceFor({ view: 'Transcript', id: 'r1', take: 1, chunk: 0 });
+    const t1 = cache.sourceFor({ view: 'Transcript', id: 'r1', take: 1, chunk: 1 });
+    const t2 = cache.sourceFor({ view: 'Transcript', id: 'r1', take: 1, chunk: 2 });
+    unsubs.push(t0.subscribe(() => {}), t1.subscribe(() => {}), t2.subscribe(() => {}));
+    await flush();
+
+    expect(t0.getSnapshot().status).toBe('ready');
+    expect(t1.getSnapshot().status).toBe('ready');
+    expect(t2.getSnapshot().status).toBe('ready');
+    expect(t2.getSnapshot().data?.chunk).toBe(2);
+    expect(cancelledSlots).toEqual([]);
+
+    // 4. Two rapid Search queries still preempt each other (Search slot stays immediate).
+    const q1 = cache.sourceFor({ view: 'Search', query: 'old', limit: 20 });
+    const q2 = cache.sourceFor({ view: 'Search', query: 'new', limit: 20 });
+    unsubs.push(q1.subscribe(() => {}), q2.subscribe(() => {}));
+    await flush();
+
+    expect(cancelledSlots).toEqual(['Search']);
+    expect(q2.getSnapshot().status).toBe('ready');
+    expect(q2.getSnapshot().data?.hits[0]?.snippet).toBe('new');
+
+    for (const u of unsubs) u();
+  });
+
+  it('recovers automatically when an active entry receives a single unexpected query.cancelled', async () => {
+    let calls = 0;
+    const cache = new QueryCache(QUERY_CACHE_MAX_ENTRIES);
+    cache.setExecutor(async () => {
+      calls++;
+      if (calls === 1) throw 'query.cancelled';
+      return { version: 1, value: { view: 'Glossary', data: [{ said: 'Zuzalu', written: {} }] } };
+    });
+
+    const src = cache.sourceFor({ view: 'Glossary' });
+    const unsub = src.subscribe(() => {});
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+
+    expect(calls).toBe(2);
+    expect(src.getSnapshot().status).toBe('ready');
+    expect(src.getSnapshot().data).toEqual([{ said: 'Zuzalu', written: {} }]);
+
+    unsub();
   });
 });
 
