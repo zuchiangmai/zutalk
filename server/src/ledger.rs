@@ -14,13 +14,70 @@ use std::{path::Path, sync::Arc};
 use zu::{Cid, Codec, Pack, Record, Value};
 
 const QUOTA: Refusal = Refusal(StatusCode::PAYMENT_REQUIRED, "quota");
+const QUOTA_DAILY: Refusal = Refusal(StatusCode::PAYMENT_REQUIRED, "quota.daily");
 const UPSTREAM: Refusal = Refusal(StatusCode::BAD_GATEWAY, "upstream");
 const CLAIMED: Refusal = Refusal(StatusCode::CONFLICT, "claimed");
+/// Milliseconds in one UTC calendar day.
+pub const DAY_MS: i64 = 86_400_000;
+/// Default daily Soniox key leases per resident (`Settings.dc.html`).
+pub const DEFAULT_DAILY_SONIOX_TIMES: u32 = 40;
+/// Default daily OpenRouter key leases per resident (`Settings.dc.html`).
+pub const DEFAULT_DAILY_OPENROUTER_TIMES: u32 = 30;
 /// How long an upstream (the old invite service, Soniox, OpenRouter) has to answer before the
 /// asker is told `upstream`. Origin to be traced.
 const UPSTREAM_WAIT_MS: u64 = 10_000;
 /// How long an OpenRouter key lives before OpenRouter ends it. Origin to be traced.
 const OPENROUTER_KEY_LIFE_MS: u64 = 3_600_000;
+
+/// One service's daily usage and remaining count for a resident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceDaily {
+    pub used: u32,
+    pub limit: u32,
+    pub remaining: u32,
+}
+
+/// Snapshot of a resident's remaining balance (µ$) and UTC per-service daily quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaReport {
+    pub left: u64,
+    pub resets_at: i64,
+    pub soniox: ServiceDaily,
+    pub openrouter: ServiceDaily,
+}
+
+/// Start and exclusive end (next UTC midnight) of the UTC day containing `now_ms`.
+pub fn day_bounds(now_ms: i64) -> (i64, i64) {
+    let start = now_ms.div_euclid(DAY_MS) * DAY_MS;
+    (start, start + DAY_MS)
+}
+
+/// Pure rule for one service's daily allowance given today's usage, configured daily cap, whether
+/// the resident holds any live grant/claim, and whether any balance remains.
+pub fn daily_service(
+    used: u32,
+    daily_cap: u32,
+    has_grant: bool,
+    has_balance: bool,
+) -> ServiceDaily {
+    let limit = if has_grant { daily_cap } else { 0 };
+    let remaining = if has_balance { limit.saturating_sub(used) } else { 0 };
+    ServiceDaily { used, limit, remaining }
+}
+
+fn service_json(daily: ServiceDaily) -> serde_json::Value {
+    json!({ "used": daily.used, "limit": daily.limit, "remaining": daily.remaining })
+}
+
+fn quota_json(report: &QuotaReport) -> serde_json::Value {
+    json!({
+        "resets_at": report.resets_at,
+        "services": {
+            "soniox": service_json(report.soniox),
+            "openrouter": service_json(report.openrouter),
+        }
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -85,15 +142,22 @@ pub struct Book {
     slices: [u64; 2],
     /// What a second of live captions costs: what a claim's seconds are worth.
     second: u64,
-    /// Requests being answered: held already, so that nothing is drawn twice.
-    pending: Vec<(Cid, String, u64)>,
+    /// Daily key-lease cap per service (`Service as usize`).
+    daily: [u32; 2],
+    /// Requests being answered: held already, so neither balance nor daily cap is drawn twice.
+    pending: Vec<(Cid, String, Service, u64)>,
 }
 
 impl Book {
-    pub fn open(path: &Path, slices: [u64; 2], second: u64) -> Result<Book, zu::Error> {
+    pub fn open(
+        path: &Path,
+        slices: [u64; 2],
+        second: u64,
+        daily: [u32; 2],
+    ) -> Result<Book, zu::Error> {
         let (pack, held) = Pack::open(path)?;
         let (records, bodies, pending) = (held.records, held.bodies, Vec::new());
-        Ok(Book { pack, records, bodies, slices, second, pending })
+        Ok(Book { pack, records, bodies, slices, second, daily, pending })
     }
 
     /// A record and its body, kept and on the disk before it counts.
@@ -155,7 +219,7 @@ impl Book {
         let leases = self.records.iter().filter(|r| r.path.ty == "talk/lease");
         let cost = |r: &Record| Some(self.slices[service(self.bodies.get(&r.body?))? as usize]);
         let leases = leases.map(|r| (r.path.by.clone(), r.at, cost(r).unwrap_or(0)));
-        let pending = self.pending.iter().map(|(_, did, cost)| (did.clone(), now(), *cost));
+        let pending = self.pending.iter().map(|(_, did, _, cost)| (did.clone(), now(), *cost));
         for (did, at, cost) in leases.chain(pending) {
             let mut live: Vec<_> =
                 purses.values_mut().filter(|p| p.0 == did && p.2 > at && p.1 > 0).collect();
@@ -167,12 +231,67 @@ impl Book {
         purses
     }
 
+    /// Leases already kept plus in-flight requests for `(did, svc)` in `[day_start, resets_at)`.
+    fn used_on_day(&self, did: &str, svc: Service, day_start: i64, resets_at: i64) -> u32 {
+        let kept = self
+            .records
+            .iter()
+            .filter(|r| {
+                r.path.ty == "talk/lease"
+                    && r.path.by == did
+                    && r.at >= day_start
+                    && r.at < resets_at
+                    && r.body.and_then(|cid| service(self.bodies.get(&cid))) == Some(svc)
+            })
+            .count();
+        let now_ms = now();
+        let inflight = if now_ms >= day_start && now_ms < resets_at {
+            self.pending.iter().filter(|(_, who, s, _)| who == did && *s == svc).count()
+        } else {
+            0
+        };
+        u32::try_from(kept.saturating_add(inflight)).unwrap_or(u32::MAX)
+    }
+
     /// What `did` has left at `now`, the grant that ends first first.
     pub fn free(&self, did: &str, now: i64) -> Vec<(String, u64)> {
         let mut live: Vec<_> =
             self.fold().into_iter().filter(|(_, p)| p.0 == did && p.2 > now).collect();
         live.sort_by_key(|(_, purse)| purse.2);
         live.into_iter().map(|(grant, purse)| (grant, purse.1)).collect()
+    }
+
+    /// Balance and per-service UTC daily quota for `did` at `now_ms`.
+    pub fn quota(&self, did: &str, now_ms: i64) -> QuotaReport {
+        let purses = self.fold();
+        let mut left: u64 = 0;
+        let mut has_grant = false;
+        for p in purses.values() {
+            if p.0 == did && p.2 > now_ms {
+                has_grant = true;
+                left = left.saturating_add(p.1);
+            }
+        }
+        let (day_start, resets_at) = day_bounds(now_ms);
+        let has_balance = left > 0;
+        let soniox_used = self.used_on_day(did, Service::Soniox, day_start, resets_at);
+        let openrouter_used = self.used_on_day(did, Service::OpenRouter, day_start, resets_at);
+        QuotaReport {
+            left,
+            resets_at,
+            soniox: daily_service(
+                soniox_used,
+                self.daily[Service::Soniox as usize],
+                has_grant,
+                has_balance,
+            ),
+            openrouter: daily_service(
+                openrouter_used,
+                self.daily[Service::OpenRouter as usize],
+                has_grant,
+                has_balance,
+            ),
+        }
     }
 }
 
@@ -191,8 +310,23 @@ pub async fn grant(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
     Ok(Json(json!({ "cid": cid.to_string() })))
 }
 
-/// `POST /lease`: a `talk/lease` record `{ service, aud }`. The answer is a key, and what the
-/// asker has left. The request is kept only once the key is made.
+/// `POST /quota`: a `talk/quota` record `{ aud }`. Returns the resident's balance and per-service
+/// UTC daily quota.
+pub async fn quota(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
+    let (record, _) = server.check(sent, "talk/quota", None).await?;
+    let report = server.quota(&record.path.by, now());
+    Ok(Json(json!({
+        "left": report.left,
+        "resets_at": report.resets_at,
+        "services": {
+            "soniox": service_json(report.soniox),
+            "openrouter": service_json(report.openrouter),
+        }
+    })))
+}
+
+/// `POST /lease`: a `talk/lease` record `{ service, aud }`. The answer is a key, what the
+/// asker has left, and their updated daily quota. The request is kept only once the key is made.
 pub async fn lease(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
     let (record, body) = server.check(sent, "talk/lease", None).await?;
     let (cid, did) = (record.cid(), record.path.by.clone());
@@ -203,22 +337,34 @@ pub async fn lease(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
         if book.at_of(&cid).is_some() || book.pending.iter().any(|(pending, ..)| *pending == cid) {
             return Err(Refusal(StatusCode::CONFLICT, "replay"));
         }
-        let free = book.free(&did, now()).into_iter().map(|(_, free)| free).find(|free| *free > 0);
+        let now_ms = now();
+        let free = book.free(&did, now_ms).into_iter().map(|(_, free)| free).find(|free| *free > 0);
         let cost = free.ok_or(QUOTA)?.min(upstream.slice());
-        book.pending.push((cid, did.clone(), cost));
+        let (day_start, resets_at) = day_bounds(now_ms);
+        let used_today = book.used_on_day(&did, service, day_start, resets_at);
+        if used_today >= book.daily[service as usize] {
+            return Err(QUOTA_DAILY);
+        }
+        book.pending.push((cid, did.clone(), service, cost));
         cost
     };
-    // On a task of its own, finished even if the asker goes away: nothing stays held.
-    let task = tokio::spawn(async move {
+    // On a supervised task of its own, finished even if the asker goes away: nothing stays held.
+    let server_task = server.clone();
+    let task = server.tasks.spawn("ledger.lease", async move {
         let minted = upstream.mint(&record.path.key, cost).await;
-        let mut book = lock(&server.book);
+        let mut book = lock(&server_task.book);
         book.pending.retain(|(pending, ..)| *pending != cid);
         // Not written down, so not handed out: a key that was made but not kept dies at its
         // expiry, unused.
         let minted = minted?;
         book.keep(record, body)?;
-        let left: u64 = book.free(&did, now()).iter().map(|(_, free)| free).sum();
-        Ok(Json(json!({ "key": minted.key, "session_cap_s": minted.session_cap_s, "left": left })))
+        let report = book.quota(&did, now());
+        Ok(Json(json!({
+            "key": minted.key,
+            "session_cap_s": minted.session_cap_s,
+            "left": report.left,
+            "quota": quota_json(&report),
+        })))
     });
     task.await.unwrap_or(Err(Refusal(StatusCode::INTERNAL_SERVER_ERROR, "task")))
 }
@@ -231,17 +377,22 @@ pub async fn claim(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
     let (record, body) = server.check(sent, "talk/claim", None).await?;
     let token = field(body.as_ref(), "token").ok_or(Refusal(StatusCode::BAD_REQUEST, "body"))?;
     let token = token.clone();
-    // On a task of its own: what the old service retired is credited, even if the asker goes.
-    let task = tokio::spawn(async move {
-        let seconds = server.config.invites.as_ref().ok_or(UPSTREAM)?.retire(&token).await?;
-        let (did, mut book) = (record.path.by.clone(), lock(&server.book));
+    // On a supervised task of its own: what the old service retired is credited, even if the asker goes.
+    let server_task = server.clone();
+    let task = server.tasks.spawn("ledger.claim", async move {
+        let seconds = server_task.config.invites.as_ref().ok_or(UPSTREAM)?.retire(&token).await?;
+        let (did, mut book) = (record.path.by.clone(), lock(&server_task.book));
         let token = Cid::of(Codec::Raw, token.as_bytes());
         if book.claimed(&token) {
             return Err(CLAIMED);
         }
         book.credit(record, seconds, token)?;
-        let left: u64 = book.free(&did, now()).iter().map(|(_, free)| free).sum();
-        Ok(Json(json!({ "seconds": seconds, "left": left })))
+        let report = book.quota(&did, now());
+        Ok(Json(json!({
+            "seconds": seconds,
+            "left": report.left,
+            "quota": quota_json(&report),
+        })))
     });
     task.await.unwrap_or(Err(Refusal(StatusCode::INTERNAL_SERVER_ERROR, "task")))
 }

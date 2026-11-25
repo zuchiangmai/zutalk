@@ -4,8 +4,10 @@
 use axum::http::StatusCode;
 use std::{sync::Arc, time::Duration};
 use zu::Doc;
-use zutalk_server::{BoxFuture, Config, Directory, Invites, OpenRouter, Refusal, Server};
-use zutalk_server::{Soniox, serve};
+use zutalk_server::{
+    BoxFuture, Config, DEFAULT_DAILY_OPENROUTER_TIMES, DEFAULT_DAILY_SONIOX_TIMES, Directory,
+    Invites, OpenRouter, Refusal, Server, Soniox, serve,
+};
 
 /// How long a DID's host has to give its document; the same as for any upstream
 /// (`ledger.rs`). Origin to be traced.
@@ -52,6 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coordinators = coordinators.split(',').filter(|did| !did.is_empty()).map(str::to_owned);
     let origin = env("ZUTALK_ORIGIN", "http://127.0.0.1:8000");
     let mut config = Config::new(&origin, data, coordinators.collect());
+    config.daily = [
+        env("ZUTALK_DAILY_SONIOX", &DEFAULT_DAILY_SONIOX_TIMES.to_string()).parse()?,
+        env("ZUTALK_DAILY_OPENROUTER", &DEFAULT_DAILY_OPENROUTER_TIMES.to_string()).parse()?,
+    ];
     let http = reqwest::Client::new();
     // The 0.8 line's invite service: its `ZULANGUE_ADMIN_TOKEN`, so that claims retire invites.
     let (url, key) =

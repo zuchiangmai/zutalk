@@ -8,8 +8,12 @@
 mod ledger;
 mod relay;
 mod room;
+mod tasks;
 
-pub use crate::ledger::{Invites, Minted, OpenRouter, Service, Soniox, Upstream};
+pub use crate::ledger::{
+    DAY_MS, DEFAULT_DAILY_OPENROUTER_TIMES, DEFAULT_DAILY_SONIOX_TIMES, Invites, Minted,
+    OpenRouter, QuotaReport, Service, ServiceDaily, Soniox, Upstream, daily_service, day_bounds,
+};
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{Next, from_fn, map_response};
@@ -43,13 +47,23 @@ pub struct Config {
     pub room: (usize, usize, usize, i64),
     pub relay: (usize, i64),
     pub invites: Option<Invites>,
+    /// Daily key-lease cap per service (`[soniox, openrouter]`).
+    pub daily: [u32; 2],
 }
 
 impl Config {
     pub fn new(origin: &str, data: impl Into<PathBuf>, coordinators: Vec<String>) -> Config {
         let (origin, data, room) =
             (origin.into(), data.into(), (8 << 20, 100, 500, 30 * 86_400_000));
-        Config { origin, data, coordinators, room, relay: (1000, 300_000), invites: None }
+        Config {
+            origin,
+            data,
+            coordinators,
+            room,
+            relay: (1000, 300_000),
+            invites: None,
+            daily: [DEFAULT_DAILY_SONIOX_TIMES, DEFAULT_DAILY_OPENROUTER_TIMES],
+        }
     }
 }
 
@@ -61,6 +75,7 @@ pub struct Server {
     book: Mutex<ledger::Book>,
     rooms: Mutex<HashMap<String, room::Room>>,
     relay: Mutex<HashMap<String, (i64, axum::body::Bytes)>>,
+    pub(crate) tasks: tasks::Tasks,
 }
 
 /// Why a request was refused: the HTTP status, and a stable code in the body.
@@ -97,9 +112,27 @@ impl Server {
         std::fs::create_dir_all(config.data.join("rooms"))?;
         let slices = [upstreams[0].slice(), upstreams[1].slice()];
         let second = upstreams[Service::Soniox as usize].per_second();
-        let book = Mutex::new(ledger::Book::open(&config.data.join("ledger"), slices, second)?);
+        let book = Mutex::new(ledger::Book::open(
+            &config.data.join("ledger"),
+            slices,
+            second,
+            config.daily,
+        )?);
         let rooms = Mutex::new(room::open_all(&config.data.join("rooms"))?);
-        Ok(Arc::new(Server { config, directory, upstreams, book, rooms, relay: Mutex::default() }))
+        Ok(Arc::new(Server {
+            config,
+            directory,
+            upstreams,
+            book,
+            rooms,
+            relay: Mutex::default(),
+            tasks: tasks::Tasks::new(),
+        }))
+    }
+
+    /// Wait for all supervised ledger tasks to finish cleanly.
+    pub async fn shutdown(&self) {
+        self.tasks.wait().await;
     }
 
     /// What time does by itself: rooms not written to for too long are removed.
@@ -149,6 +182,11 @@ impl Server {
     pub fn left(&self, did: &str, now: i64) -> u64 {
         lock(&self.book).free(did, now).iter().map(|(_, free)| free).sum()
     }
+
+    /// What `did` has left and their UTC per-service daily quota at `now_ms`.
+    pub fn quota(&self, did: &str, now_ms: i64) -> QuotaReport {
+        lock(&self.book).quota(did, now_ms)
+    }
 }
 
 /// A string member of a body that is a map.
@@ -161,9 +199,10 @@ type Route = fn() -> MethodRouter<Arc<Server>>;
 
 /// Every route: its path, the code the log says for it (a path has `{id}` in it, which is no
 /// plain text, and a request's own path may hold a room's id), and what answers it.
-const ROUTES: [(&str, &str, Route); 7] = [
+const ROUTES: [(&str, &str, Route); 8] = [
     ("/healthz", "healthz", || get(|| async { "ok" })),
     ("/grants", "grants", || post(ledger::grant)),
+    ("/quota", "quota", || post(ledger::quota)),
     ("/lease", "lease", || post(ledger::lease)),
     ("/claim", "claim", || post(ledger::claim)),
     ("/rooms", "rooms", || post(room::write)),
