@@ -174,6 +174,7 @@ pub struct Core {
     commands_refused: Counter,
     stats: Stats,
     root: Tree,
+    frame: Register<Frame>,
     shell: Arc<Gauge>,
     screen: Arc<Gauge>,
 }
@@ -227,7 +228,7 @@ impl Core {
             work,
             root.clone(),
             state_reg,
-            frame_reg,
+            frame_reg.clone(),
             session_reg,
             level_reg,
             water_reg,
@@ -237,7 +238,19 @@ impl Core {
         );
         root.spawn("hub", hub.run(mail));
         root.spawn("stats", stats::publish(stats.clone(), stats_reg));
-        Ok((Core { commands, results, commands_refused, stats, root, shell, screen }, outlet))
+        Ok((
+            Core {
+                commands,
+                results,
+                commands_refused,
+                stats,
+                root,
+                frame: frame_reg,
+                shell,
+                screen,
+            },
+            outlet,
+        ))
     }
 
     pub fn send(&self, command: crate::app::proto::Command) -> Result<(), &'static str> {
@@ -263,9 +276,16 @@ impl Core {
         self.shell.set(seq);
     }
 
-    /// Reports the latest frame sequence drawn by the interface (`P1.md` §3.3, §3.5).
+    /// Reports the latest frame sequence drawn by the interface (`P1.md` §3.3, §3.5, `P1-24`).
+    /// Untrusted input beyond the latest emitted `Frame` sequence is ignored so `Screen` never
+    /// exceeds `Frame`.
     pub fn drawn(&self, seq: u64) {
-        self.screen.set(seq);
+        if seq > self.frame.seq() {
+            return;
+        }
+        if seq > self.screen.read().0 {
+            self.screen.set(seq);
+        }
     }
 
     /// Live statistics for this core: counters, peaks, spreads, and queues.

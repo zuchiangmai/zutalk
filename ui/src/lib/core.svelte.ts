@@ -9,6 +9,7 @@ import type { Signal } from '$proto/Signal';
 import type { State } from '$proto/State';
 import type { Tally } from '$proto/Tally';
 import type { Water } from '$proto/Water';
+import { emptyVitals, frame, report } from './vitals';
 import { system, ui } from './words.svelte';
 
 /** What the core last said. Each is replaced whole, never merged. */
@@ -44,14 +45,42 @@ export function take(e: Event) {
   } else say(e.is);
 }
 
-export type Bus = { send(c: Command): Promise<void>; listen(on: (e: Event) => void): () => void };
+export type Bus = {
+  send(c: Command): Promise<void>;
+  listen(on: (e: Event) => void): () => void;
+  drawn?: (seq: number, gap_ms: number, gaps: number) => void;
+};
 
 let bus: Bus;
 export const send = (c: Command): Promise<void> =>
   bus.send(c).catch((err) => {
     say(typeof err === 'string' ? err : err instanceof Error ? err.message : 'busy');
   });
-export const use = (b: Bus) => ((bus = b), b.listen(take));
+export const use = (b: Bus) => {
+  bus = b;
+  const stopListen = b.listen(take);
+  let raf = 0;
+  let alive = true;
+  if (b.drawn && typeof requestAnimationFrame === 'function') {
+    const reportDrawn = b.drawn;
+    let vitals = emptyVitals();
+    const step = (now: number) => {
+      if (!alive) return;
+      const hidden = typeof document !== 'undefined' && document.hidden;
+      vitals = frame(vitals, now, hidden);
+      const [next, due] = report(vitals, seenSeq.Frame ?? 0, now);
+      vitals = next;
+      if (due) reportDrawn(due.seq, due.gap_ms, due.gaps);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  }
+  return () => {
+    alive = false;
+    if (raf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf);
+    stopListen();
+  };
+};
 
 /** The core in the app. Events come over a channel: plain Tauri events are not built for 10 Hz. */
 export const tauri: Bus = {
@@ -60,6 +89,9 @@ export const tauri: Bus = {
     const channel = new Channel<Event>(on);
     void invoke('subscribe', { channel });
     return () => (channel.onmessage = () => {});
+  },
+  drawn(seq, gap_ms, gaps) {
+    void invoke('drawn', { seq, gap_ms, gaps }).catch(() => {});
   },
 };
 

@@ -1,6 +1,6 @@
 //! The shell: thin wiring between Tauri, the supervised `shell` tree, and `zutalk-core`
-//! (`P1.md` §3.9, `P1-23`). All commands are async, nothing holds a lock, and nothing waits on
-//! the main thread.
+//! (`P1.md` §3.9, `P1-23`, `P1-24`). All commands are async, nothing holds a lock, and nothing
+//! waits on the main thread.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -8,13 +8,19 @@ use std::sync::{Arc, OnceLock};
 use tauri::{Manager, RunEvent, State, WebviewWindow, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use zutalk::pump::{self, Joins, SHELL_JOINS_MSGS};
-use zutalk::{updates, windows};
+use zutalk::{beat, updates, windows};
 use zutalk_core::app::hub::{Clip, Config, Core};
 use zutalk_core::app::proto::{Command, Event};
 use zutalk_core::id::keys;
 use zutalk_core::rt::queue::{self, Full};
+use zutalk_core::rt::stats::{Counter, Spread};
 use zutalk_core::rt::supervise::Tree;
-use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
+use zutalk_log::{Id, LOG_FLUSH_WAIT_MS, info, warn};
+
+struct UiVitals {
+    gap_ms: Spread,
+    gaps: Counter,
+}
 
 #[tauri::command]
 async fn dispatch(command: Command, core: State<'_, Core>) -> Result<(), String> {
@@ -28,6 +34,24 @@ async fn subscribe(
     joins: State<'_, Joins<Channel<Event>>>,
 ) -> Result<(), String> {
     joins.send((window.label().to_owned(), channel)).await.map_err(|_| "busy".to_owned())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn drawn(
+    window: WebviewWindow,
+    seq: u64,
+    gap_ms: u32,
+    gaps: u32,
+    core: State<'_, Core>,
+    vitals: State<'_, UiVitals>,
+) -> Result<(), String> {
+    core.drawn(seq);
+    if gaps > 0 {
+        warn!("ui.frame.gap", window = Id(window.label()), gap_ms = gap_ms, n = gaps);
+        vitals.gap_ms.note(u64::from(gap_ms));
+        vitals.gaps.add(u64::from(gaps));
+    }
+    Ok(())
 }
 
 fn main() {
@@ -71,6 +95,10 @@ fn main() {
             let config = Config { old, clip, install, ..base };
             let (core, outlet) = Core::start(config).map_err(|end| format!("{end:?}"))?;
             let shell = Tree::root("shell", core.stats());
+            let ui_vitals = UiVitals {
+                gap_ms: shell.stats().spread("ui.gap_ms"),
+                gaps: shell.stats().counter("ui.gaps"),
+            };
             let (update_tx, update_rx) = updates::channel(shell.stats());
             let _ = install_slot.set(update_tx); // dropped: initialized once before any Install call
             let (joins_tx, joins_rx) = queue::bounded::<(String, Channel<Event>)>(
@@ -81,6 +109,7 @@ fn main() {
             );
             // Manage Core before starting shell tasks so handle.state::<Core>() is always ready.
             app.manage(core);
+            app.manage(ui_vitals);
             let handle_pushed = app.handle().clone();
             let handle_captions = app.handle().clone();
             let _kept = pump::start(
@@ -90,12 +119,20 @@ fn main() {
                 move |seq| handle_pushed.state::<Core>().pushed(seq),
                 move |show| windows::set_captions(&handle_captions, show),
             );
+            let beat_handle = app.handle().clone();
+            shell.spawn(
+                "shell.beat",
+                beat::run(
+                    move |work| beat_handle.run_on_main_thread(work).is_ok(),
+                    shell.stats().clone(),
+                ),
+            );
             updates::start(&shell, app.handle().clone(), update_rx, !tauri::is_dev());
             let _ = app.manage(shell); // dropped: `false` only if one was managed already
             app.manage(joins_tx);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![dispatch, subscribe])
+        .invoke_handler(tauri::generate_handler![dispatch, subscribe, drawn])
         .build(tauri::generate_context!());
     match built {
         // What the log has not written yet is written before the process ends.

@@ -131,6 +131,9 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `shell.sink.gone` | warn | 一个窗口的通道关闭或发送时 panic，已从推送表移除 | `window` `why`（`closed` / `panic`） |
 | `shell.captions` | info；失败时 warn | 外壳按 `State.captions` 变化向字幕窗投递显隐请求（不查询窗口） | `shown` `code`（`ok` / `missing` / `failed`） |
 | `update.look` | info；出错时 warn | 外壳 `updates` 任务查了一次新版本 | `code`（`none` / `ready` / `update`） |
+| `shell.main_thread.stalled` | warn | 主线程心跳超过 `BEAT_STALLED_MS`（2000 ms）未回（每次停滞只发一条） | `waited_ms` |
+| `shell.main_thread.back` | info | 停滞的主线程终于跑完了那次心跳 | `stalled_ms` |
+| `ui.frame.gap` | warn | 界面每秒回报中 `gaps > 0`：两帧之间隔超过 `FRAME_GAP_MS`（250 ms） | `window` `gap_ms` `n` |
 
 ## 怎么读一组快照
 

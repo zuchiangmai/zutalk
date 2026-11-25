@@ -576,6 +576,14 @@ impl Bench {
         self.core.send(command).expect("the hub's mailbox accepts the command");
     }
 
+    pub fn pushed(&self, seq: u64) {
+        self.core.pushed(seq);
+    }
+
+    pub fn drawn(&self, seq: u64) {
+        self.core.drawn(seq);
+    }
+
     pub fn seen(&self) -> &Seen {
         self.seen.as_ref().expect("bench was started with capture_log = true")
     }

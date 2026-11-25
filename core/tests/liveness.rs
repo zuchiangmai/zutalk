@@ -3017,3 +3017,81 @@ async fn a_diagnosis_that_cannot_be_written_says_so() {
 
     bench.finish();
 }
+
+// ---- 8. P1-24: Shell/Screen watermarks and untrusted seq clamp ----
+
+#[tokio::test(start_paused = true)]
+async fn the_screen_mark_follows_what_the_interface_says_it_drew() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(30_000));
+    let bench = Bench::start(BenchOptions::new(speech)).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _id = bench.start_recording().await;
+
+    // Report Shell and Screen once per virtual second while recording: both advance and stay Live.
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let (frame_seq, _) = bench.outlet().frame.now();
+        if frame_seq > 0 {
+            bench.pushed(frame_seq);
+            bench.drawn(frame_seq);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let water = bench.last_water().expect("water sampled");
+    let shell_mark = water.marks.iter().find(|m| m.stage == Stage::Shell).expect("Shell mark");
+    let screen_mark = water.marks.iter().find(|m| m.stage == Stage::Screen).expect("Screen mark");
+    assert!(shell_mark.at > 0);
+    assert!(screen_mark.at > 0);
+    assert_eq!(
+        water.health.iter().find(|(s, _)| *s == Stage::Shell).map(|(_, h)| h),
+        Some(&Health::Live)
+    );
+    assert_eq!(
+        water.health.iter().find(|(s, _)| *s == Stage::Screen).map(|(_, h)| h),
+        Some(&Health::Live)
+    );
+
+    // Keep advancing Shell but stop calling `drawn` for 6 virtual seconds: Screen turns Slow,
+    // emits one judge.verdict(Screen -> Slow), zero stall.snapshot, and takes no action.
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let (frame_seq, _) = bench.outlet().frame.now();
+        bench.pushed(frame_seq);
+    }
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let slow_water = bench.last_water().expect("water sampled while screen stopped");
+    assert_eq!(
+        slow_water.health.iter().find(|(s, _)| *s == Stage::Screen).map(|(_, h)| h),
+        Some(&Health::Slow),
+        "expected Screen to be Slow after 6 s without drawn(): {:?}",
+        slow_water.health
+    );
+
+    let screen_verdicts: Vec<_> = bench
+        .seen()
+        .of("judge.verdict")
+        .into_iter()
+        .filter(|l| l.text("stage") == Some("Screen") && l.text("to") == Some("Slow"))
+        .collect();
+    assert_eq!(screen_verdicts.len(), 1, "expected one judge.verdict for Screen -> Slow");
+    assert_eq!(screen_verdicts[0].text("action"), Some("none"));
+    assert!(
+        bench.seen().of("stall.snapshot").is_empty(),
+        "Screen Slow must not trigger a stall.snapshot"
+    );
+
+    // Untrusted `drawn` seq larger than any emitted Frame must never push Screen past Frame.
+    let (frame_seq, _) = bench.outlet().frame.now();
+    bench.drawn(frame_seq + 10_000);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let clamped_water = bench.last_water().expect("water after untrusted drawn");
+    let frame_at = clamped_water.marks.iter().find(|m| m.stage == Stage::Frame).unwrap().at;
+    let screen_at = clamped_water.marks.iter().find(|m| m.stage == Stage::Screen).unwrap().at;
+    assert!(screen_at <= frame_at, "Screen ({screen_at}) must never exceed Frame ({frame_at})");
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bench.finish();
+}
