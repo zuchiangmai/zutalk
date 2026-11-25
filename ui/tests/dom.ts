@@ -20,6 +20,8 @@ export function installDomMocks(opts: DomMockOptions = {}): () => void {
   const origResizeObserver = globalThis.ResizeObserver;
   const origMatchMedia = globalThis.matchMedia;
   const origOffsetParent = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetParent');
+  const origScrollTo = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTo');
+  const origScrollBy = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollBy');
 
   // jsdom always reports offsetParent === null; virtua relies on offsetParent to measure mounted items
   // and clear initial `visibility: hidden` once an item enters the viewport.
@@ -27,6 +29,36 @@ export function installDomMocks(opts: DomMockOptions = {}): () => void {
     configurable: true,
     get(this: HTMLElement) {
       return this.isConnected ? document.body : null;
+    },
+  });
+
+  // jsdom omits Element.prototype.scrollTo/scrollBy; shim both so virtua VList.scrollToIndex updates scrollTop.
+  Object.defineProperty(Element.prototype, 'scrollTo', {
+    configurable: true,
+    writable: true,
+    value(this: Element, arg1?: ScrollToOptions | number, arg2?: number) {
+      if (typeof arg1 === 'number') {
+        this.scrollLeft = arg1;
+        if (typeof arg2 === 'number') this.scrollTop = arg2;
+      } else if (arg1 && typeof arg1 === 'object') {
+        if (typeof arg1.left === 'number') this.scrollLeft = arg1.left;
+        if (typeof arg1.top === 'number') this.scrollTop = arg1.top;
+      }
+      this.dispatchEvent(new Event('scroll'));
+    },
+  });
+  Object.defineProperty(Element.prototype, 'scrollBy', {
+    configurable: true,
+    writable: true,
+    value(this: Element, arg1?: ScrollToOptions | number, arg2?: number) {
+      if (typeof arg1 === 'number') {
+        this.scrollLeft += arg1;
+        if (typeof arg2 === 'number') this.scrollTop += arg2;
+      } else if (arg1 && typeof arg1 === 'object') {
+        if (typeof arg1.left === 'number') this.scrollLeft += arg1.left;
+        if (typeof arg1.top === 'number') this.scrollTop += arg1.top;
+      }
+      this.dispatchEvent(new Event('scroll'));
     },
   });
 
@@ -106,6 +138,16 @@ export function installDomMocks(opts: DomMockOptions = {}): () => void {
       Object.defineProperty(HTMLElement.prototype, 'offsetParent', origOffsetParent);
     } else {
       delete (HTMLElement.prototype as { offsetParent?: unknown }).offsetParent;
+    }
+    if (origScrollTo) {
+      Object.defineProperty(Element.prototype, 'scrollTo', origScrollTo);
+    } else {
+      delete (Element.prototype as { scrollTo?: unknown }).scrollTo;
+    }
+    if (origScrollBy) {
+      Object.defineProperty(Element.prototype, 'scrollBy', origScrollBy);
+    } else {
+      delete (Element.prototype as { scrollBy?: unknown }).scrollBy;
     }
   };
 }

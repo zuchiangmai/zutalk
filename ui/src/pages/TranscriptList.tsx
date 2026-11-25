@@ -19,6 +19,9 @@ export const TRANSCRIPT_PREFETCH_CHUNKS = 1;
 /** Initial item height estimate (px) passed to virtua VList for unmeasured transcript rows. */
 export const TRANSCRIPT_ROW_ESTIMATE_PX = 84;
 
+/** Fallback viewport height (px) used before VList reports its first layout measurement. */
+export const DEFAULT_VIEWPORT_FALLBACK_PX = 600;
+
 /** Default initial visible row window before the first scroll/resize measurement arrives. */
 const INITIAL_VISIBLE_ROWS = 12;
 
@@ -180,13 +183,21 @@ export function TranscriptList({
 
   const totalLines = useMemo(() => {
     if (compare) {
-      if (expectedCompareLines > 0) return expectedCompareLines;
-      if (!chunk0Compare) return 0;
-      if (chunk0Compare.total_chunks <= 1) return chunk0Compare.rows.length;
-      return chunk0Compare.total_chunks * TRANSCRIPT_CHUNK_LINES;
+      if (!chunk0Compare || chunk0Compare.total_chunks <= 0) return 0;
+      if (chunk0Compare.total_chunks === 1) return chunk0Compare.rows.length;
+      const lastIdx = chunk0Compare.total_chunks - 1;
+      const lastChunk = compareMap.get(lastIdx);
+      if (lastChunk) {
+        return lastIdx * TRANSCRIPT_CHUNK_LINES + lastChunk.rows.length;
+      }
+      const minTotal = lastIdx * TRANSCRIPT_CHUNK_LINES + 1;
+      const maxTotal = chunk0Compare.total_chunks * TRANSCRIPT_CHUNK_LINES;
+      return expectedCompareLines > 0
+        ? Math.min(maxTotal, Math.max(minTotal, expectedCompareLines))
+        : maxTotal;
     }
     return chunk0Transcript?.total_lines ?? 0;
-  }, [compare, expectedCompareLines, chunk0Compare, chunk0Transcript]);
+  }, [compare, expectedCompareLines, chunk0Compare, compareMap, chunk0Transcript]);
 
   // Report currently loaded lines so Copy can format loaded text without fetching all chunks.
   useEffect(() => {
@@ -227,7 +238,7 @@ export function TranscriptList({
     const handle = vlistRef.current;
     if (!handle || totalLines === 0) return;
     const offset = handle.scrollOffset;
-    const viewport = handle.viewportSize || 600;
+    const viewport = handle.viewportSize || DEFAULT_VIEWPORT_FALLBACK_PX;
     const start = Math.max(0, handle.findItemIndex(offset));
     const end = Math.min(totalLines - 1, Math.max(start, handle.findItemIndex(offset + viewport)));
     setVisibleRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));

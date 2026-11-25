@@ -3,6 +3,7 @@ import { VList, type VListHandle } from 'virtua';
 import type { LibraryFilter } from '$proto/LibraryFilter';
 import type { LibraryRow } from '$proto/LibraryRow';
 import type { LibrarySummary } from '$proto/LibrarySummary';
+import type { Query } from '$proto/Query';
 import type { SearchHit } from '$proto/SearchHit';
 import {
   clock,
@@ -13,6 +14,7 @@ import {
   removeWithUndo,
   stateSource,
   t,
+  useQueries,
   useQuery,
   useSource,
   word,
@@ -28,6 +30,9 @@ export const SEARCH_PAGE_MAX_HITS = 100;
 
 /** Initial item height estimate (px) passed to virtua VList for library rows. */
 export const LIBRARY_ROW_ESTIMATE_PX = 64;
+
+/** Number of rows from the bottom at which scrolling triggers loading the next page. */
+export const LOAD_MORE_THRESHOLD_ROWS = 3;
 
 /** Debounce delay (ms) before firing Query::Search on keystrokes (P3.md §3.4). */
 export const LIBRARY_SEARCH_DEBOUNCE_MS = 120;
@@ -151,7 +156,7 @@ export function LibraryView({
     if (!hasMore || isSearching) return;
     const h = vlistRef.current;
     if (!h) return;
-    if (h.scrollOffset + h.viewportSize >= h.scrollSize - LIBRARY_ROW_ESTIMATE_PX * 3) {
+    if (h.scrollOffset + h.viewportSize >= h.scrollSize - LIBRARY_ROW_ESTIMATE_PX * LOAD_MORE_THRESHOLD_ROWS) {
       onLoadMore();
     }
   };
@@ -393,17 +398,13 @@ export function LibraryPage({ initialMonth = null }: { initialMonth?: string | n
 
   const [selectedMonth, setSelectedMonth] = useState<string | null>(initialMonth);
   const [filter, setFilter] = useState<LibraryFilter>(EMPTY_FILTER);
-  const [offset, setOffset] = useState(0);
-  const [accumulatedRows, setAccumulatedRows] = useState<LibraryRow[]>([]);
+  const [pageCount, setPageCount] = useState(1);
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
   useEffect(() => {
-    if (initialMonth !== null) {
-      setSelectedMonth(initialMonth);
-      setOffset(0);
-      setAccumulatedRows([]);
-    }
+    setSelectedMonth(initialMonth);
+    setPageCount(1);
   }, [initialMonth]);
 
   const activeMonth = selectedMonth ?? summaryQuery.data?.months[0]?.month ?? null;
@@ -418,52 +419,62 @@ export function LibraryPage({ initialMonth = null }: { initialMonth?: string | n
     return () => clearTimeout(timer);
   }, [searchText]);
 
-  const monthQuery = useQuery(
-    activeMonth
-      ? {
-          view: 'LibraryMonth',
-          month: activeMonth,
-          tz_offset_min: tzOffsetMin,
-          filter,
-          limit: LIBRARY_PAGE_ROWS,
-          offset,
-        }
-      : null,
+  const pageQueries = useMemo<readonly Extract<Query, { view: 'LibraryMonth' }>[]>(
+    () =>
+      activeMonth
+        ? Array.from({ length: pageCount }, (_, i) => ({
+            view: 'LibraryMonth' as const,
+            month: activeMonth,
+            tz_offset_min: tzOffsetMin,
+            filter,
+            limit: LIBRARY_PAGE_ROWS,
+            offset: i * LIBRARY_PAGE_ROWS,
+          }))
+        : [],
+    [activeMonth, pageCount, tzOffsetMin, filter],
   );
+
+  const pageStates = useQueries(pageQueries);
+
+  const rows = useMemo(() => {
+    const merged: LibraryRow[] = [];
+    const seen = new Set<string>();
+    for (const st of pageStates) {
+      for (const row of st.data?.rows ?? []) {
+        if (!seen.has(row.id)) {
+          seen.add(row.id);
+          merged.push(row);
+        }
+      }
+    }
+    return merged;
+  }, [pageStates]);
+
+  const hasMore = Boolean(pageStates[pageStates.length - 1]?.data?.has_more);
+  const browseLoading =
+    pageStates.length > 0 &&
+    (pageStates[0].status === 'idle' || pageStates[0].status === 'loading') &&
+    rows.length === 0;
+  const browseError =
+    pageStates.find((st) => st.status === 'error')?.error ?? summaryQuery.error;
 
   const searchQuery = useQuery(
     debouncedSearch ? { view: 'Search', query: debouncedSearch, limit: SEARCH_PAGE_MAX_HITS } : null,
   );
 
-  useEffect(() => {
-    const pageData = monthQuery.data;
-    if (!pageData) return;
-    if (offset === 0) {
-      setAccumulatedRows(pageData.rows);
-    } else {
-      setAccumulatedRows((prev) => {
-        const seen = new Set(prev.map((r) => r.id));
-        const extra = pageData.rows.filter((r) => !seen.has(r.id));
-        return extra.length > 0 ? [...prev, ...extra] : prev;
-      });
-    }
-  }, [monthQuery.data, offset]);
-
   const handleSelectMonth = (month: string) => {
     setSelectedMonth(month);
-    setOffset(0);
-    setAccumulatedRows([]);
+    setPageCount(1);
   };
 
   const handleFilterChange = (next: LibraryFilter) => {
     setFilter(next);
-    setOffset(0);
-    setAccumulatedRows([]);
+    setPageCount(1);
   };
 
   const handleLoadMore = () => {
-    if (monthQuery.data?.has_more) {
-      setOffset((prev) => prev + LIBRARY_PAGE_ROWS);
+    if (hasMore) {
+      setPageCount((prev) => prev + 1);
     }
   };
 
@@ -471,10 +482,10 @@ export function LibraryPage({ initialMonth = null }: { initialMonth?: string | n
     <LibraryView
       summary={summaryQuery.data}
       activeMonth={activeMonth}
-      rows={accumulatedRows}
-      hasMore={monthQuery.data?.has_more ?? false}
-      loading={monthQuery.status === 'loading'}
-      error={debouncedSearch ? searchQuery.error : (monthQuery.error ?? summaryQuery.error)}
+      rows={rows}
+      hasMore={hasMore}
+      loading={browseLoading}
+      error={debouncedSearch ? searchQuery.error : browseError}
       filter={filter}
       languages={state?.languages ?? []}
       searchText={searchText}

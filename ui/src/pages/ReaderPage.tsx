@@ -38,6 +38,13 @@ function exportExtension(exporter: string): string {
   return exporter;
 }
 
+/** Extracts a 0-based line index from a transcript line key (`k12` or `<id>.<take>.<n>`), else null. */
+export function parseLineIndex(key: string | null | undefined): number | null {
+  if (!key) return null;
+  const match = /(?:^|\.|k)(\d+)$/.exec(key);
+  return match ? Number(match[1]) : null;
+}
+
 export type ReaderViewProps = {
   recording: RecordingView;
   progressRefine: Writing | null;
@@ -95,7 +102,9 @@ export function ReaderView({
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [focusLineKey, setFocusLineKey] = useState<string | null>(highlightLineKey);
-  const [scrollToIndex, setScrollToIndex] = useState<number | null>(null);
+  const [scrollToIndex, setScrollToIndex] = useState<number | null>(() =>
+    parseLineIndex(highlightLineKey),
+  );
 
   // Notes tab editing state
   const [editingNoteKey, setEditingNoteKey] = useState<string | null>(null);
@@ -125,6 +134,7 @@ export function ReaderView({
 
   useEffect(() => {
     setFocusLineKey(highlightLineKey);
+    setScrollToIndex(parseLineIndex(highlightLineKey));
   }, [row.id, highlightLineKey]);
 
   const activeWork = progressRefine?.id === row.id ? progressRefine : null;
@@ -206,10 +216,7 @@ export function ReaderView({
     setTab('transcript');
     setCompare(false);
     setFocusLineKey(note.anchor);
-    if (note.anchor) {
-      const m = /(\d+)$/.exec(note.anchor);
-      if (m) setScrollToIndex(Number(m[1]));
-    }
+    setScrollToIndex(parseLineIndex(note.anchor));
   };
 
   return (

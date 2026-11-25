@@ -272,6 +272,84 @@ describe('LibraryPage month rail, filters, debounced search, and undo remove', (
       { timeout: 1000 },
     );
   });
+
+  it('refreshes all loaded pages on Invalidate(Library) after loading page 2 and resets month when initialMonth returns to null', async () => {
+    let version = 1;
+    let novRows = Array.from({ length: 60 }, (_, i) => makeRow(i));
+    const octRows = [makeRow(900, Date.UTC(2026, 9, 15, 10, 0))];
+    let emit: (e: Event) => void = () => {};
+
+    const bus: Bus = {
+      async send() {},
+      async query(q): Promise<QueryReply> {
+        if (q.view === 'LibrarySummary') {
+          return {
+            version,
+            value: {
+              view: 'LibrarySummary',
+              data: {
+                total: novRows.length + octRows.length,
+                months: [
+                  { month: '2026-11', count: novRows.length },
+                  { month: '2026-10', count: octRows.length },
+                ],
+              },
+            },
+          };
+        }
+        if (q.view === 'LibraryMonth') {
+          const all = q.month === '2026-10' ? octRows : novRows;
+          const slice = all.slice(q.offset, q.offset + q.limit);
+          return {
+            version,
+            value: {
+              view: 'LibraryPage',
+              data: {
+                total: all.length,
+                rows: slice,
+                has_more: q.offset + slice.length < all.length,
+              },
+            },
+          };
+        }
+        return { version, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        emit = on;
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    const { rerender } = render(<LibraryPage initialMonth="2026-11" />);
+
+    await waitFor(() => expect(screen.getByText('Recording session #0')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy();
+
+    // Load page 2 (rows 50..59)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull());
+
+    // Delete row 0 and rename row 1 in backing store, then emit Invalidate('Library')
+    novRows = novRows.slice(1).map((r) => (r.id === 'rec-1' ? { ...r, title: 'Renamed session #1' } : r));
+    version = 2;
+    act(() => {
+      emit({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 2 } });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Recording session #0')).toBeNull();
+      expect(screen.getByText('Renamed session #1')).toBeTruthy();
+    });
+
+    // Switch to October, then reset initialMonth back to null -> must jump back to latest month (2026-11)
+    rerender(<LibraryPage initialMonth="2026-10" />);
+    await waitFor(() => expect(screen.getByText('Recording session #900')).toBeTruthy());
+
+    rerender(<LibraryPage initialMonth={null} />);
+    await waitFor(() => expect(screen.getByText('Renamed session #1')).toBeTruthy());
+  });
 });
 
 describe('SettingsPage', () => {

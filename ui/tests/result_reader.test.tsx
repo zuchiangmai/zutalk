@@ -12,7 +12,7 @@ import type { Writing } from '$proto/Writing';
 import { EMPTY } from '../dev/mock';
 import { type Bus, noticesSource, resetChannel, startBus } from '../src/bus/channel';
 import { ui } from '../src/bus/words';
-import { ReaderPage } from '../src/pages/ReaderPage';
+import { parseLineIndex, ReaderPage } from '../src/pages/ReaderPage';
 import { REFINE_STEPS, ResultView, refineStepIndex } from '../src/pages/ResultPage';
 import { chunksForRange, TRANSCRIPT_CHUNK_LINES } from '../src/pages/TranscriptList';
 import { installDomMocks } from './dom';
@@ -179,6 +179,16 @@ describe('pure helpers: chunksForRange and refineStepIndex', () => {
       expect(refineStepIndex(step)).toBe(idx);
     });
     expect(refineStepIndex('offline')).toBe(-1);
+  });
+
+  it('parses line indices from kN and <id>.<take>.<n> keys while rejecting non-line keys', () => {
+    expect(parseLineIndex('k0')).toBe(0);
+    expect(parseLineIndex('k130')).toBe(130);
+    expect(parseLineIndex('rec-1.1.130')).toBe(130);
+    expect(parseLineIndex('title')).toBeNull();
+    expect(parseLineIndex('')).toBeNull();
+    expect(parseLineIndex(null)).toBeNull();
+    expect(parseLineIndex(undefined)).toBeNull();
   });
 });
 
@@ -444,5 +454,100 @@ describe('ReaderPage virtualization, Compare, inline edits, notes, and confirmab
       expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
     });
     expect(screen.queryByText('No transcript yet')).toBeNull();
+  });
+
+  it('uses exact Compare chunk row counts without ghost loading rows or truncation', async () => {
+    // Case A: takes have 8 lines each, but Compare merges them into 1 row -> must render exactly 1 row, 0 ghost rows.
+    const recA = makeRecording();
+    const harnessA = createTestBus({ recording: recA, totalLines: 8 });
+    stopBus = startBus(harnessA.bus);
+
+    const viewA = render(<ReaderPage id="rec-1" compare />);
+    await waitFor(() => {
+      expect(viewA.container.querySelector('mark.find')?.textContent).toBe('hr');
+    });
+    expect(viewA.container.querySelectorAll('li[data-row-index]')).toHaveLength(1);
+    expect(screen.queryByText('Loading…')).toBeNull();
+    viewA.unmount();
+    stopBus();
+    resetChannel();
+
+    // Case B: takes report 2 lines each, but Compare produces 4 aligned rows -> all 4 rows rendered without truncation.
+    const recB = makeRecording({
+      takes: [
+        { take: 0, lines: 2, is_live: true, is_current: false, written_at: 1_760_002_538_000 },
+        { take: 1, lines: 2, is_live: false, is_current: true, written_at: 1_760_002_568_000 },
+      ],
+    });
+    const fourCompareRows: CompareRow[] = Array.from({ length: 4 }, (_, i) => ({
+      key_a: `k${i}`,
+      key_b: `k${i}`,
+      t0: i * 3_000,
+      t1: i * 3_000 + 2_500,
+      speaker: '1',
+      language: 'en',
+      changed: true,
+      text_a: `Old ${i}`,
+      text_b: `New ${i}`,
+      ops: [
+        { kind: 'Delete', text: `Old ${i}` },
+        { kind: 'Insert', text: `New ${i}` },
+      ],
+    }));
+    const harnessB = createTestBus({ recording: recB, totalLines: 2, compareRows: fourCompareRows });
+    stopBus = startBus(harnessB.bus);
+
+    const viewB = render(<ReaderPage id="rec-1" compare />);
+    await waitFor(() => {
+      expect(viewB.container.querySelectorAll('li[data-row-index]')).toHaveLength(4);
+    });
+    expect(screen.getByText('New 3')).toBeTruthy();
+  });
+
+  it('scrolls to and fetches the target chunk when opening ReaderPage with a deep search lineKey', async () => {
+    const rec = makeRecording({
+      takes: [{ take: 1, lines: 2_560, is_live: false, is_current: true, written_at: 1_760_002_568_000 }],
+    });
+    const queriedChunks: number[] = [];
+    const bus: Bus = {
+      async send() {},
+      async query(q): Promise<QueryReply> {
+        if (q.view === 'Recording') {
+          return { version: 1, value: { view: 'Recording', data: rec } };
+        }
+        if (q.view === 'Transcript') {
+          queriedChunks.push(q.chunk);
+          const start = q.chunk * TRANSCRIPT_CHUNK_LINES;
+          const end = Math.min(2_560, start + TRANSCRIPT_CHUNK_LINES);
+          const lines: [string, Said][] = [];
+          for (let i = start; i < end; i++) {
+            const [, said] = makeLine(i);
+            lines.push([`rec-1.1.${i}`, said]);
+          }
+          return {
+            version: 1,
+            value: {
+              view: 'Transcript',
+              data: { id: q.id, take: 1, chunk: q.chunk, total_lines: 2_560, total_chunks: 40, lines },
+            },
+          };
+        }
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    const { container } = render(<ReaderPage id="rec-1" lineKey="rec-1.1.130" />);
+
+    await waitFor(() => {
+      expect(queriedChunks).toContain(2); // Math.floor(130 / 64) === 2
+      const hitRow = container.querySelector('li[data-line-key="rec-1.1.130"]');
+      expect(hitRow).toBeTruthy();
+      expect(hitRow?.classList.contains('hit')).toBe(true);
+    });
   });
 });
