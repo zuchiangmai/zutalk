@@ -267,7 +267,7 @@ enum SyncKind {
     Refined { id: String, shelf_by: String },
     RefineFailed { id: String, shelf_by: String, failure: RefineFailure },
     FilingUpdated { id: String, state: String },
-    Migrated,
+    Migrated { by: String },
 }
 
 /// Ordered handle allowing background tasks (recording, refine, file, migrate) to sync the
@@ -320,8 +320,8 @@ impl IndexSync {
         self.run(SyncKind::FilingUpdated { id, state }).await;
     }
 
-    pub(crate) async fn migrated(&self) {
-        self.run(SyncKind::Migrated).await;
+    pub(crate) async fn migrated(&self, by: String) {
+        self.run(SyncKind::Migrated { by }).await;
     }
 }
 
@@ -1741,6 +1741,9 @@ impl Work {
     pub(crate) fn migrate(&self, me: String) -> bool {
         let Some(old) = self.config.old.clone() else { return false };
         let Ok(shelf) = snapshot(&self.identity).shelf else { return false };
+        if shelf.by() != me {
+            return false;
+        }
         let data = self.config.data.clone();
         let results = self.results.clone();
         let progress_reg = self.progress_reg.clone();
@@ -1759,6 +1762,7 @@ impl Work {
             info!("job.start", kind = "move", job = seq, waited_ms = waited_ms);
             let started = std::time::Instant::now();
             let reg_cb = progress_reg.clone();
+            let me_run = me.clone();
             let outcome = tree
                 .blocking("job.move", move || {
                     let progress = |p: migrate::Progress| {
@@ -1766,18 +1770,46 @@ impl Work {
                             Writing { id: p.id, step: p.step.into(), done: p.done, of: p.of };
                         set_move_progress(&reg_cb, Some(writing));
                     };
-                    migrate::run((&old, &data), &shelf, &me, now, progress)
+                    migrate::run_report((&old, &data), &shelf, &me_run, now, progress)
                 })
                 .await;
             let ms = started.elapsed().as_millis() as u64;
             let moved = match outcome {
-                Ok(Ok(skipped)) => {
+                Ok(Ok(report)) => {
+                    let skipped_n = report.skipped.len() as u32;
                     info!("job.done", kind = "move", job = seq, code = "ok", ms = ms);
+                    if skipped_n == 0 {
+                        info!(
+                            "migrate.done",
+                            moved = report.moved,
+                            already = report.already,
+                            skipped = skipped_n,
+                            code = "ok",
+                            ms = ms,
+                        );
+                    } else {
+                        warn!(
+                            "migrate.done",
+                            moved = report.moved,
+                            already = report.already,
+                            skipped = skipped_n,
+                            code = "ok",
+                            ms = ms,
+                        );
+                    }
                     jobs_done.add(1);
-                    Ok(skipped)
+                    Ok(report.skipped)
                 }
                 Ok(Err(c)) => {
                     warn!("job.done", kind = "move", job = seq, code = c, ms = ms);
+                    warn!(
+                        "migrate.done",
+                        moved = 0u32,
+                        already = 0u32,
+                        skipped = 0u32,
+                        code = c,
+                        ms = ms,
+                    );
                     jobs_failed.add(1);
                     Err(c)
                 }
@@ -1787,15 +1819,23 @@ impl Work {
                         return;
                     }
                     warn!("job.done", kind = "move", job = seq, code = "panic", ms = ms);
+                    warn!(
+                        "migrate.done",
+                        moved = 0u32,
+                        already = 0u32,
+                        skipped = 0u32,
+                        code = "panic",
+                        ms = ms,
+                    );
                     jobs_failed.add(1);
                     Err("panic")
                 }
             };
             if moved.is_ok() {
-                index_sync.migrated().await;
+                index_sync.migrated(me.clone()).await;
             }
             set_move_progress(&progress_reg, None);
-            let _ = results.send(Msg::Moved(moved)).await; // dropped: the hub has ended
+            let _ = results.send(Msg::Moved(me, moved)).await; // dropped: the hub has ended
         });
         true
     }
@@ -2563,12 +2603,16 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<
             env.views.invalidate(ViewKind::Outbound, None);
             (None, None)
         }
-        SyncKind::Migrated => {
-            env.with_index(|idx| {
-                let _ = idx.reconcile(&shelf, &tapes); // dropped: next boot reconciles if sqlite failed
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
+        SyncKind::Migrated { by } => {
+            if shelf.by() == by {
+                env.with_index(|idx| {
+                    let _ = idx.reconcile(&shelf, &tapes); // dropped: next boot reconciles if sqlite failed
+                });
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Search, None);
+                env.views.invalidate(ViewKind::Recording, None);
+                env.views.invalidate(ViewKind::Transcript, None);
+            }
             (None, None)
         }
     }

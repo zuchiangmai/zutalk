@@ -145,6 +145,7 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `host.recover` | info；失败时 warn | 启动或登录发现遗留 `host.lock` 后自动发 `gone` 清理结束时发出 | `code`（`ok` / `gone` 或失败码） |
 | `write.skipped` | info | 有音频的草稿因无钥匙可取（`keys.none`）未送去整场转写，留在现场稿等待时发出 | `n` `why`（`keys.none`） |
 | `refine.state` | info；到 `Failed` 时 warn | 整场精修状态机 `RefineStatus` 切换时发出（`Draft` / `Refining` / `Refined` / `Failed`） | `rec` `from` `to` `why` `take` |
+| `migrate.done` | info；有跳过项或失败时 warn | 0.8 资料库后台搬运任务（`job.move`）结束时发出（绝不含录音标题、id、路径或 DID） | `moved`（本次新搬入条数） `already`（书架已存在含墓碑条数） `skipped`（失败跳过条数） `code`（`ok` 或失败码） `ms` |
 | `diagnose.wrote` | info | `desk` 原子写完一份自检包并清理超额旧包后发出 | `files`（包内文件总数） `bytes`（总字节数） |
 
 ### 投影索引与查询（view）

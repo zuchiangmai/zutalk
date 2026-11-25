@@ -277,3 +277,144 @@ fn a_library_not_handed_over_is_said_and_it_goes_to_one_person() {
     assert_eq!((moved, told), (Ok(vec![]), vec![]));
     assert!(shelf(data.path(), SOMEONE).list().unwrap().is_empty());
 }
+
+#[test]
+fn safe_paths_and_unmoved_cap_rules() {
+    let name_cases = [
+        ("3b1f6c1e-8d7a-4c55-9a51-0c3f2f6b8a01", true),
+        ("rec_001.v1", true),
+        ("", false),
+        (".", false),
+        ("..", false),
+        ("../escape", false),
+        ("nested/name", false),
+        ("nested\\name", false),
+        ("/abs", false),
+        ("name/", false),
+    ];
+    for (name, ok) in name_cases {
+        assert_eq!(migrate::safe_recording_name(name), ok, "safe_recording_name({name:?})");
+    }
+
+    let path_cases = [
+        ("audio/rec1/chunk.00000.enc", true),
+        ("chunk.00000.enc", true),
+        ("", false),
+        (".", false),
+        ("..", false),
+        ("../secret.enc", false),
+        ("audio/../secret.enc", false),
+        ("audio/./chunk.00000.enc", false),
+        ("/etc/passwd", false),
+        ("audio\\rec1\\chunk.00000.enc", false),
+        ("audio/rec1/", false),
+        ("audio//chunk.00000.enc", false),
+    ];
+    for (path, ok) in path_cases {
+        assert_eq!(migrate::safe_chunk_path(path), ok, "safe_chunk_path({path:?})");
+    }
+
+    assert!(migrate::cap_unmoved(vec![]).is_empty());
+    let small: Vec<(String, String)> =
+        (0..5).map(|i| (format!("t{i}"), "migrate.audio".into())).collect();
+    assert_eq!(migrate::cap_unmoved(small.clone()), small);
+
+    let exact: Vec<(String, String)> = (0..migrate::STATE_UNMOVED_MAX_ROWS)
+        .map(|i| (format!("t{i}"), "migrate.handover".into()))
+        .collect();
+    assert_eq!(migrate::cap_unmoved(exact.clone()).len(), migrate::STATE_UNMOVED_MAX_ROWS);
+
+    let huge: Vec<(String, String)> = (0..migrate::STATE_UNMOVED_MAX_ROWS + 18)
+        .map(|i| (format!("t{i}"), "migrate.handover".into()))
+        .collect();
+    let capped = migrate::cap_unmoved(huge.clone());
+    assert_eq!(capped.len(), migrate::STATE_UNMOVED_MAX_ROWS);
+    assert_eq!(capped, huge[..migrate::STATE_UNMOVED_MAX_ROWS]);
+}
+
+#[test]
+fn corrupt_audio_edge_cases_are_rejected_without_oom() {
+    type AudioCase = (&'static str, fn(&Path));
+    let cases: [AudioCase; 3] = [
+        ("empty chunks list", |old| {
+            let path = old.join(format!("handover/recordings/{LIVE}.json"));
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            v["audio"]["chunks"] = serde_json::json!([]);
+            fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        }),
+        ("chunk path traversal outside old dir", |old| {
+            let path = old.join(format!("handover/recordings/{LIVE}.json"));
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            v["audio"]["chunks"][0]["path"] = serde_json::json!("../secret.enc");
+            fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        }),
+        ("t_ms exceeding MIGRATE_MAX_AUDIO_MS", |old| {
+            let path = old.join(format!("handover/recordings/{LIVE}.json"));
+            let mut v: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let over = (migrate::MIGRATE_MAX_AUDIO_MS as u32) + 1_000;
+            v["audio"]["chunks"][1]["t_ms"] = serde_json::json!(over);
+            fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        }),
+    ];
+
+    for (what, mutate) in cases {
+        let (old, data) = fixture();
+        mutate(old.path());
+        let id = here(old.path(), LIVE);
+        let (moved, _) = run(old.path(), data.path(), ME);
+        assert_eq!(moved, Ok(vec![("Weekly sync".into(), "migrate.audio".into())]), "{what}");
+        let s = shelf(data.path(), ME);
+        assert!(s.about(&id).unwrap().is_none(), "{what}: recording must not be shelved");
+        assert!(!data.path().join("tape").join(&id).exists(), "{what}: no residual tape dir");
+        assert_eq!(s.list().unwrap().len(), 2, "{what}: other recordings still moved");
+    }
+}
+
+#[test]
+fn run_report_counts_moved_already_and_skipped_accurately() {
+    let (old, data) = fixture();
+    fs::remove_file(old.path().join(format!("audio/{LIVE}/chunk.00001.enc"))).unwrap();
+
+    let s = shelf(data.path(), ME);
+    let first = migrate::run_report((old.path(), data.path()), &s, ME, || NOW, |_| {})
+        .expect("first run succeeds with partial skip");
+    assert_eq!(
+        first,
+        migrate::MoveReport {
+            moved: 2,
+            already: 0,
+            skipped: vec![("Weekly sync".into(), "migrate.audio".into())],
+        }
+    );
+
+    // moved.json written atomically with no leftover temp sibling.
+    assert!(data.path().join("moved.json").exists());
+    assert!(!data.path().join("moved.json.tmp").exists());
+    let owner: serde_json::Value =
+        serde_json::from_slice(&fs::read(data.path().join("moved.json")).unwrap()).unwrap();
+    assert_eq!(owner["to"], ME);
+
+    let second = migrate::run_report((old.path(), data.path()), &s, ME, || NOW, |_| {})
+        .expect("second run is idempotent");
+    assert_eq!(
+        second,
+        migrate::MoveReport {
+            moved: 0,
+            already: 2,
+            skipped: vec![("Weekly sync".into(), "migrate.audio".into())],
+        }
+    );
+
+    // Removing a migrated recording leaves a tombstone that still counts as already known.
+    let imported_id = here(old.path(), IMPORTED);
+    s.put::<About>(&imported_id, RECORDING, &[(imported_id.clone(), None)], NOW).unwrap();
+    let third = migrate::run_report((old.path(), data.path()), &s, ME, || NOW, |_| {})
+        .expect("third run does not resurrect removed recording");
+    assert_eq!(third.moved, 0);
+    assert_eq!(third.already, 2);
+    assert_eq!(third.skipped, vec![("Weekly sync".into(), "migrate.audio".into())]);
+    assert!(s.about(&imported_id).unwrap().is_none());
+}

@@ -18,12 +18,57 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::ErrorKind;
-use std::path::Path;
+use std::io::{ErrorKind, Write};
+use std::path::{Component, Path};
 use zeroize::{Zeroize, Zeroizing};
 
 /// The handover this version reads.
 const VERSION: u32 = 1;
+
+/// 12-hour cap per migrated recording prevents corrupt `t_ms` values from triggering OOM (`P7.md` §3.2).
+pub const MIGRATE_MAX_AUDIO_MS: u64 = 12 * 60 * 60 * 1_000;
+/// 10 s at 16 kHz: stream silence gaps in bounded chunks instead of one giant `Vec` (`P7.md` §3.2).
+const MIGRATE_SILENCE_CHUNK_SAMPLES: usize = 160_000;
+/// Bounds `State.unmoved` under I8 even when many handover entries fail (`P7.md` §3.2).
+pub const STATE_UNMOVED_MAX_ROWS: usize = 32;
+
+/// Pure check: a handover recording name must be a single relative path component with no slashes.
+pub fn safe_recording_name(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let mut comps = Path::new(name).components();
+    matches!((comps.next(), comps.next()), (Some(Component::Normal(_)), None))
+}
+
+/// Pure check: a handover audio chunk path must stay strictly inside `old` with normal segments.
+pub fn safe_chunk_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\\') || path.starts_with('/') || path.ends_with('/') {
+        return false;
+    }
+    if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return false;
+    }
+    let mut comps = Path::new(path).components();
+    let Some(first) = comps.next() else {
+        return false;
+    };
+    matches!(first, Component::Normal(_)) && comps.all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// Bounds the failure list placed into `State.unmoved` so small-state size stays O(1) (`I8`).
+pub fn cap_unmoved(mut skipped: Vec<(String, String)>) -> Vec<(String, String)> {
+    skipped.truncate(STATE_UNMOVED_MAX_ROWS);
+    skipped
+}
+
+/// Summary returned by [`run_report`] so callers can log counts without leaking titles or ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveReport {
+    pub moved: u32,
+    pub already: u32,
+    pub skipped: Vec<(String, String)>,
+}
 
 /// What one stored sample is worth.
 type Sample = fn(&[u8]) -> f32;
@@ -117,23 +162,33 @@ pub struct Progress {
     pub of: u32,
 }
 
+/// Atomically writes `<data>/moved.json` via temporary sibling file + `sync_all` + `rename`.
+fn write_owner(data: &Path, me: &str) -> Result<(), &'static str> {
+    fs::create_dir_all(data).map_err(|_| "shelf")?;
+    let json = serde_json::to_vec(&Owner { to: me.into() }).map_err(|_| "shelf")?;
+    let tmp = data.join("moved.json.tmp");
+    let mut file = fs::File::create(&tmp).map_err(|_| "shelf")?;
+    file.write_all(&json).and_then(|()| file.sync_all()).map_err(|_| "shelf")?;
+    fs::rename(tmp, data.join("moved.json")).map_err(|_| "shelf")
+}
+
 /// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not
-/// here yet, telling `progress` of each. Returns those it could not move, each by its title
-/// there and a code. `Err`: none could be.
-pub fn run(
+/// here yet, telling `progress` of each. Returns counts plus those it could not move, each by
+/// its title there and a code. `Err`: none could be.
+pub fn run_report(
     (old, data): (&Path, &Path),
     shelf: &Shelf,
     me: &str,
     now: impl Fn() -> i64,
     mut progress: impl FnMut(Progress),
-) -> Result<Vec<(String, String)>, &'static str> {
+) -> Result<MoveReport, &'static str> {
     let handover = old.join("handover");
     let index = match fs::read(handover.join("index.json")) {
         // A library that was never handed over is said; none at all is nothing to move.
         Err(e) if e.kind() == ErrorKind::NotFound && old.join("zutalk.db").exists() => {
             return Err("migrate.missing");
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(MoveReport::default()),
         read => read.map_err(|_| "migrate.handover")?,
     };
     let index: Index = serde_json::from_slice(&index).map_err(|_| "migrate.handover")?;
@@ -143,35 +198,54 @@ pub fn run(
     // It goes to one person: whoever signs in here later finds nothing to move.
     let owner = data.join("moved.json");
     match fs::read(&owner).map(|json| serde_json::from_slice::<Owner>(&json)) {
-        Ok(Ok(owner)) if owner.to != me => return Ok(Vec::new()),
+        Ok(Ok(owner)) if owner.to != me => return Ok(MoveReport::default()),
         Ok(Ok(_)) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            let json = serde_json::to_vec(&Owner { to: me.into() }).map_err(|_| "shelf")?;
-            fs::create_dir_all(data).and_then(|()| fs::write(&owner, json)).map_err(|_| "shelf")?;
-        }
+        Err(e) if e.kind() == ErrorKind::NotFound => write_owner(data, me)?,
         _ => return Err("shelf"),
     }
-    let (of, mut skipped) = (index.recordings.len() as u32, Vec::new());
+    let of = index.recordings.len() as u32;
+    let mut report = MoveReport::default();
     for (done, name) in index.recordings.iter().enumerate() {
+        if !safe_recording_name(name) {
+            report.skipped.push((String::new(), "migrate.handover".into()));
+            continue;
+        }
         let file = handover.join("recordings").join(format!("{name}.json"));
         let handed = fs::read(file).ok().and_then(|json| serde_json::from_slice(&json).ok());
         let Some(handed) = handed.filter(|handed: &Handed| handed.version == VERSION) else {
-            skipped.push((String::new(), "migrate.handover".into()));
+            report.skipped.push((String::new(), "migrate.handover".into()));
             continue;
         };
         let id = handed.id();
         if shelf.known(&id).map_err(|_| "shelf")? {
+            report.already += 1;
             continue;
         }
         progress(Progress { id: id.clone(), step: "moving", done: done as u32, of });
-        if let Err(code) = shelve((old, data), shelf, &handed, &id, &now) {
-            // Its sound stays where 0.8 has it; a tape of it here would belong to nothing.
-            // One left behind is cleared by the next attempt, before anything else.
-            let _ = fs::remove_dir_all(data.join("tape").join(&id)); // dropped: if removal fails, the next migration attempt clears it first
-            skipped.push((handed.about.title.clone(), code.into()));
+        match shelve((old, data), shelf, &handed, &id, &now) {
+            Ok(()) => report.moved += 1,
+            Err(code) => {
+                // Its sound stays where 0.8 has it; a tape of it here would belong to nothing.
+                // One left behind is cleared by the next attempt, before anything else.
+                let _ = fs::remove_dir_all(data.join("tape").join(&id)); // dropped: if removal fails, the next migration attempt clears it first
+                report.skipped.push((handed.about.title.clone(), code.into()));
+            }
         }
     }
-    Ok(skipped)
+    Ok(report)
+}
+
+/// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not
+/// here yet, telling `progress` of each. Returns those it could not move, each by its title
+/// there and a code. `Err`: none could be.
+pub fn run(
+    (old, data): (&Path, &Path),
+    shelf: &Shelf,
+    me: &str,
+    now: impl Fn() -> i64,
+    progress: impl FnMut(Progress),
+) -> Result<Vec<(String, String)>, &'static str> {
+    run_report((old, data), shelf, me, now, progress).map(|report| report.skipped)
 }
 
 /// One recording: its audio sealed on its tape, then its records, the last one last.
@@ -235,6 +309,9 @@ fn old_key(old: &Path, name: &str) -> Result<Zeroizing<[u8; 32]>, &'static str> 
 /// Opens each chunk with the 0.8 key and seals it again on the tape at `dir`, 100 ms at a time:
 /// the plain audio is nowhere but here, in memory. Returns the tape's length in ms.
 fn reseal(old: &Path, audio: &Audio, dir: &Path, key: &[u8; 32]) -> Result<u32, &'static str> {
+    if audio.chunks.is_empty() {
+        return Err("migrate.audio");
+    }
     let cipher = Aes256Gcm::new((&*old_key(old, &audio.key)?).into());
     let format = FORMATS.iter().find(|(name, ..)| *name == audio.format);
     let (&(_, size, value), channels) = (format.ok_or("migrate.audio")?, audio.channels as usize);
@@ -251,10 +328,19 @@ fn reseal(old: &Path, audio: &Audio, dir: &Path, key: &[u8; 32]) -> Result<u32, 
         made.drain(..).try_for_each(|block| tape.append(&block)).map_err(|_| "tape")
     };
     for chunk in &audio.chunks {
-        // A stretch 0.8 no longer had is silence, so that the text still meets its sound.
-        let from = (chunk.t_ms as u64 * RATE / 1_000) as usize;
-        pcm.resize(from.saturating_sub(at), 0);
+        if !safe_chunk_path(&chunk.path) || u64::from(chunk.t_ms) > MIGRATE_MAX_AUDIO_MS {
+            return Err("migrate.audio");
+        }
         let bytes = fs::read(old.join(&chunk.path)).map_err(|_| "migrate.audio")?;
+        // A stretch 0.8 no longer had is silence, streamed in bounded chunks to avoid OOM.
+        let from = (u64::from(chunk.t_ms) * RATE / 1_000) as usize;
+        let mut gap = from.saturating_sub(at);
+        while gap > 0 {
+            let step = gap.min(MIGRATE_SILENCE_CHUNK_SAMPLES);
+            pcm.resize(step, 0);
+            seal(&mut pcm, &mut at)?;
+            gap -= step;
+        }
         let mut rest = bytes.as_slice();
         // Records of a length, then a nonce and what it seals.
         while let Some((length, tail)) = rest.split_first_chunk::<4>() {

@@ -24,6 +24,7 @@ use crate::live::lane::{self, Mode};
 use crate::out::city::{Calendar, Filing};
 use crate::out::export::EXPORTERS;
 use crate::out::host::{HostStepEvent, host_step};
+use crate::record::migrate;
 use crate::record::shelf::{About, TitleBy, TitleCandidate};
 use crate::record::takes::RefineStatus;
 use crate::rt::queue::Rx;
@@ -129,7 +130,7 @@ pub(crate) enum Msg {
     FilingReady(String, Filing),
     Filed(String, &'static str),
     Claimed(Result<(), &'static str>),
-    Moved(Result<Vec<(String, String)>, &'static str>),
+    Moved(String, Result<Vec<(String, String)>, &'static str>),
     OwnKeyDone(Result<OwnKeyOut, &'static str>),
 }
 
@@ -167,7 +168,7 @@ impl Msg {
             Msg::FilingReady(_, _) => "FilingReady",
             Msg::Filed(_, _) => "Filed",
             Msg::Claimed(_) => "Claimed",
-            Msg::Moved(_) => "Moved",
+            Msg::Moved(_, _) => "Moved",
             Msg::OwnKeyDone(_) => "OwnKeyDone",
         }
     }
@@ -435,6 +436,7 @@ impl Hub {
     }
 
     fn apply_signed(&mut self, out: SignedOut) {
+        self.state.unmoved.clear();
         for c in out.say {
             self.said.say(c);
         }
@@ -599,9 +601,14 @@ impl Hub {
                 done?;
                 self.mark_dirty();
             }
-            Msg::Moved(skipped) => {
+            Msg::Moved(by, skipped) => {
                 self.moving = false;
-                self.state.unmoved = skipped?;
+                if self.state.me.as_deref() != Some(by.as_str()) {
+                    let _ = skipped; // dropped: stale migration result from previous identity
+                    self.migrate();
+                } else {
+                    self.state.unmoved = migrate::cap_unmoved(skipped?);
+                }
             }
             Msg::OwnKeyDone(res) => match res {
                 Ok(out) => {
@@ -811,6 +818,7 @@ impl Hub {
                 self.set_auth(AuthEvent::Cancelled, "sign_out");
                 self.state.handle = None;
                 self.state.quota = None;
+                self.state.unmoved.clear();
                 self.work.sign_out(self.state.setup.keep, self.busy_ids())?;
             }
             Command::CopyRotation => self.work.copy_rotation()?,
