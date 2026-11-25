@@ -883,26 +883,11 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
     }
     app.send(Command::Stop);
     viewer.until(|event, plain| (event == "slot" && plain.is_none()).then_some(())).await;
-    // A recording's room holds its text in the log.
-    app.send(Command::Share { recording: Some(id.clone()) });
-    let state = app.until(|state| state.rooms.len() == 2).await;
-    let room = state.rooms.iter().find(|room| room.recording.as_ref() == Some(&id)).cloned();
-    let mut reader = Viewer::open(&room.expect("a room for it").link).await;
-    let page = reader.until(|event, plain| {
-        (event == "log").then(|| serde_json::from_slice::<serde_json::Value>(plain?).ok())?
-    });
-    let page = page.await;
-    assert_eq!(
-        (page["row"]["id"].as_str(), page["lines"][0][1]["text"].as_str()),
-        (Some(&*id), Some("Hello"))
-    );
-    // One room for a recording is enough: shared again, it is the same one.
-    app.send(Command::Share { recording: Some(id.clone()) });
-    // Taken away: whoever was watching is told, and the list keeps the other room.
+    // Taken away: whoever was watching is told, and the live room is removed.
     app.send(Command::Unshare { room: live.id.clone() });
     viewer.until(|event, _| (event == "gone").then_some(())).await;
-    let state = app.until(|state| state.rooms.len() == 1).await;
-    assert_eq!(state.rooms[0].recording.as_ref(), Some(&id));
+    let state = app.until(|state| state.rooms.is_empty()).await;
+    assert!(state.rooms.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

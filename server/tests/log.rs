@@ -47,10 +47,12 @@ async fn a_request_leaves_its_route_its_status_and_no_more() {
 fn a_sweep_is_noted_at_debug() {
     let bench = bench();
     let seen = capture(Level::Debug);
-    bench.server.sweep(now());
+    let removed = bench.server.sweep(now());
+    assert_eq!(removed, 0);
     let sweeps = seen.of("server.sweep");
     assert_eq!(sweeps.len(), 1, "expected one server.sweep event: {sweeps:?}");
     assert_eq!(sweeps[0].level, Level::Debug);
-    assert_eq!(sweeps[0].names(), ["ms"]);
+    assert_eq!(sweeps[0].names(), ["ms", "removed"]);
+    assert_eq!(sweeps[0].u64("removed"), Some(0));
     assert_eq!(seen.refused(), 0);
 }

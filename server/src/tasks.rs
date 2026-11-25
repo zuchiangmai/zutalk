@@ -4,17 +4,29 @@
 use std::future::Future;
 use std::time::Instant;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zutalk_log::info;
 
 #[derive(Default)]
 pub struct Tasks {
     tracker: TaskTracker,
+    token: CancellationToken,
 }
 
 impl Tasks {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Child token cancelled when `cancel` or `wait` runs, for long-lived server loops.
+    pub fn token(&self) -> CancellationToken {
+        self.token.child_token()
+    }
+
+    /// Signal all long-lived supervised server tasks to stop.
+    pub fn cancel(&self) {
+        self.token.cancel();
     }
 
     /// Run a named server task inside the tracker, carrying the active log capture and recording
@@ -34,8 +46,9 @@ impl Tasks {
         }))
     }
 
-    /// Close the tracker and wait for all in-flight ledger tasks to finish.
+    /// Cancel long-lived tasks, close the tracker, and wait for all in-flight tasks to finish.
     pub async fn wait(&self) {
+        self.token.cancel();
         self.tracker.close();
         self.tracker.wait().await;
     }

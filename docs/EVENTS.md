@@ -203,7 +203,7 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 |---|---|---|---|
 | `server.start` | info | 服务器装好日志后写出的第一行 | `version` |
 | `server.request` | info；状态 ≥ 500 时 warn | 服务器答完一个 HTTP 请求时由中间件发出（不带路径参数与正文） | `route`（`ROUTES` 表代码，未命中为 `none`） `status` `ms` |
-| `server.sweep` | debug | 服务器执行一次过期房间清扫后发出 | `ms` |
+| `server.sweep` | debug | 服务器执行一次过期房间清扫后发出 | `ms` `removed` |
 
 ## 出了事先看什么
 

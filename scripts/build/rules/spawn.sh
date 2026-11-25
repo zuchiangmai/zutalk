@@ -14,7 +14,6 @@ debt='
 
 # Server uses checked in the phase that touches the server (P1.md §3.13.12).
 later='
-server/src/lib.rs 1 P5
 '
 
 files=$(find core/src app/src server/src -name '*.rs' | sort)

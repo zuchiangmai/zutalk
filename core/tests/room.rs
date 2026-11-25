@@ -96,29 +96,30 @@ async fn whoever_has_the_link_reads_what_the_owner_wrote_and_nobody_else_writes(
     let (server, dir) = serve().await;
     let (owner, other, id) = (ours(&server, 1), ours(&server, 2), "c".repeat(32));
     write(&owner, &id, &KEY, Write::Make).await.unwrap();
-    write(&owner, &id, &KEY, Write::Log(b"the first line")).await.unwrap();
     write(&owner, &id, &KEY, Write::Slot(Some(b"being said"))).await.unwrap();
     assert_eq!(
-        write(&other, &id, &KEY, Write::Log(b"not theirs")).await,
+        write(&other, &id, &KEY, Write::Slot(Some(b"not theirs"))).await,
         Err(End::Fatal("room.owner"))
     );
     let mut viewer = Viewer::open(&link(&server, &id, &KEY)).await;
-    assert_eq!(viewer.next().await, Some(("log".into(), Ok(Some(b"the first line".to_vec())))));
     assert_eq!(viewer.next().await, Some(("slot".into(), Ok(Some(b"being said".to_vec())))));
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     write(&owner, &id, &KEY, Write::Slot(None)).await.unwrap();
     assert_eq!(viewer.next().await, Some(("slot".into(), Ok(None))));
     // Without the key, nothing opens.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    write(&owner, &id, &KEY, Write::Slot(Some(b"secret words"))).await.unwrap();
+    assert_eq!(viewer.next().await, Some(("slot".into(), Ok(Some(b"secret words".to_vec())))));
     let mut guess = Viewer::open(&link(&server, &id, &[0; 32])).await;
-    assert_eq!(guess.next().await, Some(("log".into(), Err(()))));
-    // No word of it is on the server's disk.
-    let mut disk = Vec::new();
-    for file in std::fs::read_dir(dir.path().join("rooms")).unwrap() {
-        disk.extend(std::fs::read(file.unwrap().path()).unwrap());
-    }
-    assert!(!String::from_utf8_lossy(&disk).contains("line"));
+    assert_eq!(guess.next().await, Some(("slot".into(), Err(()))));
+    // Ephemeral slot rooms never create a `rooms/` folder on the server's disk.
+    assert!(!dir.path().join("rooms").exists());
     write(&owner, &id, &KEY, Write::Gone).await.unwrap();
     assert_eq!(viewer.next().await, Some(("gone".into(), Ok(None))));
-    assert_eq!(write(&owner, &id, &KEY, Write::Log(b"after")).await, Err(End::Fatal("room.gone")));
+    assert_eq!(
+        write(&owner, &id, &KEY, Write::Slot(Some(b"after"))).await,
+        Err(End::Fatal("room.gone"))
+    );
     // A server that is not there is trouble that may pass.
     let away = ours("http://127.0.0.1:9", 1);
     assert_eq!(write(&away, &id, &KEY, Write::Make).await, Err(End::Retry("offline")));

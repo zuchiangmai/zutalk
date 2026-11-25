@@ -14,6 +14,10 @@ pub use crate::ledger::{
     DAY_MS, DEFAULT_DAILY_OPENROUTER_TIMES, DEFAULT_DAILY_SONIOX_TIMES, Invites, Minted,
     OpenRouter, QuotaReport, Service, ServiceDaily, Soniox, Upstream, daily_service, day_bounds,
 };
+pub use crate::room::{
+    ROOM_IDLE_TTL_MS, ROOM_MAX_PER_OWNER, ROOM_MAX_SLOT_BYTES, ROOM_MAX_VIEWERS, SlotState,
+    room_expired,
+};
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{Next, from_fn, map_response};
@@ -53,8 +57,11 @@ pub struct Config {
 
 impl Config {
     pub fn new(origin: &str, data: impl Into<PathBuf>, coordinators: Vec<String>) -> Config {
-        let (origin, data, room) =
-            (origin.into(), data.into(), (8 << 20, 100, 500, 30 * 86_400_000));
+        let (origin, data, room) = (
+            origin.into(),
+            data.into(),
+            (ROOM_MAX_SLOT_BYTES, ROOM_MAX_PER_OWNER, ROOM_MAX_VIEWERS, ROOM_IDLE_TTL_MS),
+        );
         Config {
             origin,
             data,
@@ -109,7 +116,7 @@ impl Server {
         directory: Arc<dyn Directory>,
         upstreams: [Arc<dyn Upstream>; 2],
     ) -> Result<Arc<Server>, zu::Error> {
-        std::fs::create_dir_all(config.data.join("rooms"))?;
+        std::fs::create_dir_all(&config.data)?;
         let slices = [upstreams[0].slice(), upstreams[1].slice()];
         let second = upstreams[Service::Soniox as usize].per_second();
         let book = Mutex::new(ledger::Book::open(
@@ -118,28 +125,44 @@ impl Server {
             second,
             config.daily,
         )?);
-        let rooms = Mutex::new(room::open_all(&config.data.join("rooms"))?);
         Ok(Arc::new(Server {
             config,
             directory,
             upstreams,
             book,
-            rooms,
+            rooms: Mutex::new(HashMap::new()),
             relay: Mutex::default(),
             tasks: tasks::Tasks::new(),
         }))
     }
 
-    /// Wait for all supervised ledger tasks to finish cleanly.
+    /// Start the supervised idle-room sweeper task (`server.sweep`).
+    pub fn start_sweeper(self: &Arc<Self>) {
+        let sweeper = self.clone();
+        let cancel = self.tasks.token();
+        self.tasks.spawn("server.sweep", async move {
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(SWEEP_EVERY_MS)) => {
+                        sweeper.sweep(now());
+                    }
+                }
+            }
+        });
+    }
+
+    /// Wait for all supervised server tasks to cancel and finish cleanly.
     pub async fn shutdown(&self) {
         self.tasks.wait().await;
     }
 
     /// What time does by itself: rooms not written to for too long are removed.
-    pub fn sweep(&self, now: i64) {
+    pub fn sweep(&self, now: i64) -> usize {
         let started = Instant::now();
-        room::sweep(self, now);
-        debug!("server.sweep", ms = started.elapsed().as_millis() as u64);
+        let removed = room::sweep(self, now);
+        debug!("server.sweep", ms = started.elapsed().as_millis() as u64, removed = removed as u64);
+        removed
     }
 
     /// The record in `sent`, checked: of type `ty`, its body the one signed, by one of `only`
@@ -246,19 +269,15 @@ pub fn app(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
-/// How often the rooms are swept: once a minute. Origin to be traced.
-const SWEEP_EVERY_MS: u64 = 60_000;
+/// Sweep idle rooms every 30 s so the 2-minute inactivity TTL expires promptly (`PLAN.md` §5.5).
+const SWEEP_EVERY_MS: u64 = 30_000;
 
 /// Serve on `listener`, and sweep every `SWEEP_EVERY_MS`, until the process ends.
 pub async fn serve(listener: tokio::net::TcpListener, server: Arc<Server>) -> std::io::Result<()> {
-    let sweeper = server.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(SWEEP_EVERY_MS)).await;
-            sweeper.sweep(now());
-        }
-    });
-    axum::serve(listener, app(server)).await
+    server.start_sweeper();
+    let served = axum::serve(listener, app(server.clone())).await;
+    server.tasks.cancel();
+    served
 }
 
 /// Milliseconds since 1970, by this machine's clock.
