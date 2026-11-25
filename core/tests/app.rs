@@ -2733,3 +2733,53 @@ async fn signing_out_goes_back_to_the_device_off_the_hub() {
     }
     assert_eq!(app.seen.refused(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tape_that_cannot_be_read_fails_the_job_with_a_code() {
+    use zutalk_core::record::shelf::{About, RECORDING};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("a folder");
+    let now = wall_ms() as i64;
+    let id = "rec21badtape";
+    let shelf = hub::local_shelf(dir.path());
+    let about = About {
+        started: now,
+        length_ms: 2_000,
+        title: "Corrupt tape".into(),
+        spoken: vec!["en".into()],
+        shown: vec!["en".into()],
+        take: 0,
+        ..About::default()
+    };
+    shelf.put(id, RECORDING, &[(id.into(), Some(about))], now).expect("seed draft");
+    hub::tape(dir.path(), id, 2);
+
+    // Corrupt ciphertext inside the tape so decryption fails deterministically without touching the network.
+    let tape_file = std::fs::read_dir(dir.path().join("tape").join(id))
+        .expect("read tape dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("tape"))
+        .expect("at least one .tape file");
+    let mut bytes = std::fs::read(&tape_file).expect("read tape");
+    assert!(!bytes.is_empty());
+    bytes[0] ^= 0xff;
+    std::fs::write(&tape_file, &bytes).expect("corrupt tape");
+
+    let mut app = App::start(dir.path());
+    app.notice("tape").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !app
+        .seen
+        .of("job.done")
+        .iter()
+        .any(|l| l.text("kind") == Some("write") && l.text("code") == Some("tape"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "expected job.done(write, tape)");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.seen.refused(), 0);
+}

@@ -22,8 +22,6 @@ done
 
 # Debt: file, count, who pays it.
 debt='
-core/src/ai/write.rs 1 P1-21
-core/src/out/city.rs 1 P1-21
 '
 
 # Server uses checked in the phase that touches the server (P1.md §3.13.12).

@@ -123,6 +123,7 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `lane.reconnect` | info | 停了的 lane 因 `Command::Reconnect` 被重新起起来 | `lane` |
 | `job.start` | info | desk 或 `Work` 的一件活开始做 | `kind` `job`（递增序号；因行头已占 `seq`，字段名用 `job`） `waited_ms` |
 | `job.done` | info；`code != "ok"` 时 warn | desk 或 `Work` 的一件活做完。一条涉及 IO 的命令分为两段：先是 `command.done`（hub 收下并排活），再是对应的 `job.done`（活做完及其结果码）。`kind` 包含 `boot`、`settings`、`sign`、`signout`、`signin`、`create`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`search`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`sweep`、`write`、`move` | `kind` `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败代码） `ms` |
+| `job.again` | warn | 一件后台或重试中的活遇可恢复失败，退避等待后重试 | `kind` `why` `wait_ms` `n` |
 | `hub.boot` | info | hub 的启动与安装状态机 `Boot` 转换 | `from` `to`（`Starting` / `Ready` / `Installing`） `why`（`boot` / `update` / `update.install`） |
 | `boot.step` | info；失败时 warn | 启动的每一步完成（`devices` 另带 `n`，不含设备名） | `step`（`settings` / `identity` / `invites` / `devices`） `code` `ms`（`devices` 另带 `n`） |
 

@@ -7,15 +7,16 @@ use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zu::SecretKey;
 use zutalk_core::ai::write::{
-    Answer, Draft, GUARDS, Journal, MODELS, Owed, Plan, answers, ends, judge, lines, numbers, owed,
-    request, status, sweep, tokens, transcription, wav_header, write,
+    Answer, Draft, GUARDS, Journal, MODELS, Owed, Plan, WAV_QUEUE_CHUNKS, answers, ends, judge,
+    lines, numbers, owed, request, status, sweep, tokens, transcription, wav_header, write,
 };
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::capture::tape::Writer;
 use zutalk_core::id::keys::{Keys, Lease, Secret, Service};
 use zutalk_core::live::lines::{Line, Token};
 use zutalk_core::record::shelf::{About, RECORDING, Said, Shelf};
-use zutalk_core::rt::supervise::End;
+use zutalk_core::rt::stats::Stats;
+use zutalk_core::rt::supervise::{End, Tree};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const ID: &str = "kx7q2m5v4tbn3hpw";
@@ -682,6 +683,10 @@ fn read(recording: &Recording) -> zutalk_core::record::shelf::Recording {
     recording.shelf.read(ID).unwrap().unwrap()
 }
 
+fn test_tree() -> Tree {
+    Tree::root("test", Stats::new())
+}
+
 #[tokio::test]
 async fn a_written_take_replaces_the_draft_only_once_nothing_is_left_at_the_service() {
     let (log, recording) = (Log::default(), recording(2));
@@ -689,7 +694,9 @@ async fn a_written_take_replaces_the_draft_only_once_nothing_is_left_at_the_serv
     let plan = plan(&stt.uri(), &mt.uri(), &["zh"]);
     let steps = log.clone();
     let progress = move |step: &'static str, _, _| steps.lock().unwrap().push(step.into());
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -743,8 +750,16 @@ async fn a_remote_file_left_by_an_interrupted_write_is_deleted_by_the_next_sweep
         .mount(&stt)
         .await;
     let (plan, keys) = (plan(&stt.uri(), "http://127.0.0.1:9", &[]), Keyring::both());
-    let attempt =
-        write(&recording.shelf, (&recording.tape, &TAPE_KEY), &plan, &keys, || NOW, |_, _, _| {});
+    let tree = test_tree();
+    let attempt = write(
+        &tree,
+        &recording.shelf,
+        (&recording.tape, &TAPE_KEY),
+        &plan,
+        &keys,
+        || NOW,
+        |_, _, _| {},
+    );
     assert!(tokio::time::timeout(Duration::from_millis(1_500), attempt).await.is_err());
     let left = Journal::load(&recording.tape).unwrap();
     assert_eq!(
@@ -797,7 +812,9 @@ async fn nothing_is_written_while_the_audio_is_still_at_the_service() {
     let refused = ResponseTemplate::new(500);
     Mock::given(method("DELETE")).respond_with(refused).with_priority(1).mount(&stt).await;
     let plan = plan(&stt.uri(), "http://127.0.0.1:9", &[]);
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -824,7 +841,9 @@ async fn when_the_first_translator_fails_the_next_row_writes_and_is_named() {
     })
     .await;
     let plan = plan(&stt.uri(), &mt.uri(), &["zh"]);
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -847,7 +866,9 @@ async fn a_line_no_translator_can_make_out_is_asked_again_alone_then_stored_empt
     let stt = soniox(&log).await;
     let mt = openrouter(|_, lines| faithful(lines, "Thank you.")).await;
     let plan = plan(&stt.uri(), &mt.uri(), &["zh"]);
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -883,7 +904,9 @@ async fn translators_that_answer_out_of_form_leave_lines_unclear_and_ones_that_c
     })
     .await;
     let plan = plan(&stt.uri(), &mt.uri(), &["zh"]);
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -899,6 +922,7 @@ async fn translators_that_answer_out_of_form_leave_lines_unclear_and_ones_that_c
     let busy = openrouter(|_, _| ResponseTemplate::new(503)).await;
     let plan = Plan { openrouter: format!("{}/api/v1", busy.uri()), ..plan };
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -917,9 +941,17 @@ async fn without_a_key_nothing_is_sent_and_nothing_changes() {
     let stt = soniox(&log).await;
     let plan = plan(&stt.uri(), "http://127.0.0.1:9", &["zh"]);
     let keys = Keyring { openrouter: None, ..Keyring::both() };
-    let end =
-        write(&recording.shelf, (&recording.tape, &TAPE_KEY), &plan, &keys, || NOW, |_, _, _| {})
-            .await;
+    let tree = test_tree();
+    let end = write(
+        &tree,
+        &recording.shelf,
+        (&recording.tape, &TAPE_KEY),
+        &plan,
+        &keys,
+        || NOW,
+        |_, _, _| {},
+    )
+    .await;
     assert_eq!(end, End::Fatal("no-key"));
     assert!(stt.received_requests().await.unwrap().is_empty());
     assert_eq!(read(&recording).about.take, 0);
@@ -933,9 +965,17 @@ async fn a_refused_key_is_said_and_handed_back() {
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(401)).mount(&stt).await;
     let plan = plan(&stt.uri(), "http://127.0.0.1:9", &[]);
     let keys = Keyring::both();
-    let end =
-        write(&recording.shelf, (&recording.tape, &TAPE_KEY), &plan, &keys, || NOW, |_, _, _| {})
-            .await;
+    let tree = test_tree();
+    let end = write(
+        &tree,
+        &recording.shelf,
+        (&recording.tape, &TAPE_KEY),
+        &plan,
+        &keys,
+        || NOW,
+        |_, _, _| {},
+    )
+    .await;
     assert_eq!(end, End::Fatal("key-refused"));
     assert_eq!(*keys.refused.lock().unwrap(), [Service::Soniox]);
 }
@@ -944,7 +984,9 @@ async fn a_refused_key_is_said_and_handed_back() {
 async fn offline_is_said_and_nothing_changes() {
     let recording = recording(2);
     let plan = plan("http://127.0.0.1:9", "http://127.0.0.1:9", &[]);
+    let tree = test_tree();
     let end = write(
+        &tree,
         &recording.shelf,
         (&recording.tape, &TAPE_KEY),
         &plan,
@@ -955,6 +997,79 @@ async fn offline_is_said_and_nothing_changes() {
     .await;
     assert_eq!(end, End::Retry("offline"));
     assert_eq!(read(&recording).about.take, 0);
+}
+
+#[tokio::test]
+async fn reading_the_tape_is_a_named_task_and_its_queue_is_counted() {
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let (log, recording) = (Log::default(), recording(2));
+    let stt = soniox(&log).await;
+    let plan = plan(&stt.uri(), "http://127.0.0.1:9", &[]);
+    let stats = Stats::new();
+    let tree = Tree::root("test", stats.clone());
+    let end = write(
+        &tree,
+        &recording.shelf,
+        (&recording.tape, &TAPE_KEY),
+        &plan,
+        &Keyring::both(),
+        || NOW + 1,
+        |_, _, _| {},
+    )
+    .await;
+    assert_eq!(end, End::Done);
+    tree.wait().await;
+
+    let starts = seen.of("task.start");
+    assert!(
+        starts.iter().any(|l| l.text("task") == Some("write.wav")),
+        "expected task.start(write.wav), got {starts:?}"
+    );
+    let ends = seen.of("task.end");
+    assert!(
+        ends.iter().any(|l| l.text("task") == Some("write.wav") && l.text("code") == Some("done")),
+        "expected task.end(write.wav, done), got {ends:?}"
+    );
+    let tally = stats.tally();
+    let q = tally
+        .queues
+        .iter()
+        .find(|q| q.name == "write.wav")
+        .unwrap_or_else(|| panic!("expected write.wav queue in {:?}", tally.queues));
+    assert!(q.sent > 0, "expected sent > 0, got {q:?}");
+    assert!(
+        q.deepest <= WAV_QUEUE_CHUNKS as u64,
+        "expected deepest <= {WAV_QUEUE_CHUNKS}, got {q:?}"
+    );
+    assert_eq!(seen.refused(), 0);
+}
+
+#[tokio::test]
+async fn a_corrupted_tape_fails_write_with_tape_code() {
+    let recording = recording(2);
+    let tape_file = std::fs::read_dir(&recording.tape)
+        .expect("read tape dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("tape"))
+        .expect("at least one .tape file");
+    let mut bytes = std::fs::read(&tape_file).expect("read tape");
+    bytes[0] ^= 0xff;
+    std::fs::write(&tape_file, &bytes).expect("corrupt tape");
+
+    let plan = plan("http://127.0.0.1:9", "http://127.0.0.1:9", &[]);
+    let tree = test_tree();
+    let end = write(
+        &tree,
+        &recording.shelf,
+        (&recording.tape, &TAPE_KEY),
+        &plan,
+        &Keyring::both(),
+        || NOW,
+        |_, _, _| {},
+    )
+    .await;
+    assert_eq!(end, End::Fatal("tape"));
 }
 
 // ---- 5. the real service ----
@@ -1019,8 +1134,10 @@ async fn real_soniox_async_writes_a_take_and_leaves_nothing_behind() {
         openrouter: None,
         refused: Mutex::default(),
     };
+    let tree = test_tree();
     let end =
-        write(&shelf, (&tapes.join(&id), &TAPE_KEY), &plan, &keys, || NOW + 1, |_, _, _| {}).await;
+        write(&tree, &shelf, (&tapes.join(&id), &TAPE_KEY), &plan, &keys, || NOW + 1, |_, _, _| {})
+            .await;
     assert_eq!(end, End::Done);
     let written = shelf.read(&id).unwrap().unwrap();
     let languages: Vec<&str> =

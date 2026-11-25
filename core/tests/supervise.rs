@@ -7,9 +7,9 @@ use tokio::sync::oneshot;
 use tokio::time::{Instant, advance, sleep};
 use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::{
-    Backoff, Broke, Effect, End, Part, RESTARTS_MOST_TIMES, RESTARTS_PATIENCE_MS,
-    RESTARTS_WINDOW_MS, Restarts, Seen, TREE_MOST_TASKS, Tree, Watch, step, supervise,
-    thread as named_thread,
+    AGAIN_LONGEST_MS, AGAIN_MS, Backoff, Broke, Effect, End, Part, RESTARTS_MOST_TIMES,
+    RESTARTS_PATIENCE_MS, RESTARTS_WINDOW_MS, Restarts, Seen, TREE_MOST_TASKS, Tree, Watch, again,
+    again_wait_ms, step, supervise, thread as named_thread,
 };
 use zutalk_log::{Level, capture, info};
 
@@ -756,4 +756,51 @@ async fn a_kept_part_is_a_task_of_the_tree_and_its_restarts_are_counted() {
     assert_eq!(cap_tally.counts.iter().find(|c| c.name == "part.restarts").map(|c| c.n), Some(1));
     assert_eq!(cap_tally.counts.iter().find(|c| c.name == "part.gave_up").map(|c| c.n), Some(1));
     assert_eq!(seen.refused(), 0);
+}
+
+#[test]
+fn the_wait_before_trying_again_doubles_up_to_an_hour() {
+    let table = [
+        (1, AGAIN_MS),
+        (2, 2 * AGAIN_MS),
+        (3, 4 * AGAIN_MS),
+        (4, 8 * AGAIN_MS),
+        (5, 16 * AGAIN_MS),
+        (6, 32 * AGAIN_MS),
+        (7, AGAIN_LONGEST_MS),
+        (8, AGAIN_LONGEST_MS),
+        (100, AGAIN_LONGEST_MS),
+        (u32::MAX, AGAIN_LONGEST_MS),
+    ];
+    for (n, expected_ms) in table {
+        assert_eq!(again_wait_ms(n), expected_ms, "n = {n}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn trying_again_says_why_and_how_long_each_time() {
+    let mut attempts =
+        VecDeque::from([Err(End::Retry("offline")), Err(End::Retry("service-busy")), Ok(42u32)]);
+    let mut waited = Vec::new();
+    let start = Instant::now();
+    let res = again(
+        || {
+            let next = attempts.pop_front().expect("scripted attempt");
+            async move { next }
+        },
+        |why, wait_ms, n| waited.push((why, wait_ms, n, start.elapsed().as_millis() as u64)),
+    )
+    .await;
+    assert_eq!(res, Ok(42));
+    assert_eq!(waited, [("offline", AGAIN_MS, 1, 0), ("service-busy", 2 * AGAIN_MS, 2, AGAIN_MS)]);
+    assert_eq!(start.elapsed(), Duration::from_millis(AGAIN_MS + 2 * AGAIN_MS));
+
+    let mut fatal_waits = Vec::new();
+    let fatal = again(
+        || async { Err::<(), End>(End::Fatal("key-refused")) },
+        |why, wait_ms, n| fatal_waits.push((why, wait_ms, n)),
+    )
+    .await;
+    assert_eq!(fatal, Err(End::Fatal("key-refused")));
+    assert!(fatal_waits.is_empty(), "fatal errors must not wait or invoke on_wait");
 }

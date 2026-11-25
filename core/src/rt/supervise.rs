@@ -341,19 +341,36 @@ pub const AGAIN_MS: u64 = 60_000;
 /// before morning, and a process left running does not try more than 24 times a day.
 pub const AGAIN_LONGEST_MS: u64 = 3_600_000;
 
-/// Tries until it ends one way or the other: after a failure that may pass, again after
-/// `AGAIN_MS`, then ever more patiently, up to `AGAIN_LONGEST_MS`.
-pub async fn again<T, F>(mut attempt: impl FnMut() -> F) -> Result<T, End>
+/// The wait in ms before retry `n` (`1` -> `AGAIN_MS`, doubling up to `AGAIN_LONGEST_MS`).
+pub const fn again_wait_ms(n: u32) -> u64 {
+    let shift = n.saturating_sub(1);
+    if shift >= 63 {
+        return AGAIN_LONGEST_MS;
+    }
+    let doubled = AGAIN_MS.saturating_mul(1u64 << shift);
+    if doubled > AGAIN_LONGEST_MS { AGAIN_LONGEST_MS } else { doubled }
+}
+
+/// Tries until it ends one way or the other: after a failure that may pass, calls
+/// `on_wait(why, wait_ms, n)` and waits `wait_ms` (`AGAIN_MS`, doubling up to `AGAIN_LONGEST_MS`).
+pub async fn again<T, F>(
+    mut attempt: impl FnMut() -> F,
+    mut on_wait: impl FnMut(&'static str, u64, u32),
+) -> Result<T, End>
 where
     F: Future<Output = Result<T, End>>,
 {
-    let mut wait_ms = AGAIN_MS;
+    let mut n: u32 = 0;
     loop {
         match attempt().await {
-            Err(End::Retry(_)) => tokio::time::sleep(Duration::from_millis(wait_ms)).await,
+            Err(End::Retry(why)) => {
+                n = n.saturating_add(1);
+                let wait_ms = again_wait_ms(n);
+                on_wait(why, wait_ms, n);
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            }
             done => return done,
         }
-        wait_ms = (wait_ms * 2).min(AGAIN_LONGEST_MS);
     }
 }
 

@@ -251,6 +251,11 @@ impl Shelf {
         Self { root: root.into(), by: by.into(), key }
     }
 
+    /// The DID signing records on this shelf.
+    pub fn by(&self) -> &str {
+        &self.by
+    }
+
     /// Lines are many and the rest is little, so each has a pack: a list reads the little.
     /// What is the person's, not a recording's (their rooms, glossary, filings), has its own.
     fn pack(&self, id: &str, ty: &str) -> PathBuf {

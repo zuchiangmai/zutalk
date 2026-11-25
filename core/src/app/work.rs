@@ -14,7 +14,7 @@ use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
 use crate::knowledge::glossary::{self, Term};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
-use crate::out::city::{self, Calendar, Filer, Filing};
+use crate::out::city::{self, Calendar, FileGate, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
 use crate::record::shelf::{
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 use zutalk_log::{info, warn};
 
@@ -42,6 +42,9 @@ const SLOT_MS: u64 = 250;
 /// Jobs buffered for the desk worker: a burst of clicks or edits is dozens of jobs; full means
 /// disk is stuck and the person must be told (`P1.md` §3.7).
 pub const DESK_QUEUE_JOBS: usize = 64;
+/// Heavy background jobs (whole-recording transcription, city filing, 0.8 migration) run one at a
+/// time so they neither fight each other nor starve live captioning (`PLAN.md` §4.1, `P1.md` §3.8).
+pub const BACKGROUND_AT_ONCE_JOBS: usize = 1;
 
 /// One unit of sequential disk work run by a [`Desk`].
 pub trait DeskJob: Send + 'static {
@@ -327,6 +330,7 @@ pub(crate) struct Work {
     signing: Arc<Mutex<Option<CancellationToken>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
     desk: Desk<Job>,
+    bg: Arc<Semaphore>,
     next_seq: Arc<AtomicU64>,
     slot: Arc<Mutex<Option<(String, CancellationToken)>>>,
     jobs_done: Counter,
@@ -350,6 +354,7 @@ impl Work {
         let jobs_failed = stats.counter("jobs.failed");
         let search_stale = stats.counter("search.stale");
         let next_seq = Arc::new(AtomicU64::new(1));
+        let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
         let identity = Arc::new(Mutex::new(Identity::starting()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
@@ -593,6 +598,7 @@ impl Work {
             signing,
             keep_hint,
             desk,
+            bg,
             next_seq,
             slot,
             jobs_done,
@@ -932,6 +938,7 @@ impl Work {
             said: self.said.clone(),
             work_tree: self.tree.clone(),
             root: self.root.clone(),
+            bg: self.bg.clone(),
             next_seq: self.next_seq.clone(),
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
@@ -954,6 +961,7 @@ impl Work {
         let said = self.said.clone();
         let work_tree = self.tree.clone();
         let root = self.root.clone();
+        let bg = self.bg.clone();
         let config = self.config.clone();
         let results = self.results.clone();
         let progress = self.progress.clone();
@@ -988,6 +996,7 @@ impl Work {
                     said: said.clone(),
                     work_tree: work_tree.clone(),
                     root: root.clone(),
+                    bg: bg.clone(),
                     next_seq: next_seq.clone(),
                     jobs_done: jobs_done.clone(),
                     jobs_failed: jobs_failed.clone(),
@@ -1008,24 +1017,17 @@ impl Work {
         let filer = Filer { http: self.http.clone(), me, shelf, tapes: self.config.tapes() };
         let results = self.results.clone();
         let progress = self.progress.clone();
+        let tree = self.tree.clone();
+        let bg = self.bg.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
         self.tree.spawn("job.file", async move {
-            info!("job.start", kind = "file", job = seq, waited_ms = 0u64);
-            let started = std::time::Instant::now();
-            let said = city::file(&filer, &id, filing, |w| {
+            let gate = FileGate { bg: &bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
+            let said = city::file_job(&tree, &filer, &id, filing, gate, |w| {
                 let _ = progress.offer(Msg::Filing(w)); // dropped: the next one replaces it
             })
             .await;
-            let ms = started.elapsed().as_millis() as u64;
-            if said == "city.filed" {
-                info!("job.done", kind = "file", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            } else {
-                warn!("job.done", kind = "file", job = seq, code = said, ms = ms);
-                jobs_failed.add(1);
-            }
             let _ = results.send(Msg::Filed(id, said)).await; // dropped: the hub has ended
         });
         Ok(())
@@ -1039,11 +1041,17 @@ impl Work {
         let results = self.results.clone();
         let progress = self.progress.clone();
         let tree = self.tree.clone();
+        let bg = self.bg.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
         self.tree.spawn("job.move", async move {
-            info!("job.start", kind = "move", job = seq, waited_ms = 0u64);
+            let wait_at = tokio::time::Instant::now();
+            let Ok(_permit) = bg.acquire().await else {
+                return;
+            };
+            let waited_ms = wait_at.elapsed().as_millis() as u64;
+            info!("job.start", kind = "move", job = seq, waited_ms = waited_ms);
             let started = std::time::Instant::now();
             let outcome = tree
                 .blocking("job.move", move || {
@@ -1543,7 +1551,9 @@ fn spawn_create_net(
         let started = std::time::Instant::now();
         let outcome = tokio::select! {
             () = cancel.cancelled() => None,
-            res = again(|| keys::create(&http, &directory)) => Some(res),
+            res = again(|| keys::create(&http, &directory), |why, wait_ms, n| {
+                warn!("job.again", kind = "create", why = why, wait_ms = wait_ms, n = n);
+            }) => Some(res),
         };
         let ms = started.elapsed().as_millis() as u64;
         match outcome {
@@ -1595,7 +1605,9 @@ fn spawn_claim_net(
         let started = std::time::Instant::now();
         let outcome = tokio::select! {
             () = cancel.cancelled() => None,
-            res = again(|| chain.claim(&token)) => Some(res),
+            res = again(|| chain.claim(&token), |why, wait_ms, n| {
+                warn!("job.again", kind = "claim", why = why, wait_ms = wait_ms, n = n);
+            }) => Some(res),
         };
         let ms = started.elapsed().as_millis() as u64;
         let Some(claimed) = outcome else {
@@ -1832,6 +1844,7 @@ struct WriteCtx {
     said: Voice,
     work_tree: Tree,
     root: Tree,
+    bg: Arc<Semaphore>,
     next_seq: Arc<AtomicU64>,
     jobs_done: Counter,
     jobs_failed: Counter,
@@ -1844,8 +1857,14 @@ impl WriteCtx {
     }
 
     async fn finish_recovered(self) {
+        let started = std::time::Instant::now();
         let sealed = recording::seal(&self.root, self.shelf.clone(), self.tape(), &self.id).await;
         if let Err(c) = sealed {
+            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            let ms = started.elapsed().as_millis() as u64;
+            info!("job.start", kind = "write", job = seq, waited_ms = 0u64);
+            warn!("job.done", kind = "write", job = seq, code = c, ms = ms);
+            self.jobs_failed.add(1);
             self.said.say(c);
         }
         self.after_seal_inner(sealed, true).await;
@@ -1886,7 +1905,9 @@ impl WriteCtx {
                     draft: about.take == 0,
                     audio,
                 };
-                let _ = self.results.send(Msg::Sealed(sealed_row)).await; // dropped: the hub has ended
+                let owner =
+                    (!self.shelf.by().starts_with("did:key:")).then(|| self.shelf.by().to_string());
+                let _ = self.results.send(Msg::Sealed(owner, sealed_row)).await; // dropped: the hub has ended
                 let key = self.keys.from(Service::Soniox) != From::Nowhere;
                 match write::owed(about.take == 0, audio, about.moved, key) {
                     write::Owed::Yes => {
@@ -1913,51 +1934,85 @@ impl WriteCtx {
 
     async fn write_job(&self) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        info!("job.start", kind = "write", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
         let terms: Vec<_> = self.terms.iter().cloned().map(|t| (t.said, t.written)).collect();
-        let written = again(|| async {
-            // Removed meanwhile, written, or its audio destroyed: nothing to do.
-            let about = match self.shelf.about(&self.id) {
-                Ok(Some(read)) if read.about.take == 0 && tape::kept(&self.tape()) => read.about,
-                _ => return Ok(()),
-            };
-            let key = keys::derive("tape", &self.id)?;
-            let (soniox, openrouter) = (self.config.soniox.clone(), self.config.openrouter.clone());
-            let (id, spoken, into, topic) =
-                (self.id.clone(), about.spoken, about.shown, about.title);
-            let (model, terms) = (WHOLE.into(), terms.clone());
-            let plan = write::Plan { id, spoken, into, terms, topic, model, soniox, openrouter };
-            let progress = |step: &str, done: usize, of: usize| {
-                let (done, of) = (done as u32, of as u32);
-                let msg = Msg::Writing(Writing { done, of, ..writing(&self.id, step) });
-                let _ = self.progress.offer(msg); // dropped: the next one replaces it
-            };
-            let tape = (self.tape(), key);
-            match write::write(&self.shelf, (&tape.0, &tape.1), &plan, &*self.keys, now, progress)
-                .await
-            {
-                End::Done => Ok(()),
-                End::Retry(c) => {
-                    let _ = self.progress.offer(Msg::Writing(writing(&self.id, c))); // dropped: the next one replaces it
-                    Err(End::Retry(c))
+        let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
+        let slot_ref = &slot;
+        let written = again(
+            || async {
+                let wait_at = tokio::time::Instant::now();
+                let Ok(permit) = self.bg.clone().acquire_owned().await else {
+                    return Err(End::Done);
+                };
+                let waited_ms = wait_at.elapsed().as_millis() as u64;
+                info!("job.start", kind = "write", job = seq, waited_ms = waited_ms);
+                let started = std::time::Instant::now();
+                let outcome = async {
+                    // Removed meanwhile, written, or its audio destroyed: nothing to do.
+                    let about = match self.shelf.about(&self.id) {
+                        Ok(Some(read)) if read.about.take == 0 && tape::kept(&self.tape()) => {
+                            read.about
+                        }
+                        _ => return Ok(()),
+                    };
+                    let key = keys::derive("tape", &self.id)?;
+                    let (soniox, openrouter) =
+                        (self.config.soniox.clone(), self.config.openrouter.clone());
+                    let (id, spoken, into, topic) =
+                        (self.id.clone(), about.spoken, about.shown, about.title);
+                    let (model, terms) = (WHOLE.into(), terms.clone());
+                    let plan =
+                        write::Plan { id, spoken, into, terms, topic, model, soniox, openrouter };
+                    let progress = |step: &str, done: usize, of: usize| {
+                        let (done, of) = (done as u32, of as u32);
+                        let msg = Msg::Writing(Writing { done, of, ..writing(&self.id, step) });
+                        let _ = self.progress.offer(msg); // dropped: the next one replaces it
+                    };
+                    let tape = (self.tape(), key);
+                    match write::write(
+                        &self.work_tree,
+                        &self.shelf,
+                        (&tape.0, &tape.1),
+                        &plan,
+                        &*self.keys,
+                        now,
+                        progress,
+                    )
+                    .await
+                    {
+                        End::Done => Ok(()),
+                        End::Retry(c) => {
+                            let _ = self.progress.offer(Msg::Writing(writing(&self.id, c))); // dropped: the next one replaces it
+                            Err(End::Retry(c))
+                        }
+                        end => Err(end),
+                    }
                 }
-                end => Err(end),
-            }
-        })
+                .await;
+                let ms = started.elapsed().as_millis() as u64;
+                match &outcome {
+                    Ok(()) => {
+                        info!("job.done", kind = "write", job = seq, code = "ok", ms = ms);
+                        self.jobs_done.add(1);
+                    }
+                    Err(end) => {
+                        let c = code(*end);
+                        warn!("job.done", kind = "write", job = seq, code = c, ms = ms);
+                        self.jobs_failed.add(1);
+                    }
+                }
+                if matches!(outcome, Err(End::Retry(_))) {
+                    *slot_ref.lock().unwrap_or_else(PoisonError::into_inner) = Some(permit);
+                }
+                outcome
+            },
+            |why, wait_ms, n| {
+                warn!("job.again", kind = "write", why = why, wait_ms = wait_ms, n = n);
+                let _ = slot_ref.lock().unwrap_or_else(PoisonError::into_inner).take(); // dropped: release gate before sleeping
+            },
+        )
         .await;
-        let ms = started.elapsed().as_millis() as u64;
-        match written {
-            Ok(()) => {
-                info!("job.done", kind = "write", job = seq, code = "ok", ms = ms);
-                self.jobs_done.add(1);
-            }
-            Err(end) => {
-                let c = code(end);
-                warn!("job.done", kind = "write", job = seq, code = c, ms = ms);
-                self.jobs_failed.add(1);
-                self.said.say(c);
-            }
+        if let Err(end) = written {
+            self.said.say(code(end));
         }
     }
 }

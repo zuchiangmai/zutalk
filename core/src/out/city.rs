@@ -12,21 +12,28 @@ use crate::capture::clock::wall_ms;
 use crate::capture::tape::{self, Pass};
 use crate::id::keys::{self, Me};
 use crate::record::shelf::{FILING, LINE, RECORDING, Recording, SPEAKER, Shelf};
-use crate::rt::supervise::{End, again};
+use crate::rt::queue::{self, Full};
+use crate::rt::stats::Counter;
+use crate::rt::supervise::{End, Tree, again};
 use reqwest::{Client, Response, StatusCode, header::CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::{io, sync::Arc};
-use tokio::{sync::OnceCell, sync::mpsc, task::spawn_blocking};
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 use ts_rs::TS;
 use zu::{Blob, Cid, Codec, Held, Path, Query, Record, Value};
+use zutalk_log::{info, warn};
 
 const EVENT: &str = "ev/event"; // a city's events: records of this type meant for it
 /// Audio goes as WAV files of this many ms each, well under what a host takes as one file.
 const PART: u32 = 5 * 60_000;
 const BATCH: usize = 200; // records given to a host in one request
+/// WAV parts buffered between the tape reader and the city uploader: one part at a time so audio
+/// never sits whole in memory (`P1.md` §3.8).
+pub const CITY_QUEUE_PARTS: usize = 1;
 
 /// What a host's word for a record means here (record.md § Delivering). A word not known, or
 /// none, is `deny`. `want`: it was given the body, and may take it next time.
@@ -209,44 +216,116 @@ impl Filer {
     }
 }
 
+/// Background-gate and observability context passed by `Work` when filing on the background lane.
+#[derive(Clone, Copy)]
+pub(crate) struct FileGate<'a> {
+    pub bg: &'a Arc<Semaphore>,
+    pub seq: u64,
+    pub jobs_done: &'a Counter,
+    pub jobs_failed: &'a Counter,
+}
+
 /// Files recording `id` as `filing` says, until the city holds all of it or refuses it for good;
 /// what may pass is tried again, ever more patiently. The records go first, then the audio's
 /// files, so a refusal of the audio says that the text is there. How it went is one more
 /// record, and is returned as its code. `tell` hears each step.
 pub async fn file(
+    tree: &Tree,
+    filer: &Filer,
+    id: &str,
+    filing: Filing,
+    tell: impl Fn(Writing) + Sync,
+) -> &'static str {
+    file_inner(tree, filer, id, filing, None, tell).await
+}
+
+/// Like [`file`], acquiring the shared background semaphore per attempt (never held across retry
+/// sleeps) and emitting `job.start` / `job.done` per attempt with the same `seq`.
+pub(crate) async fn file_job(
+    tree: &Tree,
+    filer: &Filer,
+    id: &str,
+    filing: Filing,
+    gate: FileGate<'_>,
+    tell: impl Fn(Writing) + Sync,
+) -> &'static str {
+    file_inner(tree, filer, id, filing, Some(gate), tell).await
+}
+
+async fn file_inner(
+    tree: &Tree,
     filer: &Filer,
     id: &str,
     mut filing: Filing,
+    gate: Option<FileGate<'_>>,
     tell: impl Fn(Writing) + Sync,
 ) -> &'static str {
     let (signed, sent) = (OnceCell::new(), AtomicUsize::new(0));
     let step = |step: &str, done: usize, of: usize| {
         tell(Writing { id: id.into(), step: step.into(), done: done as u32, of: of as u32 })
     };
-    let (signed, sent, step, wanted) = (&signed, &sent, &step, &filing);
-    let filed = again(move || async move {
-        let attempt = async {
-            let origin = origin(&wanted.city).map_err(End::Fatal)?;
-            let (held, named) = signed
-                .get_or_try_init(|| async {
-                    step("filing", 0, 0);
-                    present(&filer.http, &origin, &wanted.event).await?;
-                    sign(filer, id, wanted).await
-                })
-                .await?;
-            deliver(&filer.http, &origin, held).await?;
-            if named.is_empty() {
-                return Ok(()); // no audio goes
+    let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
+    let (signed, sent, step, wanted, slot_ref) = (&signed, &sent, &step, &filing, &slot);
+    let filed = again(
+        move || async move {
+            let held_permit = if let Some(gate) = gate {
+                let wait_at = tokio::time::Instant::now();
+                let Ok(permit) = gate.bg.clone().acquire_owned().await else {
+                    return Err(End::Done);
+                };
+                let waited_ms = wait_at.elapsed().as_millis() as u64;
+                info!("job.start", kind = "file", job = gate.seq, waited_ms = waited_ms);
+                Some((permit, std::time::Instant::now()))
+            } else {
+                None
+            };
+            let attempt = async {
+                let origin = origin(&wanted.city).map_err(End::Fatal)?;
+                let (held, named) = signed
+                    .get_or_try_init(|| async {
+                        step("filing", 0, 0);
+                        present(&filer.http, &origin, &wanted.event).await?;
+                        sign(tree, filer, id, wanted).await
+                    })
+                    .await?;
+                deliver(&filer.http, &origin, held).await?;
+                if named.is_empty() {
+                    return Ok(()); // no audio goes
+                }
+                let tell = |n| step("audio", n, named.len());
+                upload(tree, &filer.http, &origin, filer.tape(id)?, named, sent, &tell).await
+            };
+            let attempt = attempt.await;
+            if let Err(End::Retry(code)) = attempt {
+                step(code, 0, 0); // what it waits for
             }
-            let tell = |n| step("audio", n, named.len());
-            upload(&filer.http, &origin, filer.tape(id)?, named, sent, &tell).await
-        };
-        let attempt = attempt.await;
-        if let Err(End::Retry(code)) = attempt {
-            step(code, 0, 0); // what it waits for
-        }
-        attempt
-    });
+            if let (Some(gate), Some((permit, started))) = (gate, held_permit) {
+                let ms = started.elapsed().as_millis() as u64;
+                match &attempt {
+                    Ok(()) => {
+                        info!("job.done", kind = "file", job = gate.seq, code = "ok", ms = ms);
+                        gate.jobs_done.add(1);
+                    }
+                    Err(end) => {
+                        let c = match *end {
+                            End::Retry(c) | End::Fatal(c) => c,
+                            End::Done => "done",
+                        };
+                        warn!("job.done", kind = "file", job = gate.seq, code = c, ms = ms);
+                        gate.jobs_failed.add(1);
+                    }
+                }
+                if matches!(attempt, Err(End::Retry(_))) {
+                    *slot_ref.lock().unwrap_or_else(PoisonError::into_inner) = Some(permit);
+                }
+            }
+            attempt
+        },
+        |why, wait_ms, n| {
+            warn!("job.again", kind = "file", why = why, wait_ms = wait_ms, n = n);
+            let _ = slot_ref.lock().unwrap_or_else(PoisonError::into_inner).take(); // dropped: release gate before sleeping
+        },
+    );
     let said = match filed.await {
         Ok(()) | Err(End::Done) => "city.filed",
         Err(End::Retry(code) | End::Fatal(code)) => code,
@@ -269,13 +348,19 @@ async fn present(http: &Client, origin: &str, path: &str) -> Result<(), End> {
 
 /// The records that go, signed once for all attempts so that each gives the same, and the
 /// audio's parts as they are named in them.
-async fn sign(filer: &Filer, id: &str, filing: &Filing) -> Result<(Held, Vec<(u32, Blob)>), End> {
+async fn sign(
+    tree: &Tree,
+    filer: &Filer,
+    id: &str,
+    filing: &Filing,
+) -> Result<(Held, Vec<(u32, Blob)>), End> {
     let recording = filer.shelf.read(id).map_err(|_| End::Fatal("shelf"))?;
     let recording = recording.ok_or(End::Fatal("recording.gone"))?;
     // Audio destroyed since it was asked for, by the person or by their choice of how long it
     // stays, leaves the text to go alone.
     let tape = filer.tape(id)?;
-    let named = if filing.audio && tape::kept(&tape.0) { named(tape).await? } else { Vec::new() };
+    let named =
+        if filing.audio && tape::kept(&tape.0) { named(tree, tape).await? } else { Vec::new() };
     let held = records(&filer.me, filing, &recording, &named, wall_ms() as i64);
     Ok((held.map_err(|_| End::Fatal("id.sign"))?, named))
 }
@@ -319,41 +404,55 @@ fn audio(end: End) -> End {
     }
 }
 
-/// The recording's audio as WAV files of `PART` each, read on a thread of their own as they
+/// The recording's audio as WAV files of `PART` each, read on a supervised blocking task as they
 /// are wanted, each with where it starts and how it is named: one part in memory at a time,
 /// none on disk in the clear.
-fn parts((dir, key): (PathBuf, [u8; 32])) -> mpsc::Receiver<io::Result<(u32, Blob, Vec<u8>)>> {
-    let (tx, rx) = mpsc::channel(1);
-    spawn_blocking(move || {
-        let mut part = (0, Vec::new());
-        // A send fails only once nobody is listening any more.
-        let send = |(t0, pcm): (u32, Vec<u8>)| {
-            let wav = [wav_header(pcm.len() as u32 / 2), pcm].concat();
-            let file = Blob {
-                cid: Cid::of(Codec::Raw, &wav),
-                mime: "audio/wav".into(),
-                size: wav.len() as u64,
-            };
-            _ = tx.blocking_send(Ok((t0, file, wav))); // dropped: send fails only after the filing task stopped listening
-        };
-        let read = tape::read(&dir, &key, &Pass::City, |block| {
-            if block.t_ms / PART != part.0 / PART {
-                send(std::mem::replace(&mut part, (block.t_ms, Vec::new())));
-            }
-            part.1.extend(block.pcm.iter().flat_map(|sample| sample.to_le_bytes()));
-        });
-        match read {
-            Ok(0) => {}
-            Ok(_) => send(part),
-            Err(error) => _ = tx.blocking_send(Err(error)),
+fn parts(
+    tree: &Tree,
+    (dir, key): (PathBuf, [u8; 32]),
+) -> queue::Rx<io::Result<(u32, Blob, Vec<u8>)>> {
+    let (tx, rx) = queue::bounded(tree.stats(), "city.audio", CITY_QUEUE_PARTS, Full::Wait);
+    let blocking_tree = tree.clone();
+    tree.spawn("city.audio", async move {
+        let tx_block = tx.clone();
+        let outcome = blocking_tree
+            .blocking("city.audio", move || {
+                let mut part = (0, Vec::new());
+                // A send fails only once nobody is listening any more.
+                let send = |(t0, pcm): (u32, Vec<u8>)| {
+                    let wav = [wav_header(pcm.len() as u32 / 2), pcm].concat();
+                    let file = Blob {
+                        cid: Cid::of(Codec::Raw, &wav),
+                        mime: "audio/wav".into(),
+                        size: wav.len() as u64,
+                    };
+                    let _ = tx_block.send_blocking(Ok((t0, file, wav))); // dropped: send fails only after the filing task stopped listening
+                };
+                let read = tape::read(&dir, &key, &Pass::City, |block| {
+                    if block.t_ms / PART != part.0 / PART {
+                        send(std::mem::replace(&mut part, (block.t_ms, Vec::new())));
+                    }
+                    part.1.extend(block.pcm.iter().flat_map(|sample| sample.to_le_bytes()));
+                });
+                match read {
+                    Ok(0) => {}
+                    Ok(_) => send(part),
+                    Err(error) => {
+                        let _ = tx_block.send_blocking(Err(error)); // dropped: send fails only after the filing task stopped listening
+                    }
+                }
+            })
+            .await;
+        if outcome.is_err() {
+            let _ = tx.send(Err(io::Error::other("tape read broke"))).await; // dropped: send fails only after the filing task stopped listening
         }
     });
     rx
 }
 
 /// Each part of the audio, read once to name it before anything goes.
-async fn named(tape: (PathBuf, [u8; 32])) -> Result<Vec<(u32, Blob)>, End> {
-    let (mut parts, mut named) = (parts(tape), Vec::new());
+async fn named(tree: &Tree, tape: (PathBuf, [u8; 32])) -> Result<Vec<(u32, Blob)>, End> {
+    let (mut parts, mut named) = (parts(tree, tape), Vec::new());
     while let Some(part) = parts.recv().await {
         let (t0, file, _) = part.map_err(|_| End::Fatal("tape"))?;
         named.push((t0, file));
@@ -364,6 +463,7 @@ async fn named(tape: (PathBuf, [u8; 32])) -> Result<Vec<(u32, Blob)>, End> {
 /// Gives the host each part it does not have yet (blob.md § Uploading), read again from the
 /// tape; `sent` counts the parts it has. `tell` hears how many it has.
 async fn upload(
+    tree: &Tree,
     http: &Client,
     origin: &str,
     tape: (PathBuf, [u8; 32]),
@@ -371,7 +471,7 @@ async fn upload(
     sent: &AtomicUsize,
     tell: &(dyn Fn(usize) + Sync),
 ) -> Result<(), End> {
-    let mut parts = parts(tape);
+    let mut parts = parts(tree, tape);
     for (n, (_, file)) in named.iter().enumerate() {
         let part = parts.recv().await.ok_or(End::Fatal("tape"))?;
         let (_, read, wav) =

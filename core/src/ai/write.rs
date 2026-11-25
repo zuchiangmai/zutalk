@@ -9,7 +9,8 @@ use crate::id::keys::{Keys, Lease, Service};
 use crate::live::lang::{self, Script, profile};
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::record::shelf::{self, About, LINE, RECORDING, Said, Shelf};
-use crate::rt::supervise::End;
+use crate::rt::queue::{self, Full};
+use crate::rt::supervise::{End, Tree};
 use futures_util::stream;
 use icu_segmenter::WordSegmenter;
 use reqwest::{Body, Client, Method, RequestBuilder, multipart};
@@ -18,7 +19,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::{fs, path::Path, time::Duration};
-use tokio::{sync::mpsc, task::spawn_blocking};
+
+/// WAV chunks buffered between the tape reader and the HTTP uploader (~3.2 s of 100 ms blocks).
+pub const WAV_QUEUE_CHUNKS: usize = 32;
 
 /// What to write, and with what. The services' addresses are here so a test can stand in.
 pub struct Plan {
@@ -437,15 +440,37 @@ pub fn judge(said: &mut Said, answer: Option<&Answer>, model: &str, plan: &Plan)
 
 /// The tape as a WAV file, opened a block at a time on its way out: never whole in memory,
 /// never on disk in the clear.
-fn wav(dir: &Path, key: &[u8; 32], length_ms: u32, name: String) -> multipart::Part {
+fn wav(tree: &Tree, dir: &Path, key: &[u8; 32], length_ms: u32, name: String) -> multipart::Part {
     let samples = (length_ms / 100).saturating_mul(BLOCK as u32);
-    let (dir, key, (tx, mut rx)) = (dir.to_path_buf(), *key, mpsc::channel::<io::Result<_>>(32));
-    spawn_blocking(move || {
-        let pcm = |block: Block| Ok(block.pcm.into_iter().flat_map(i16::to_le_bytes).collect());
-        // A send fails only once the upload has ended, and then nobody is listening.
-        let _ = tx.blocking_send(Ok(wav_header(samples))); // dropped: send fails only after the upload ended
-        let read = tape::read(&dir, &key, &Pass::Write, |block| _ = tx.blocking_send(pcm(block)));
-        let _ = read.map_err(|e| tx.blocking_send(Err(e))); // dropped: send fails only after the upload ended
+    let (dir, key) = (dir.to_path_buf(), *key);
+    let (tx, mut rx) = queue::bounded::<io::Result<Vec<u8>>>(
+        tree.stats(),
+        "write.wav",
+        WAV_QUEUE_CHUNKS,
+        Full::Wait,
+    );
+    let blocking_tree = tree.clone();
+    tree.spawn("write.wav", async move {
+        let tx_block = tx.clone();
+        let outcome = blocking_tree
+            .blocking("write.wav", move || {
+                let pcm =
+                    |block: Block| Ok(block.pcm.into_iter().flat_map(i16::to_le_bytes).collect());
+                // A send fails only once the upload has ended, and then nobody is listening.
+                if tx_block.send_blocking(Ok(wav_header(samples))).is_err() {
+                    return;
+                }
+                let read = tape::read(&dir, &key, &Pass::Write, |block| {
+                    let _ = tx_block.send_blocking(pcm(block)); // dropped: send fails only after the upload ended
+                });
+                if let Err(e) = read {
+                    let _ = tx_block.send_blocking(Err(e)); // dropped: send fails only after the upload ended
+                }
+            })
+            .await;
+        if outcome.is_err() {
+            let _ = tx.send(Err(io::Error::other("tape read broke"))).await; // dropped: send fails only after the upload ended
+        }
     });
     let body = Body::wrap_stream(stream::poll_fn(move |cx| rx.poll_recv(cx)));
     multipart::Part::stream_with_length(body, 44 + samples as u64 * 2).file_name(name)
@@ -535,6 +560,7 @@ impl<'a, K: Keys> Port<'a, K> {
     /// Upload, transcribe, fetch: the transcript's tokens.
     async fn transcribe(
         &self,
+        tree: &Tree,
         (dir, key): (&Path, &[u8; 32]),
         length_ms: u32,
         plan: &Plan,
@@ -543,7 +569,8 @@ impl<'a, K: Keys> Port<'a, K> {
         let name = format!("zutalk-{}.wav", plan.id);
         journal.name = Some(name.clone());
         journal.save(dir)?;
-        let form = multipart::Form::new().part("file", wav(dir, key, length_ms, name.clone()));
+        let form =
+            multipart::Form::new().part("file", wav(tree, dir, key, length_ms, name.clone()));
         let file = self.make((dir, journal), "files", |r| r.multipart(form)).await?;
         let asked = transcription(plan, &name, &file);
         let job = self.make((dir, journal), "transcriptions", |r| r.json(&asked)).await?;
@@ -595,6 +622,7 @@ impl<'a, K: Keys> Port<'a, K> {
 /// Writes the recording's next take. Whatever it returns but `Done`, nothing has changed:
 /// the take before, or the live draft, is still the recording's text.
 pub async fn write(
+    tree: &Tree,
     shelf: &Shelf,
     tape: (&Path, &[u8; 32]),
     plan: &Plan,
@@ -618,11 +646,13 @@ pub async fn write(
         let mut journal = Journal::load(dir)?;
         soniox.clear(dir, &mut journal).await?;
         let (path, key) = (dir.to_path_buf(), *tape.1);
-        let length = spawn_blocking(move || tape::read(&path, &key, &Pass::Write, |_| {})).await;
+        let length = tree
+            .blocking("write.length", move || tape::read(&path, &key, &Pass::Write, |_| {}))
+            .await;
         let length_ms = length.ok().and_then(Result::ok).filter(|ms| *ms > 0);
         let length_ms = length_ms.ok_or(End::Fatal("tape"))?;
         progress("transcribing", 0, 0);
-        let heard = soniox.transcribe(tape, length_ms, plan, &mut journal).await;
+        let heard = soniox.transcribe(tree, tape, length_ms, plan, &mut journal).await;
         // Whatever happened, nothing stays there; and until it is gone, nothing is written.
         let cleared = soniox.clear(dir, &mut journal).await;
         let (heard, ()) = (heard?, cleared?);

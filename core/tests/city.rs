@@ -15,8 +15,10 @@ use zutalk_core::capture::clock::Block;
 use zutalk_core::capture::tape;
 use zutalk_core::id::keys::{self, Me};
 use zutalk_core::live::lines::Line;
-use zutalk_core::out::city::{self, Filing};
+use zutalk_core::out::city::{self, CITY_QUEUE_PARTS, Filer, Filing};
 use zutalk_core::record::shelf::{About, FILING, LINE, NOTE, RECORDING, SPEAKER, Said, Words};
+use zutalk_core::rt::stats::Stats;
+use zutalk_core::rt::supervise::Tree;
 
 const CITY: &str = "did:zu:4seascity4seascity4seas";
 const ORGANIZER: &str = "did:zu:organizer";
@@ -420,4 +422,59 @@ async fn a_filing_a_restart_left_on_its_way_goes_on() {
     app.send(Command::Open { id });
     let state = app.until(|s| filed(s).is_some()).await;
     assert_eq!(filed(&state).unwrap().state, "city.filed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_the_tape_is_a_named_task_and_its_queue_is_counted() {
+    let _store = STORE.lock().await;
+    signed_in();
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let (city, server) = City::open().await;
+    let event = city.event("e1", json!({ "title": "Named task" }));
+    let data = tempfile::tempdir().unwrap();
+    let id = recording(data.path(), 2_000);
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let filer = Filer {
+        http: reqwest::Client::new(),
+        me: Me { did: ME.into(), key: Arc::new(key(ME)) },
+        shelf: Arc::new(shelf(data.path())),
+        tapes: data.path().join("tape"),
+    };
+    let filing = Filing {
+        city: server.uri(),
+        did: CITY.into(),
+        event,
+        title: "Named task".into(),
+        audio: true,
+        key: "b".repeat(32),
+        state: String::new(),
+    };
+    let stats = Stats::new();
+    let tree = Tree::root("test", stats.clone());
+    let said = city::file(&tree, &filer, &id, filing, |_| {}).await;
+    assert_eq!(said, "city.filed");
+    tree.wait().await;
+
+    let starts = seen.of("task.start");
+    assert!(
+        starts.iter().any(|l| l.text("task") == Some("city.audio")),
+        "expected task.start(city.audio), got {starts:?}"
+    );
+    let ends = seen.of("task.end");
+    assert!(
+        ends.iter().any(|l| l.text("task") == Some("city.audio") && l.text("code") == Some("done")),
+        "expected task.end(city.audio, done), got {ends:?}"
+    );
+    let tally = stats.tally();
+    let q = tally
+        .queues
+        .iter()
+        .find(|q| q.name == "city.audio")
+        .unwrap_or_else(|| panic!("expected city.audio queue in {:?}", tally.queues));
+    assert!(q.sent > 0, "expected sent > 0, got {q:?}");
+    assert!(
+        q.deepest <= CITY_QUEUE_PARTS as u64,
+        "expected deepest <= {CITY_QUEUE_PARTS}, got {q:?}"
+    );
+    assert_eq!(seen.refused(), 0);
 }

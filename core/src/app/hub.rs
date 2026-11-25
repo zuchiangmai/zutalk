@@ -97,7 +97,7 @@ pub(crate) enum Msg {
     Booted(BootOut),
     Devices(Vec<Device>),
     RecordingOpened,
-    Sealed(Row),
+    Sealed(Option<String>, Row),
     Ended(String),
     Writing(Writing),
     Wrote(String),
@@ -135,7 +135,7 @@ impl Msg {
             Msg::Booted(_) => "Booted",
             Msg::Devices(_) => "Devices",
             Msg::RecordingOpened => "RecordingOpened",
-            Msg::Sealed(_) => "Sealed",
+            Msg::Sealed(_, _) => "Sealed",
             Msg::Ended(_) => "Ended",
             Msg::Writing(_) => "Writing",
             Msg::Wrote(_) => "Wrote",
@@ -396,15 +396,17 @@ impl Hub {
             }
             Msg::Devices(devices) => self.state.devices = devices,
             Msg::RecordingOpened => self.mark_dirty(),
-            Msg::Sealed(sealed_row) => {
-                if let Some(existing) =
-                    self.state.library.iter_mut().find(|r| r.id == sealed_row.id)
-                {
-                    *existing = sealed_row;
-                } else {
-                    self.state.library.insert(0, sealed_row);
+            Msg::Sealed(owner, sealed_row) => {
+                if owner == self.state.me {
+                    if let Some(existing) =
+                        self.state.library.iter_mut().find(|r| r.id == sealed_row.id)
+                    {
+                        *existing = sealed_row;
+                    } else {
+                        self.state.library.insert(0, sealed_row);
+                    }
+                    self.mark_dirty();
                 }
-                self.mark_dirty();
             }
             Msg::Ended(id) if self.under_way(&id) => {
                 self.stop();

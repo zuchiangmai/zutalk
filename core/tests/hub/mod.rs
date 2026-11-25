@@ -121,6 +121,7 @@ pub fn config_on(data: &Path, server: &str) -> Config {
         directory,
         realtime,
         hear: Arc::new(hum),
+        devices: Arc::new(Vec::new),
         ..Config::new(data.into(), server)
     }
 }

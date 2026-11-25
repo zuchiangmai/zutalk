@@ -1066,7 +1066,9 @@ async fn i2_a_job_that_never_ends_holds_up_neither_captions_nor_commands() {
     bench.finish();
 }
 
-async fn run_i2_background(check_observability: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn i2_background_work_runs_beside_a_recording() {
+    let _store = STORE.lock().await;
     let data = tempfile::tempdir().expect("data tempdir");
     let old = common::old_library();
 
@@ -1160,34 +1162,19 @@ async fn run_i2_background(check_observability: bool) {
         .expect("tape reads back");
     assert_eq!(len_ms as u64, mic_blocks * u64::from(BLOCK_MS), "tape length mismatch");
 
-    if check_observability {
-        let done = bench.seen().of("job.done");
-        for kind in ["search", "job.move", "job.write"] {
-            assert!(
-                done.iter().any(|l| l.text("kind") == Some(kind) && l.text("code") == Some("ok")),
-                "expected job.done({kind}, ok)"
-            );
-        }
+    let done = bench.seen().of("job.done");
+    for kind in ["search", "move", "write"] {
         assert!(
-            !bench.seen().of("judge.verdict").iter().any(|l| l.text("to") == Some("Stalled")),
-            "no stage should be judged Stalled during healthy background work"
+            done.iter().any(|l| l.text("kind") == Some(kind) && l.text("code") == Some("ok")),
+            "expected job.done({kind}, ok) in {done:?}"
         );
     }
+    assert!(
+        !bench.seen().of("judge.verdict").iter().any(|l| l.text("to") == Some("Stalled")),
+        "no stage should be judged Stalled during healthy background work"
+    );
 
     bench.finish();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn i2_background_work_runs_beside_a_recording() {
-    let _store = STORE.lock().await;
-    run_i2_background(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "P1-21：后台任务的 job.done 事件"]
-async fn i2_background_work_runs_beside_a_recording_and_it_shows() {
-    let _store = STORE.lock().await;
-    run_i2_background(true).await;
 }
 
 // ---- 4. I6: any killed part self-heals and reports what it missed ----
