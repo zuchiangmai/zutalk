@@ -1,20 +1,30 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use zu::SecretKey;
 use zutalk_core::ai::write;
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::capture::tape;
+use zutalk_core::knowledge::glossary;
 use zutalk_core::live::lines::Line;
-use zutalk_core::out::city::Filing;
+use zutalk_core::out::city::{Calendar, CityEvent, Filing};
 use zutalk_core::record::notes;
 use zutalk_core::record::shelf::{About, FILING, LINE, RECORDING, Said, Shelf};
-use zutalk_core::record::takes::RefineFailure;
+use zutalk_core::record::takes::{RefineFailure, RefineStatus};
 use zutalk_core::rt::stats::Stats;
+use zutalk_core::rt::supervise::Tree;
 use zutalk_core::view::index::{
     INDEX_SCHEMA_VERSION, Index, IndexHealth, LibraryFilter, OpenPlan, Reader, SearchHitKind,
     open_plan,
+};
+use zutalk_core::view::query::{
+    Invalidations, KEEP_INVALIDATIONS_EVENTS, Query, QueryValue, ViewEngine, ViewKind,
+};
+use zutalk_core::view::transcript::{
+    DIFF_LCS_MAX_BYTES, DiffOp, TRANSCRIPT_CHUNK_LINES, compare_lines, diff_text, slice_chunk,
+    total_chunks,
 };
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
@@ -489,4 +499,366 @@ fn index_search_covers_title_lines_translations_notes_cjk_thai_fullwidth_and_sho
         month_plan.contains("idx_recordings_started"),
         "expected idx_recordings_started in plan: {month_plan}"
     );
+}
+
+// ---- P2-04: chunking, pure-function compare, invalidations ring, and ViewEngine ----
+
+fn roundtrip_ops(ops: &[DiffOp]) -> (String, String) {
+    let mut a = String::new();
+    let mut b = String::new();
+    for op in ops {
+        match op {
+            DiffOp::Equal { text } => {
+                a.push_str(text);
+                b.push_str(text);
+            }
+            DiffOp::Delete { text } => a.push_str(text),
+            DiffOp::Insert { text } => b.push_str(text),
+        }
+    }
+    (a, b)
+}
+
+#[test]
+fn transcript_chunking_splits_at_64_lines_and_handles_empty_and_out_of_range() {
+    assert_eq!(TRANSCRIPT_CHUNK_LINES, 64);
+    assert_eq!(total_chunks(0), 0);
+    assert_eq!(total_chunks(1), 1);
+    assert_eq!(total_chunks(64), 1);
+    assert_eq!(total_chunks(65), 2);
+    assert_eq!(total_chunks(200), 4);
+
+    // 0 lines
+    let empty = slice_chunk("r0", 0, &[], 0);
+    assert_eq!(empty.total_lines, 0);
+    assert_eq!(empty.total_chunks, 0);
+    assert!(empty.lines.is_empty());
+
+    // 1, 64, 65, and 200 lines
+    let make = |n: usize| -> Vec<(String, Said)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("r.1.{i:05}"),
+                    said(i as u32 * 1_000, i as u32 * 1_000 + 800, "en", &format!("line {i}"), &[]),
+                )
+            })
+            .collect()
+    };
+
+    let c1 = slice_chunk("r", 1, &make(1), 0);
+    assert_eq!((c1.total_lines, c1.total_chunks, c1.lines.len()), (1, 1, 1));
+
+    let c64 = slice_chunk("r", 1, &make(64), 0);
+    assert_eq!((c64.total_lines, c64.total_chunks, c64.lines.len()), (64, 1, 64));
+    assert!(slice_chunk("r", 1, &make(64), 1).lines.is_empty());
+
+    let lines65 = make(65);
+    let c65_0 = slice_chunk("r", 1, &lines65, 0);
+    let c65_1 = slice_chunk("r", 1, &lines65, 1);
+    assert_eq!((c65_0.total_lines, c65_0.total_chunks, c65_0.lines.len()), (65, 2, 64));
+    assert_eq!((c65_1.total_lines, c65_1.total_chunks, c65_1.lines.len()), (65, 2, 1));
+    assert_eq!(c65_1.lines[0].0, "r.1.00064");
+
+    let lines200 = make(200);
+    let c200_3 = slice_chunk("r", 1, &lines200, 3);
+    assert_eq!((c200_3.total_lines, c200_3.total_chunks, c200_3.lines.len()), (200, 4, 8));
+    assert_eq!(c200_3.lines[0].0, "r.1.00192");
+
+    // Out of range chunk returns empty lines with accurate totals.
+    let oob = slice_chunk("r", 1, &lines200, 99);
+    assert_eq!((oob.total_lines, oob.total_chunks, oob.lines.len()), (200, 4, 0));
+}
+
+#[test]
+fn compare_lines_aligns_merged_sentences_and_roundtrips_diff_ops() {
+    // Take 0 has two short draft lines, one deleted filler line, and one unchanged line.
+    let a = vec![
+        ("r.0.00000".into(), said(1_000, 2_000, "en", "The first one", &[])),
+        ("r.0.00001".into(), said(2_100, 3_500, "en", "ships in Murch.", &[])),
+        ("r.0.00002".into(), said(4_000, 4_500, "en", "um noise", &[])),
+        ("r.0.00003".into(), said(5_000, 6_000, "en", "Agreed.", &[])),
+    ];
+    // Take 1 merges lines 0+1 and fixes typo "Murch" -> "March", drops filler, keeps "Agreed.".
+    let b = vec![
+        ("r.1.00000".into(), said(1_000, 3_600, "en", "The first one ships in March.", &[])),
+        ("r.1.00001".into(), said(5_000, 6_000, "en", "Agreed.", &[])),
+    ];
+
+    let rows = compare_lines(&a, &b);
+    assert_eq!(rows.len(), 3);
+
+    // Row 0: merged & corrected.
+    assert_eq!(rows[0].key_a.as_deref(), Some("r.0.00000"));
+    assert_eq!(rows[0].key_b.as_deref(), Some("r.1.00000"));
+    assert!(rows[0].changed);
+    assert_eq!(rows[0].text_a, "The first one ships in Murch.");
+    assert_eq!(rows[0].text_b, "The first one ships in March.");
+    assert_eq!(roundtrip_ops(&rows[0].ops), (rows[0].text_a.clone(), rows[0].text_b.clone()));
+
+    // Row 1: unmatched deleted line inserted at t0 = 4000.
+    assert_eq!(rows[1].key_a.as_deref(), Some("r.0.00002"));
+    assert_eq!(rows[1].key_b, None);
+    assert!(rows[1].changed);
+    assert_eq!(rows[1].text_a, "um noise");
+    assert_eq!(rows[1].text_b, "");
+    assert_eq!(roundtrip_ops(&rows[1].ops), (rows[1].text_a.clone(), rows[1].text_b.clone()));
+
+    // Row 2: identical line.
+    assert_eq!(rows[2].key_a.as_deref(), Some("r.0.00003"));
+    assert_eq!(rows[2].key_b.as_deref(), Some("r.1.00001"));
+    assert!(!rows[2].changed);
+    assert_eq!(roundtrip_ops(&rows[2].ops), (rows[2].text_a.clone(), rows[2].text_b.clone()));
+
+    // Zero-timestamp positional alignment fallback.
+    let zero_a = vec![
+        ("r.0.00000".into(), said(0, 0, "zh", "三个案例", &[])),
+        ("r.0.00001".into(), said(0, 0, "zh", "多余一句", &[])),
+    ];
+    let zero_b = vec![("r.1.00000".into(), said(0, 0, "zh", "这三个案例。", &[]))];
+    let zrows = compare_lines(&zero_a, &zero_b);
+    assert_eq!(zrows.len(), 2);
+    assert_eq!(zrows[0].key_a.as_deref(), Some("r.0.00000"));
+    assert_eq!(zrows[0].key_b.as_deref(), Some("r.1.00000"));
+    assert_eq!(roundtrip_ops(&zrows[0].ops), ("三个案例".into(), "这三个案例。".into()));
+    assert_eq!(zrows[1].key_b, None);
+    assert_eq!(zrows[1].text_a, "多余一句");
+
+    // Over-cap line (> DIFF_LCS_MAX_BYTES) skips quadratic LCS yet keeps round-trip invariant.
+    let long_a = format!("prefix {} suffix", "a".repeat(DIFF_LCS_MAX_BYTES + 200));
+    let long_b = format!("prefix {} suffix", "b".repeat(DIFF_LCS_MAX_BYTES + 200));
+    let started = std::time::Instant::now();
+    let long_ops = diff_text(&long_a, &long_b);
+    assert!(started.elapsed().as_millis() < 50, "over-cap diff should be O(n)");
+    assert_eq!(roundtrip_ops(&long_ops), (long_a, long_b));
+}
+
+#[test]
+fn invalidations_ring_coalesces_duplicates_and_caps_at_64() {
+    let mut ring = Invalidations::default();
+    for v in 1..=100u64 {
+        ring.push(ViewKind::Recording, Some("r1".into()), v);
+    }
+    assert_eq!(ring.next, 100);
+    assert_eq!(ring.items.len(), 1);
+    assert_eq!(ring.items[0].version, 100);
+    assert_eq!(ring.items[0].key.as_deref(), Some("r1"));
+
+    let mut distinct = Invalidations::default();
+    for v in 1..=100u64 {
+        distinct.push(ViewKind::Recording, Some(format!("r{v}")), v);
+    }
+    assert_eq!(distinct.next, 100);
+    assert_eq!(distinct.items.len(), KEEP_INVALIDATIONS_EVENTS);
+    assert_eq!(distinct.items.first().map(|i| i.version), Some(37));
+    assert_eq!(distinct.items.last().map(|i| i.version), Some(100));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn view_engine_executes_all_queries_and_cancels_superseded_search() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records");
+    let tapes = dir.path().join("tapes");
+    let db = dir.path().join("index.sqlite3");
+    let shelf = Arc::new(shelf_for(&records, ME, 5));
+
+    write_recording(
+        &shelf,
+        "rec1",
+        NOW,
+        "Quarterly Budget",
+        &["en", "zh"],
+        1,
+        &[
+            (
+                0,
+                vec![
+                    said(0, 1_000, "en", "The budget", &[]),
+                    said(1_100, 2_000, "en", "is five thousand.", &[]),
+                ],
+            ),
+            (1, vec![said(0, 2_100, "en", "The budget is 5,000.", &[("zh", "预算是五千。")])]),
+        ],
+    );
+    notes::add(
+        &shelf,
+        "rec1",
+        500,
+        "Confirm budget".into(),
+        Some("rec1.1.00000".into()),
+        0x12,
+        NOW + 5,
+    )
+    .expect("add note");
+    write_tape(&tapes, "rec1");
+    glossary::put(
+        &shelf,
+        "ZuTalk",
+        Some(BTreeMap::from([("zh".into(), "ZuTalk".into())])),
+        NOW + 6,
+    )
+    .expect("add term");
+    let filing = Filing {
+        city: "city.example".into(),
+        did: "did:zu:city".into(),
+        event: "zu://did:zu:org/ev/event/1".into(),
+        title: "Town hall".into(),
+        audio: false,
+        key: "filek1".into(),
+        state: "city.filed".into(),
+    };
+    shelf.put("", FILING, &[("rec1".into(), Some(filing.clone()))], NOW + 7).expect("put filing");
+
+    let stats = Stats::new();
+    let _index = Index::open(&db, &shelf, &tapes, &stats).expect("build index");
+    let tree = Tree::root("core", stats.clone()).child("work");
+    let (engine, invalidations) = ViewEngine::new(tree.clone(), tapes.clone());
+
+    // 1. Before ready, queries return Err("starting").
+    let err = engine.query(Query::LibrarySummary { tz_offset_min: 0 }).await.unwrap_err();
+    assert_eq!(err, "starting");
+
+    // 2. Wire source + calendar + invalidate so version advances.
+    engine.set_source(Some(shelf.clone()), Some(db.clone()), true, true);
+    engine.set_calendar(Some(Calendar {
+        address: "city.example".into(),
+        did: "did:zu:city".into(),
+        events: vec![CityEvent {
+            path: "zu://did:zu:org/ev/event/1".into(),
+            title: "Town hall".into(),
+            start: Some(NOW),
+        }],
+    }));
+    let v1 = engine.invalidate(ViewKind::Library, None);
+    assert_eq!(v1, 1);
+    assert_eq!(invalidations.now().1.next, 1);
+
+    // 3. Execute all 10 query variants.
+    let r = engine.query(Query::LibrarySummary { tz_offset_min: 0 }).await.expect("summary");
+    assert_eq!(r.version, 1);
+    assert!(matches!(r.value, QueryValue::LibrarySummary(ref s) if s.total == 1));
+
+    let r = engine
+        .query(Query::LibraryMonth {
+            month: "2025-03".into(),
+            tz_offset_min: 0,
+            filter: LibraryFilter::default(),
+            limit: 50,
+            offset: 0,
+        })
+        .await
+        .expect("month");
+    assert!(matches!(r.value, QueryValue::LibraryPage(ref p) if p.total == 1));
+
+    let r = engine
+        .query(Query::LibraryRecent { filter: LibraryFilter::default(), limit: 10, offset: 0 })
+        .await
+        .expect("recent");
+    assert!(matches!(r.value, QueryValue::LibraryPage(ref p) if p.rows.len() == 1));
+
+    let r =
+        engine.query(Query::Search { query: "budget".into(), limit: 20 }).await.expect("search");
+    assert!(matches!(r.value, QueryValue::Search(ref s) if !s.hits.is_empty()));
+
+    let r = engine.query(Query::Recording { id: "rec1".into() }).await.expect("recording");
+    match r.value {
+        QueryValue::Recording(Some(view)) => {
+            assert_eq!(view.row.title, "Quarterly Budget");
+            assert_eq!(view.takes.len(), 2);
+            assert_eq!(view.notes.len(), 1);
+            assert_eq!(view.filed, Some(filing));
+            assert_eq!(view.refine, RefineStatus::Refined { take: 1 });
+        }
+        other => panic!("unexpected Recording reply: {other:?}"),
+    }
+
+    let r = engine
+        .query(Query::Transcript { id: "rec1".into(), take: None, chunk: 0 })
+        .await
+        .expect("transcript");
+    assert!(matches!(r.value, QueryValue::Transcript(ref c) if c.take == 1 && c.lines.len() == 1));
+
+    let r = engine
+        .query(Query::Compare { id: "rec1".into(), take_a: 0, take_b: 1, chunk: 0 })
+        .await
+        .expect("compare");
+    assert!(
+        matches!(r.value, QueryValue::Compare(ref c) if c.rows.len() == 1 && c.rows[0].changed)
+    );
+
+    let r = engine.query(Query::Glossary).await.expect("glossary");
+    assert!(matches!(r.value, QueryValue::Glossary(ref terms) if terms.len() == 1));
+
+    let r = engine.query(Query::Calendar).await.expect("calendar");
+    assert!(matches!(r.value, QueryValue::Calendar(Some(ref cal)) if cal.events.len() == 1));
+
+    let r = engine.query(Query::Outbound).await.expect("outbound");
+    assert!(
+        matches!(r.value, QueryValue::Outbound(ref rows) if rows.len() == 1 && rows[0].id == "rec1")
+    );
+
+    // 4. Deterministic cancellation: block the first Search inside the worker until a second Search
+    //    supersedes its slot, then verify Err("query.cancelled"), counter, and log event.
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let entered = Arc::new((Mutex::new(false), Condvar::new()));
+    let entered_hook = entered.clone();
+    let armed = Arc::new(AtomicBool::new(true));
+    let armed_hook = armed.clone();
+    engine.set_hook(Some(Arc::new(move |view, cancel| {
+        if view == "search" && armed_hook.swap(false, Ordering::AcqRel) {
+            {
+                let (lock, cvar) = &*entered_hook;
+                *lock.lock().expect("lock") = true;
+                cvar.notify_all();
+            }
+            // Wait deterministically for the superseding query to cancel our token.
+            while !cancel.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    })));
+
+    let eng1 = engine.clone();
+    let first = tokio::spawn(zutalk_log::carry(async move {
+        eng1.query(Query::Search { query: "budget".into(), limit: 20 }).await
+    }));
+
+    // Wait until the first Search is inside the blocking worker with its slot active.
+    tokio::task::spawn_blocking(move || {
+        let (lock, cvar) = &*entered;
+        let mut started = lock.lock().expect("lock");
+        while !*started {
+            started = cvar.wait(started).expect("wait");
+        }
+    })
+    .await
+    .expect("barrier");
+
+    let v2 = engine.invalidate(ViewKind::Search, None);
+    assert!(v2 > v1);
+
+    // Second Search on the same slot cancels the first and completes cleanly.
+    let second = engine
+        .query(Query::Search { query: "budget".into(), limit: 20 })
+        .await
+        .expect("second search");
+    assert_eq!(second.version, v2);
+
+    let first_res = first.await.expect("join first");
+    assert_eq!(first_res, Err("query.cancelled"));
+
+    let cancelled_count =
+        stats.tally().counts.into_iter().find(|c| c.name == "query.cancelled").map(|c| c.n);
+    assert!(cancelled_count.unwrap_or(0) >= 1, "expected query.cancelled >= 1");
+    assert!(
+        seen.of("query.done")
+            .iter()
+            .any(|l| l.text("view") == Some("search") && l.text("code") == Some("cancelled")),
+        "expected query.done(code = cancelled) event, got {:?}",
+        seen.of("query.done")
+    );
+
+    engine.set_hook(None);
+    tree.cancel();
+    tree.wait().await;
 }

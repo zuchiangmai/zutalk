@@ -225,5 +225,6 @@
  "code.tape.none": "这场录音没有保留音频",
  "code.keys.async_refused": "没精修 · 需要能整场转写的钥匙",
  "code.index": "本机索引读写失败",
+ "code.query.cancelled": "查询已被新请求替代",
  "reconnect": "重连"
 }

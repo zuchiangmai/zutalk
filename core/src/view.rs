@@ -2,3 +2,5 @@
 //! queries (`P2.md` §3.1, §3.4–§3.6).
 
 pub mod index;
+pub mod query;
+pub mod transcript;

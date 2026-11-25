@@ -225,5 +225,6 @@
  "code.tape.none": "No audio left for this recording",
  "code.keys.async_refused": "Not refined · needs a key that can transcribe the whole recording",
  "code.index": "Local index could not be read or updated",
+ "code.query.cancelled": "Superseded by a newer request",
  "reconnect": "Reconnect"
 }

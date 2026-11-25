@@ -225,5 +225,6 @@
  "code.tape.none": "Il ne reste plus d’audio pour cet enregistrement",
  "code.keys.async_refused": "Non affiné · nécessite une clé permettant de transcrire tout l’enregistrement",
  "code.index": "Impossible de lire ou de mettre à jour l’index local",
+ "code.query.cancelled": "Remplacée par une demande plus récente",
  "reconnect": "Reconnecter"
 }

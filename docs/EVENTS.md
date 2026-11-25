@@ -143,6 +143,9 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 |---|---|---|---|
 | `index.open` | info；`why = "corrupt"` 时 warn | 打开或重建本机 SQLite 投影索引完成时发出 | `mode`（`existing` / `rebuilt`） `why`（`ok` / `missing` / `version` / `owner` / `corrupt`） `rows` `ms` |
 | `index.sync` | debug；失败时 warn | 写事实后增量同步 SQLite 索引的一步完成时发出 | `op`（`upsert` / `remove` / `audio` / `filing` / `refine`） `code` `ms` |
+| `query.done` | info；非 `ok` 时 warn | L3 `ViewEngine` 完成或取消一次视图查询时发出 | `view` `code`（`ok` / `cancelled` / `starting` / 失败码） `ms` `rows` |
+| `query.slow` | warn | L3 视图查询耗时超过 `QUERY_BUDGET_MS`（100 ms）时发出 | `view` `ms` |
+| `view.invalidate` | debug | 视图版本号递增并推入失效通知时发出 | `view` `version` |
 
 ### 采集与落盘
 
