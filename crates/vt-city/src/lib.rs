@@ -41,5 +41,6 @@ pub mod jcs;
 pub mod link;
 pub mod publish;
 pub mod record;
+pub mod zu;
 
 pub use error::{CityError, Result};

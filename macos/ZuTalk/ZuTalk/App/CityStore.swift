@@ -90,6 +90,8 @@ final class CityStore: ObservableObject {
     /// 登录的人;没登录时为 nil。一台 Mac 一次登录一个人。
     @Published private(set) var account: FfiCityAccount?
     @Published private(set) var login: Login = .signedOut
+    /// V0.3 核对六位数字后正在向目录核验身份并保存钥匙。
+    @Published private(set) var confirmingLogin = false
     /// 登录没成的原因,已经是给人看的话。
     @Published private(set) var loginProblem: String?
 
@@ -214,6 +216,7 @@ final class CityStore: ObservableObject {
         let hadOffer = hasLiveOffer
         loginGeneration += 1
         let generation = loginGeneration
+        confirmingLogin = false
         loginProblem = nil
         login = .requesting(server: server)
         Task {
@@ -252,6 +255,10 @@ final class CityStore: ObservableObject {
                 break
             case .success(.check(let digits)):
                 login = .offered(offer, digits: digits)
+                // Pol V0.3 协议里手机发完即停,等人在这台 Mac 上核对数字后点确认。
+                if Self.requiresLocalConfirm(offer) {
+                    return
+                }
             case .success(.cancelled):
                 login = .signedOut
                 return
@@ -272,11 +279,47 @@ final class CityStore: ObservableObject {
         }
     }
 
+    /// Pol V0.3 扫码登录码(含 `/.well-known/zu-relay/`):由这台 Mac 核对数字并点确认。
+    static func requiresLocalConfirm(_ offer: FfiCityLoginOffer) -> Bool {
+        offer.code.contains("/.well-known/zu-relay/")
+    }
+
+    /// Pol V0.3 核对六位数字一致后,由这台 Mac 核验身份并完成登录。
+    func confirmLogin() {
+        guard case .offered(_, let digits) = login,
+              let digits,
+              digits.isEmpty == false,
+              confirmingLogin == false,
+              let core else { return }
+        let generation = loginGeneration
+        confirmingLogin = true
+        loginProblem = nil
+        Task {
+            let result = await Task.detached { Result { try core.cityLoginConfirm() } }.value
+            guard generation == loginGeneration else { return }
+            confirmingLogin = false
+            switch result {
+            case .success(let account):
+                finishLogin(account)
+            case .failure(let error):
+                loginProblem = CityText.describe(error)
+            }
+        }
+    }
+
+    /// 核对数字不一致:作废这一次登录码,让人换一个新码。
+    func rejectLogin(_ offer: FfiCityLoginOffer) {
+        confirmingLogin = false
+        loginProblem = nil
+        loginOfferLapsed(offer)
+    }
+
     /// 换一座城、或离开了设置里这一节:不等了。
     func cancelLogin() {
         guard login != .signedOut else { return }
         let hadOffer = hasLiveOffer
         loginGeneration += 1
+        confirmingLogin = false
         login = .signedOut
         loginProblem = nil
         if hadOffer, let core {

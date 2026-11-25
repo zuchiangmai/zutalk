@@ -311,6 +311,36 @@ pub fn build_take(who: &Identity, input: &TakeInput, now_ms: i64) -> Result<Buil
 /// the record is posted and the file accepted, the audio is public by its
 /// name and neither can be removed.
 pub fn build_part(who: &Identity, part: &PartInput, at_ms: i64) -> Result<Signed> {
+    if who.is_zu() {
+        let (city_did, take_key, prev_cid, prev_body) =
+            crate::zu::unpack_v03_part_target(&part.take_id)?;
+        if !audio_mime_ok(&part.mime) {
+            return Err(CityError::malformed("not an audio type the city serves"));
+        }
+        let seed = who.seed_bytes();
+        let (new_cid, next_body, delivery) = crate::zu::build_v03_part(
+            &seed,
+            who.id(),
+            &city_did,
+            &take_key,
+            prev_cid,
+            &prev_body,
+            part,
+            at_ms,
+        )?;
+        let cid_str = new_cid.to_string();
+        return Ok(Signed {
+            id: cid_str.clone(),
+            rec: json!({
+                crate::zu::ZU_DELIVERY_MARKER: crate::text::b64url(&delivery),
+                "city": city_did,
+                "key": take_key,
+                "cid": cid_str,
+                "at": at_ms,
+                "body": crate::text::b64url(&crate::zu::encode_map(&next_body)),
+            }),
+        });
+    }
     if !is_id(&part.take_id) {
         return Err(CityError::malformed("not a take"));
     }

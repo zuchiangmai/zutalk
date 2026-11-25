@@ -172,6 +172,13 @@ struct PostReply {
 }
 
 #[derive(Deserialize)]
+struct PolCityDoc {
+    did: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct Credentials {
     #[serde(default)]
     credentials: Vec<Value>,
@@ -226,6 +233,267 @@ impl Hub {
         &self.base
     }
 
+    /// Asks a city address whether it runs Pol V0.3 (`/.well-known/pol-city` /
+    /// `/.well-known/zu-did`) first, falling back to V0.2 (`/.well-known/sibian`).
+    pub async fn door_any(&self) -> Result<Door> {
+        match self.get("/.well-known/pol-city", REQUEST_TIMEOUT).await {
+            Ok(body) => {
+                let doc: PolCityDoc = serde_json::from_slice(&body)
+                    .map_err(|_| CityError::protocol("pol-city discovery"))?;
+                if crate::zu::is_accepted_did(&doc.did) {
+                    let fallback_name = reqwest::Url::parse(&self.base)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_string))
+                        .unwrap_or_else(|| self.base.clone());
+                    let name = if doc.name.trim().is_empty() {
+                        fallback_name
+                    } else {
+                        doc.name.trim().to_string()
+                    };
+                    return Ok(Door {
+                        server: self.base.clone(),
+                        city: Some(DoorCity {
+                            id: doc.did,
+                            name,
+                            members: 0,
+                        }),
+                    });
+                }
+                return Ok(Door {
+                    server: self.base.clone(),
+                    city: None,
+                });
+            }
+            Err(CityError::Http { status: 404 }) => {}
+            Err(other) => return Err(other),
+        }
+        self.door().await
+    }
+
+    /// Polls a Zu V0.3 relay room (`GET /.well-known/zu-relay/<room>`).
+    /// Returns `Ok(None)` while waiting (`404`), `Ok(Some(bytes))` when sealed
+    /// bytes have arrived (`200`).
+    pub async fn zu_relay_poll(&self, room: &str) -> Result<Option<Vec<u8>>> {
+        if room.len() != 32
+            || !room
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(CityError::malformed("not a Zu relay room"));
+        }
+        let response = self
+            .http
+            .get(format!("{}/.well-known/zu-relay/{room}", self.base))
+            .header("Cache-Control", "no-store")
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(transport)?;
+        match response.status().as_u16() {
+            200..=299 => response
+                .bytes()
+                .await
+                .map(|b| Some(b.to_vec()))
+                .map_err(transport),
+            404 => Ok(None),
+            status => Err(CityError::Http { status }),
+        }
+    }
+
+    /// Resolves `did` (`did:zu:` via its PLC directory or `did:web:`) and
+    /// verifies that `expected_multikey` is an active `#zu` signing key,
+    /// returning the DID's claimed `zu://` handles.
+    pub async fn verify_zu_did_key(
+        &self,
+        did: &str,
+        expected_multikey: &str,
+    ) -> Result<Vec<String>> {
+        if did.starts_with("did:zu:") {
+            let default_dir = if self.base.contains("polis.exe.xyz") {
+                "https://devplc.zuzalu.ink"
+            } else {
+                "https://plc.zuzalu.ink"
+            };
+            #[cfg(any(test, debug_assertions))]
+            let dir = std::env::var("ZUTALK_ZU_DIRECTORY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| default_dir.to_string());
+            #[cfg(not(any(test, debug_assertions)))]
+            let dir = default_dir.to_string();
+            let dir = dir.trim_end_matches('/');
+
+            let audit_url = format!("{dir}/{did}/log/audit");
+            let audit_res = self
+                .http
+                .get(&audit_url)
+                .timeout(REQUEST_TIMEOUT)
+                .send()
+                .await
+                .map_err(transport)?;
+            if audit_res.status().is_success() {
+                let bytes = audit_res.bytes().await.map_err(transport)?;
+                let entries: Vec<Value> = serde_json::from_slice(&bytes)
+                    .map_err(|_| CityError::protocol("did:zu audit log"))?;
+                return crate::zu::verify_audit_log_current_key(&entries, did, expected_multikey);
+            }
+            let doc_url = format!("{dir}/{did}");
+            let doc_res = self
+                .http
+                .get(&doc_url)
+                .timeout(REQUEST_TIMEOUT)
+                .send()
+                .await
+                .map_err(transport)?;
+            let doc_bytes = read(doc_res).await?;
+            let doc: Value = serde_json::from_slice(&doc_bytes)
+                .map_err(|_| CityError::protocol("did:zu document"))?;
+            return crate::zu::verify_did_document(&doc, did, expected_multikey);
+        }
+
+        if let Some(rest) = did.strip_prefix("did:web:") {
+            let host_port = rest.replace("%3A", ":").replace("%3a", ":");
+            let local = host_port.starts_with("localhost:")
+                || host_port == "localhost"
+                || host_port.starts_with("127.0.0.1:");
+            let scheme = if local { "http" } else { "https" };
+            let doc_url = format!("{scheme}://{host_port}/.well-known/did.json");
+            let res = self
+                .http
+                .get(&doc_url)
+                .timeout(REQUEST_TIMEOUT)
+                .send()
+                .await
+                .map_err(transport)?;
+            let bytes = read(res).await?;
+            let doc: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| CityError::protocol("did:web document"))?;
+            return crate::zu::verify_did_document(&doc, did, expected_multikey);
+        }
+
+        Err(CityError::malformed("unsupported DID method"))
+    }
+
+    /// Reads all matching records from `GET /.well-known/zu-recs`.
+    pub async fn zu_query_all(
+        &self,
+        params: &[(&str, &str)],
+        all_versions: bool,
+    ) -> Result<Vec<crate::zu::HeldZuRecord>> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let mut url = reqwest::Url::parse(&format!("{}/.well-known/zu-recs", self.base))
+                .map_err(|_| CityError::malformed("zu-recs url"))?;
+            {
+                let mut qp = url.query_pairs_mut();
+                for (k, v) in params {
+                    qp.append_pair(k, v);
+                }
+                qp.append_pair("n", "500");
+                if all_versions {
+                    qp.append_pair("all", "1");
+                }
+                if let Some(from) = &cursor {
+                    qp.append_pair("from", from);
+                }
+            }
+            let path_and_query = match url.query() {
+                Some(q) => format!("{}?{q}", url.path()),
+                None => url.path().to_string(),
+            };
+            let bytes = self.get(&path_and_query, TAG_TIMEOUT).await?;
+            let page = crate::zu::decode_query_page(&bytes)?;
+            out.extend(page.records);
+            match page.next {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => return Ok(out),
+            }
+        }
+        Err(CityError::protocol("zu-recs pagination did not terminate"))
+    }
+
+    /// Reads and reduces a Pol V0.3 city's governance chain (`city/role` + `city/invite`).
+    pub async fn zu_city_view(&self, city_did: &str) -> Result<crate::zu::ZuCityView> {
+        let role_recs = self
+            .zu_query_all(&[("to", city_did), ("type", "city/role")], true)
+            .await?;
+        let invite_recs = self
+            .zu_query_all(&[("to", city_did), ("type", "city/invite")], false)
+            .await
+            .unwrap_or_default();
+        Ok(crate::zu::reduce_city_governance(
+            city_did,
+            &role_recs,
+            &invite_recs,
+        ))
+    }
+
+    /// Reads a Pol V0.3 resident's display name (`site/card` / `garden/name` / handle).
+    pub async fn zu_person_name(&self, person_did: &str, handles: &[String]) -> Result<String> {
+        let mut recs = self
+            .zu_query_all(&[("by", person_did), ("type", "site/card")], false)
+            .await
+            .unwrap_or_default();
+        if let Ok(names) = self
+            .zu_query_all(&[("by", person_did), ("type", "garden/name")], false)
+            .await
+        {
+            recs.extend(names);
+        }
+        Ok(crate::zu::person_display_name(&recs, handles))
+    }
+
+    /// Uploads a JSON transcript or translation blob to `PUT /.well-known/zu-blob/<cid>`.
+    /// Validates that the payload is valid UTF-8 JSON matching its raw CID.
+    pub async fn zu_put_text_blob(&self, cid: &str, json_bytes: &[u8]) -> Result<()> {
+        if !crate::zu::is_raw_cid(cid) || crate::zu::raw_cid_string(json_bytes) != cid {
+            return Err(CityError::malformed("text blob does not match its raw CID"));
+        }
+        serde_json::from_slice::<Value>(json_bytes)
+            .map_err(|_| CityError::malformed("text blob is not valid JSON"))?;
+        let response = self
+            .http
+            .put(format!("{}/.well-known/zu-blob/{cid}", self.base))
+            .header("Content-Type", "application/json")
+            .timeout(REQUEST_TIMEOUT)
+            .body(json_bytes.to_vec())
+            .send()
+            .await
+            .map_err(transport)?;
+        match response.status().as_u16() {
+            200..=299 => Ok(()),
+            403 => Err(CityError::Unclaimed),
+            413 => Err(CityError::FileTooBig),
+            400 => Err(CityError::BadFile),
+            status => Err(CityError::Http { status }),
+        }
+    }
+
+    /// Delivers a DRISL CBOR batch (`{ recs, blocks }`) to `POST /.well-known/zu-recs`.
+    pub async fn zu_deliver(&self, cbor_bytes: &[u8]) -> Result<PostOutcome> {
+        let response = self
+            .http
+            .post(format!("{}/.well-known/zu-recs", self.base))
+            .header("Content-Type", "application/cbor")
+            .timeout(REQUEST_TIMEOUT)
+            .body(cbor_bytes.to_vec())
+            .send()
+            .await
+            .map_err(transport)?;
+        let reply_bytes = read(response).await?;
+        let stats = crate::zu::decode_delivery_stats(&reply_bytes)?;
+        let mut took = 0u64;
+        let mut refused = Vec::new();
+        for (cid, stat) in stats {
+            match stat.as_str() {
+                "ok" | "stale" => took += 1,
+                "busy" => return Err(CityError::Offline),
+                _ => refused.push(cid),
+            }
+        }
+        Ok(PostOutcome { took, refused })
+    }
     /// Asks the server who it is and which city this address opens into.
     pub async fn door(&self) -> Result<Door> {
         let body = self.get("/.well-known/sibian", REQUEST_TIMEOUT).await?;
@@ -470,7 +738,7 @@ impl Hub {
     /// Sending a file the server already has is accepted and changes nothing.
     /// A file that was accepted cannot be withdrawn.
     pub async fn file_put(&self, file: &str, bytes: Vec<u8>) -> Result<()> {
-        let url = format!("{}{}", self.base, file_path(file)?);
+        let url = format!("{}{}", self.base, file_put_path(file)?);
         let size = bytes.len() as u64;
         if size == 0 {
             return Err(CityError::malformed("an empty file"));
@@ -479,7 +747,12 @@ impl Hub {
         if size > FILE_MAX_BYTES {
             return Err(CityError::FileTooBig);
         }
-        if file_name(&bytes) != file {
+        let matches = if crate::zu::is_raw_cid(file) {
+            crate::zu::raw_cid_string(&bytes) == file
+        } else {
+            file_name(&bytes) == file
+        };
+        if !matches {
             return Err(CityError::malformed(
                 "the bytes are not the file the name promises",
             ));
@@ -551,6 +824,19 @@ pub fn file_name(bytes: &[u8]) -> String {
 }
 
 fn file_path(file: &str) -> Result<String> {
+    if crate::zu::is_raw_cid(file) {
+        return Ok(format!("/.well-known/rasl/{file}"));
+    }
+    if !is_id(file) {
+        return Err(CityError::malformed("not a file name"));
+    }
+    Ok(format!("/files/{file}"))
+}
+
+fn file_put_path(file: &str) -> Result<String> {
+    if crate::zu::is_raw_cid(file) {
+        return Ok(format!("/.well-known/zu-blob/{file}"));
+    }
     if !is_id(file) {
         return Err(CityError::malformed("not a file name"));
     }

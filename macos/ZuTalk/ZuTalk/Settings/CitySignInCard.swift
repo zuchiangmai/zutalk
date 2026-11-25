@@ -23,6 +23,7 @@ struct CitySignInCard: View {
     var body: some View {
         CitySignInCardContent(
             login: city.login,
+            confirming: city.confirmingLogin,
             problem: city.loginProblem,
             server: $server,
             showsRecoveryKey: $showsRecoveryKey,
@@ -33,6 +34,8 @@ struct CitySignInCard: View {
             },
             onNewCode: { city.beginLogin(server: $0) },
             onCopy: { city.copyLoginCode($0) },
+            onConfirm: { city.confirmLogin() },
+            onReject: { city.rejectLogin($0) },
             onLapsed: { city.loginOfferLapsed($0) },
             onChangeCity: {
                 showsRecoveryKey = false
@@ -51,6 +54,7 @@ struct CitySignInCard: View {
 /// 卡片本身:给什么画什么,所以每一步都能单独拿出来看。
 struct CitySignInCardContent: View {
     let login: CityStore.Login
+    let confirming: Bool
     let problem: String?
     @Binding var server: String
     @Binding var showsRecoveryKey: Bool
@@ -58,6 +62,8 @@ struct CitySignInCardContent: View {
     let onBegin: () -> Void
     let onNewCode: (String) -> Void
     let onCopy: (FfiCityLoginOffer) -> Void
+    let onConfirm: () -> Void
+    let onReject: (FfiCityLoginOffer) -> Void
     let onLapsed: (FfiCityLoginOffer) -> Void
     let onChangeCity: () -> Void
     let onRecover: () -> Void
@@ -232,7 +238,7 @@ struct CitySignInCardContent: View {
                         .lineLimit(1)
                     }
                     if let digits, digits.isEmpty == false {
-                        checkDigits(digits)
+                        checkDigits(digits, offer: offer)
                     }
                 }
                 Spacer(minLength: 0)
@@ -251,7 +257,7 @@ struct CitySignInCardContent: View {
     }
 
     /// 两边显示同一个六位数。数字大、等宽:人要隔着两块屏幕逐位对。
-    private func checkDigits(_ digits: String) -> some View {
+    private func checkDigits(_ digits: String, offer: FfiCityLoginOffer) -> some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             Text(String(localized: "city.signin.check_label"))
                 .font(Font.sans11)
@@ -260,33 +266,69 @@ struct CitySignInCardContent: View {
                 .font(Font.titleLG.monospacedDigit())
                 .foregroundColor(.textPrimary)
                 .textSelection(.enabled)
-            HStack(spacing: Spacing.xs) {
-                ProgressView().controlSize(.small)
-                Text(String(localized: "city.signin.check_waiting"))
-                    .font(Font.sans11)
-                    .foregroundColor(.textTertiary)
-                    .lineLimit(1)
+            if CityStore.requiresLocalConfirm(offer) {
+                if confirming {
+                    HStack(spacing: Spacing.xs) {
+                        ProgressView().controlSize(.small)
+                        Text(String(localized: "city.signin.signing_in"))
+                            .font(Font.sans11)
+                            .foregroundColor(.textTertiary)
+                            .lineLimit(1)
+                    }
+                } else {
+                    HStack(spacing: Spacing.sm) {
+                        ActionPill(
+                            String(localized: "city.signin.check_confirm"),
+                            systemImage: "checkmark.circle",
+                            action: onConfirm
+                        )
+                        ActionPill(
+                            String(localized: "city.signin.check_reject"),
+                            systemImage: "xmark.circle",
+                            style: .quiet
+                        ) {
+                            onReject(offer)
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: Spacing.xs) {
+                    ProgressView().controlSize(.small)
+                    Text(String(localized: "city.signin.check_waiting"))
+                        .font(Font.sans11)
+                        .foregroundColor(.textTertiary)
+                        .lineLimit(1)
+                }
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(AccessibilityID.citySettingsCheckDigits)
     }
 
     // MARK: - 恢复密钥、换一座城
 
+    private var hidesRecoveryKey: Bool {
+        if case .offered(let offer, _) = login {
+            return CityStore.requiresLocalConfirm(offer)
+        }
+        return false
+    }
+
     private var alternativesRow: some View {
         SettingsFullRow {
             HStack(spacing: Spacing.md) {
-                ActionPill(
-                    String(localized: "city.signin.recovery_placeholder"),
-                    systemImage: "key",
-                    style: .quiet,
-                    help: [String(localized: "city.signin.no_device"), String(localized: "city.signin.use_recovery_key")]
-                        .joined(separator: " ")
-                ) {
-                    showsRecoveryKey.toggle()
+                if hidesRecoveryKey == false {
+                    ActionPill(
+                        String(localized: "city.signin.recovery_placeholder"),
+                        systemImage: "key",
+                        style: .quiet,
+                        help: [String(localized: "city.signin.no_device"), String(localized: "city.signin.use_recovery_key")]
+                            .joined(separator: " ")
+                    ) {
+                        showsRecoveryKey.toggle()
+                    }
+                    .accessibilityIdentifier(AccessibilityID.citySettingsUseRecoveryKey)
                 }
-                .accessibilityIdentifier(AccessibilityID.citySettingsUseRecoveryKey)
                 ActionPill(
                     String(localized: "city.signin.change_city"),
                     systemImage: "arrow.uturn.backward",
@@ -298,7 +340,7 @@ struct CitySignInCardContent: View {
                 disclosure
             }
 
-            if showsRecoveryKey {
+            if showsRecoveryKey && hidesRecoveryKey == false {
                 HStack(spacing: Spacing.sm) {
                     SecureField(String(localized: "city.signin.recovery_placeholder"), text: $recoveryKey)
                         .onSubmit(onRecover)

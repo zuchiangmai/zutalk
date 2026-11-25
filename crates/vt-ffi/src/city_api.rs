@@ -194,11 +194,16 @@ pub(crate) struct CitySlot {
     in_flight: Mutex<HashSet<String>>,
 }
 
+enum PendingLoginSession {
+    V02(LinkSession),
+    V03(vt_city::zu::ZuLoginSession),
+}
+
 struct PendingLogin {
     generation: u64,
     server: String,
     city: DoorCity,
-    session: LinkSession,
+    session: PendingLoginSession,
     started_at: i64,
 }
 
@@ -251,6 +256,10 @@ impl StoredAccount {
         }
     }
 
+    fn is_zu(&self) -> bool {
+        self.identity_version == 3 || vt_city::zu::is_accepted_did(&self.city_id)
+    }
+
     fn is_resident(&self) -> bool {
         !self.roles.is_empty()
     }
@@ -284,6 +293,9 @@ struct StoredEvent {
     /// 取消了的活动不拿出来给人选,可它在城里还在:交过的素材照样看得到。
     #[serde(default)]
     cancelled: bool,
+    /// Pol V0.3 日历上已过审/公开展示的活动(任何居民均可为之录制并归档)。
+    #[serde(default)]
+    on_calendar: bool,
 }
 
 impl StoredEvent {
@@ -299,6 +311,7 @@ impl StoredEvent {
             crew: event.crew.clone(),
             imported: event.imported,
             cancelled: event.cancelled,
+            on_calendar: !event.city.is_empty(),
         }
     }
 
@@ -561,12 +574,22 @@ impl StoredFiling {
         options: &StoredOptions,
     ) -> FfiCityFiling {
         let web_url = match (server, &self.block_id, self.state) {
-            (Some(server), Some(block), FilingState::Filed) => Some(format!(
-                "{}/archive/c/{}/b/{}",
-                server.trim_end_matches('/'),
-                self.event_id,
-                block
-            )),
+            (Some(server), Some(block), FilingState::Filed) => {
+                let (chan_seg, block_seg) = if self.event_id.contains('~') {
+                    (
+                        vt_city::zu::archive_url_id(&self.event_id),
+                        vt_city::zu::archive_url_id(block),
+                    )
+                } else {
+                    (self.event_id.clone(), block.clone())
+                };
+                Some(format!(
+                    "{}/archive/c/{}/b/{}",
+                    server.trim_end_matches('/'),
+                    chan_seg,
+                    block_seg
+                ))
+            }
             _ => None,
         };
         FfiCityFiling {
@@ -658,6 +681,9 @@ struct SentPart {
     /// 城的服务器上有这个文件了。只在 `posted` 之后才会是真:说「这一段交了」
     /// 的时候,城里一定有指着它的那条记录。
     uploaded: bool,
+    /// V0.3 签出的那一份记录快照:同一段字节不变重试时原样复投,不另签一条。
+    #[serde(default)]
+    signed: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,6 +844,7 @@ fn may_file(event: &StoredEvent, account: &StoredAccount) -> bool {
     event.involves(&account.person_id)
         || account.is_coordinator()
         || (event.imported && account.is_reviewer())
+        || (account.is_zu() && account.is_resident() && event.on_calendar)
 }
 
 /// 说话人短号和句子照城的读法收拾一遍:不然名字对不上,译文也会被当成过时。
@@ -1186,6 +1213,53 @@ impl ZuTalkCore {
         account: &StoredAccount,
         previous: &StoredCalendar,
     ) -> Result<StoredCalendar, CityError> {
+        if account.is_zu() {
+            let now = now_epoch();
+            let city_view = hub.zu_city_view(&account.city_id).await?;
+            let ev_recs = hub
+                .zu_query_all(&[("to", &account.city_id), ("type", "ev/*")], false)
+                .await?;
+            let v02_links = hub
+                .zu_query_all(&[("to", &account.city_id), ("type", "v02/link")], false)
+                .await
+                .unwrap_or_default();
+            let chan_recs = hub
+                .zu_query_all(&[("to", &account.city_id), ("type", "arc/channel")], false)
+                .await
+                .unwrap_or_default();
+            let mut events: Vec<StoredEvent> =
+                vt_city::zu::reduce_v03_events(&city_view, &ev_recs, &v02_links)
+                    .iter()
+                    .map(StoredEvent::of)
+                    .collect();
+            events.sort_by(|a, b| (a.start_ms, &a.id).cmp(&(b.start_ms, &b.id)));
+            let is_resident = city_view.residents.contains(&account.person_id);
+            let is_coordinator = city_view.holds(&account.person_id, ROLE_COORDINATOR);
+            let mut channels: Vec<StoredChannel> =
+                vt_city::zu::reduce_v03_channels(&city_view, &chan_recs)
+                    .iter()
+                    .filter(|channel| {
+                        vt_city::channels::may_put(
+                            channel,
+                            &account.person_id,
+                            is_resident,
+                            is_coordinator,
+                        )
+                    })
+                    .map(|channel| StoredChannel {
+                        id: channel.id.clone(),
+                        title: channel.title.clone(),
+                    })
+                    .collect();
+            channels.sort_by(|a, b| a.title.cmp(&b.title));
+            return Ok(StoredCalendar {
+                fetched_at: now,
+                events,
+                channels,
+                curators: BTreeMap::new(),
+                curators_checked_at: now,
+            });
+        }
         let records = hub
             .tag_get(
                 &city_tag(&account.city_id),
@@ -1311,6 +1385,17 @@ impl ZuTalkCore {
         card: &[Value],
         records: &[Value],
     ) -> Result<(), CityError> {
+        if let Some(cbor_b64) = records.iter().find_map(|rec| {
+            rec.get(vt_city::zu::ZU_DELIVERY_MARKER)
+                .and_then(Value::as_str)
+        }) {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(cbor_b64.as_bytes())
+                .map_err(|_| CityError::Protocol("invalid Zu delivery envelope".into()))?;
+            let outcome = hub.zu_deliver(&bytes).await?;
+            outcome.accepted()?;
+            return Ok(());
+        }
         for (index, tag) in tags.iter().enumerate() {
             let wanted = publish::for_tag(tag, records);
             let ours: HashSet<String> = wanted
@@ -1499,38 +1584,73 @@ impl ZuTalkCore {
             speakers: speakers.clone(),
             channel_ids: channel.iter().map(|channel| channel.id.clone()).collect(),
         };
-        let built =
-            publish::build_take(&identity, &input, filing.built_at_ms.unwrap_or_else(now_ms))
+        let built_at = filing.built_at_ms.unwrap_or_else(now_ms);
+        let (take_id, block_id, tags) = if account.is_zu() {
+            let seed = identity.seed_bytes();
+            let built = vt_city::zu::build_v03_take(
+                &seed,
+                identity.id(),
+                &account.city_id,
+                &input,
+                built_at,
+                None,
+                None,
+                None,
+            )
+            .map_err(|error| failure_code(&error))?;
+            self.runtime
+                .block_on(async {
+                    hub.zu_deliver(&built.delivery_bytes).await?.accepted()?;
+                    for (cid, blob_bytes) in &built.blobs {
+                        hub.zu_put_text_blob(cid, blob_bytes).await?;
+                    }
+                    Ok::<(), CityError>(())
+                })
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+            copy.take = Some(json!({
+                "city": account.city_id,
+                "key": built.take_key,
+                "cid": built.take_cid.to_string(),
+                "at": built_at,
+                "body": URL_SAFE_NO_PAD.encode(vt_city::zu::encode_map(&built.take_body)),
+            }));
+            (built.take_ref, built.block_ref, Vec::new())
+        } else {
+            let built = publish::build_take(&identity, &input, built_at)
                 .map_err(|error| failure_code(&error))?;
-        let as_event = CityEvent {
-            id: event.id.clone(),
-            title: event.title.clone(),
-            place: event.place.clone(),
-            tz: String::new(),
-            scope: event.scope.clone(),
-            city: account.city_id.clone(),
-            by: String::new(),
-            start_ms: event.start_ms,
-            end_ms: event.end_ms,
-            hosts: event.hosts.clone(),
-            crew: event.crew.clone(),
-            cancelled: false,
-            imported: event.imported,
+            let as_event = CityEvent {
+                id: event.id.clone(),
+                title: event.title.clone(),
+                place: event.place.clone(),
+                tz: String::new(),
+                scope: event.scope.clone(),
+                city: account.city_id.clone(),
+                by: String::new(),
+                start_ms: event.start_ms,
+                end_ms: event.end_ms,
+                hosts: event.hosts.clone(),
+                crew: event.crew.clone(),
+                cancelled: false,
+                imported: event.imported,
+            };
+            // 城自己的录制还要求首位主办也是居民才贴城的标签。收进来的活动签的
+            // 是城授权的钥匙,不是居民,可它们正是归城管的活动:档案馆和主题的
+            // 频道都从城的标签上读,所以这里只看交的人是不是居民。
+            let tags = vt_city::calendar::recording_tags(&as_event, account.is_resident());
+            let card = self.city_card(&hub, account, &identity);
+            self.runtime
+                .block_on(Self::city_post(&hub, &tags, &card, &built.records))
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+            // 那条 tape/take 是签出来的第一条:留一份,交音频时要连它一起再贴。
+            copy.take = built.records.first().cloned();
+            (built.take_id, built.block_id, tags)
         };
-        // 城自己的录制还要求首位主办也是居民才贴城的标签。收进来的活动签的
-        // 是城授权的钥匙,不是居民,可它们正是归城管的活动:档案馆和主题的
-        // 频道都从城的标签上读,所以这里只看交的人是不是居民。
-        let tags = vt_city::calendar::recording_tags(&as_event, account.is_resident());
-        let card = self.city_card(&hub, account, &identity);
-        self.runtime
-            .block_on(Self::city_post(&hub, &tags, &card, &built.records))
-            .map_err(|error| match error {
-                CityError::Refused => code::REFUSED,
-                other => failure_code(&other),
-            })?;
-
-        // 那条 tape/take 是签出来的第一条:留一份,交音频时要连它一起再贴。
-        copy.take = built.records.first().cloned();
         if let Some(path) = self.city_sent_path(session_id) {
             write_private_json(&path, &copy).map_err(|_| code::SERVER)?;
         }
@@ -1549,8 +1669,8 @@ impl ZuTalkCore {
                 filing.event_title = event.title.clone();
                 filing.event_start_ms = event.start_ms;
                 filing.channel = channel.clone();
-                filing.take_id = Some(built.take_id.clone());
-                filing.block_id = Some(built.block_id.clone());
+                filing.take_id = Some(take_id.clone());
+                filing.block_id = Some(block_id.clone());
                 filing.tags = tags.clone();
                 filing.filed_at = Some(now_epoch());
                 filing.signer_name = account.person_name.clone();
@@ -1582,44 +1702,154 @@ impl ZuTalkCore {
             return Ok(());
         }
         let identity = self.city_identity(&account).map_err(|_| code::SIGNED_OUT)?;
-        let at_ms = now_ms();
-        let mut records = Vec::new();
-        if !changes.added.is_empty() {
-            let segs: Vec<Value> = changes.added.iter().filter_map(added_segment).collect();
-            let added = vt_city::record::make(
-                &identity,
-                "tape/text",
-                json!({ "segs": segs }),
-                std::slice::from_ref(&take_id),
-                &[identity.id().to_string()],
-                at_ms,
-            )
-            .map_err(|error| failure_code(&error))?;
-            records.push(added.rec);
-        }
-        let translations: Vec<(String, Vec<Translated>)> =
-            changes.translations.into_iter().collect();
-        records.extend(
-            publish::build_update(
-                &identity,
-                &take_id,
-                &changes.fixes,
-                &translations,
-                at_ms + 1,
-            )
-            .map_err(|error| failure_code(&error))?,
-        );
         let hub = self
             .city_hub(&account.server, REQUEST_TIMEOUT)
             .map_err(|_| code::BAD_ADDRESS)?;
-        let card = self.city_card(&hub, &account, &identity);
-        self.runtime
-            .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
-            .map_err(|error| match error {
-                CityError::Refused => code::REFUSED,
-                other => failure_code(&other),
-            })?;
-        write_private_json(&sent_path, &changes.copy).map_err(|_| code::SERVER)?;
+        if account.is_zu() {
+            let take_state = sent.take.as_ref().ok_or(code::SERVER)?;
+            let take_key = take_state["key"].as_str().ok_or(code::SERVER)?;
+            let prev_cid_str = take_state["cid"].as_str().ok_or(code::SERVER)?;
+            let prev_cid = vt_city::zu::Cid::parse(prev_cid_str).map_err(|_| code::SERVER)?;
+            let prev_at = take_state["at"].as_i64().unwrap_or(0);
+            let prev_body_bytes = take_state["body"]
+                .as_str()
+                .and_then(|s| URL_SAFE_NO_PAD.decode(s.as_bytes()).ok())
+                .ok_or(code::SERVER)?;
+            let prev_body = vt_city::zu::decode(&prev_body_bytes)
+                .ok()
+                .and_then(|v| v.as_map().cloned())
+                .ok_or(code::SERVER)?;
+            let times = assign_times(&lines, &changes.copy.lines);
+            let labels = &changes.copy.speakers;
+            let mut sentences = Vec::with_capacity(lines.len());
+            let mut translations: BTreeMap<String, Vec<Translated>> = BTreeMap::new();
+            for (line, t_ms) in lines.iter().zip(times) {
+                sentences.push(Sentence {
+                    t_ms,
+                    d_ms: line.duration_ms,
+                    speaker: line
+                        .speaker
+                        .as_ref()
+                        .and_then(|s| labels.get(s))
+                        .cloned()
+                        .unwrap_or_default(),
+                    text: line.text.clone(),
+                });
+                for (lang, text) in &line.lanes {
+                    translations
+                        .entry(lang.clone())
+                        .or_default()
+                        .push(Translated {
+                            t_ms,
+                            source_text: line.text.clone(),
+                            text: text.clone(),
+                        });
+                }
+            }
+            let options = self.city_ledger().options;
+            let names = if options.speaker_names {
+                self.city_speaker_names(session_id)
+            } else {
+                HashMap::new()
+            };
+            let speakers: Vec<(String, String)> = labels
+                .iter()
+                .filter_map(|(speaker, label)| Some((label.clone(), names.get(speaker)?.clone())))
+                .collect();
+            let started_ms = prev_body
+                .get("start")
+                .and_then(vt_city::zu::ZuValue::as_i64)
+                .unwrap_or_else(now_ms);
+            let end_ms = prev_body
+                .get("end")
+                .and_then(vt_city::zu::ZuValue::as_i64)
+                .unwrap_or(started_ms);
+            let title = prev_body
+                .get("title")
+                .and_then(vt_city::zu::ZuValue::as_str)
+                .unwrap_or(&filing.event_title)
+                .to_string();
+            let input = TakeInput {
+                event_id: filing.event_id.clone(),
+                title,
+                started_ms,
+                duration_ms: (end_ms - started_ms).max(0),
+                sentences,
+                translations: translations.into_iter().collect(),
+                speakers,
+                channel_ids: Vec::new(),
+            };
+            let at_ms = now_ms().max(prev_at + 1);
+            let seed = identity.seed_bytes();
+            let built = vt_city::zu::build_v03_take(
+                &seed,
+                identity.id(),
+                &account.city_id,
+                &input,
+                at_ms,
+                Some(take_key),
+                Some(prev_cid),
+                prev_body.get("parts"),
+            )
+            .map_err(|error| failure_code(&error))?;
+            self.runtime
+                .block_on(async {
+                    hub.zu_deliver(&built.delivery_bytes).await?.accepted()?;
+                    for (cid, blob_bytes) in &built.blobs {
+                        hub.zu_put_text_blob(cid, blob_bytes).await?;
+                    }
+                    Ok::<(), CityError>(())
+                })
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+            let mut next_copy = changes.copy;
+            next_copy.take = Some(json!({
+                "city": account.city_id,
+                "key": built.take_key,
+                "cid": built.take_cid.to_string(),
+                "at": at_ms,
+                "body": URL_SAFE_NO_PAD.encode(vt_city::zu::encode_map(&built.take_body)),
+            }));
+            write_private_json(&sent_path, &next_copy).map_err(|_| code::SERVER)?;
+        } else {
+            let at_ms = now_ms();
+            let mut records = Vec::new();
+            if !changes.added.is_empty() {
+                let segs: Vec<Value> = changes.added.iter().filter_map(added_segment).collect();
+                let added = vt_city::record::make(
+                    &identity,
+                    "tape/text",
+                    json!({ "segs": segs }),
+                    std::slice::from_ref(&take_id),
+                    &[identity.id().to_string()],
+                    at_ms,
+                )
+                .map_err(|error| failure_code(&error))?;
+                records.push(added.rec);
+            }
+            let translations: Vec<(String, Vec<Translated>)> =
+                changes.translations.into_iter().collect();
+            records.extend(
+                publish::build_update(
+                    &identity,
+                    &take_id,
+                    &changes.fixes,
+                    &translations,
+                    at_ms + 1,
+                )
+                .map_err(|error| failure_code(&error))?,
+            );
+            let card = self.city_card(&hub, &account, &identity);
+            self.runtime
+                .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+            write_private_json(&sent_path, &changes.copy).map_err(|_| code::SERVER)?;
+        }
         let languages = language_counts(&lines);
         self.with_city_ledger(|ledger| {
             if let Some(filing) = ledger.filings.get_mut(session_id) {
@@ -1647,18 +1877,36 @@ impl ZuTalkCore {
             return Err(code::UNBOUND);
         };
         let identity = self.city_identity(&account).map_err(|_| code::SIGNED_OUT)?;
-        let records = publish::build_withdraw(&identity, &block_id, now_ms())
-            .map_err(|error| failure_code(&error))?;
         let hub = self
             .city_hub(&account.server, REQUEST_TIMEOUT)
             .map_err(|_| code::BAD_ADDRESS)?;
-        let card = self.city_card(&hub, &account, &identity);
-        self.runtime
-            .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
-            .map_err(|error| match error {
-                CityError::Refused => code::REFUSED,
-                other => failure_code(&other),
-            })?;
+        if account.is_zu() {
+            let seed = identity.seed_bytes();
+            let delivery = vt_city::zu::build_v03_withdraw(
+                &seed,
+                identity.id(),
+                &account.city_id,
+                &block_id,
+                now_ms(),
+            )
+            .map_err(|error| failure_code(&error))?;
+            self.runtime
+                .block_on(async { hub.zu_deliver(&delivery).await?.accepted() })
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+        } else {
+            let records = publish::build_withdraw(&identity, &block_id, now_ms())
+                .map_err(|error| failure_code(&error))?;
+            let card = self.city_card(&hub, &account, &identity);
+            self.runtime
+                .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
+                .map_err(|error| match error {
+                    CityError::Refused => code::REFUSED,
+                    other => failure_code(&other),
+                })?;
+        }
         if let Some(path) = self.city_sent_path(session_id) {
             let _ = std::fs::remove_file(path);
         }
@@ -1692,7 +1940,11 @@ impl ZuTalkCore {
     fn city_audio_copy(&self, session_id: &str, clearance: &AudioClearance) -> SentCopy {
         let mut sent = self.city_sent_copy(session_id);
         let another_take = sent.take.as_ref().is_some_and(|take| {
-            vt_city::record::record_id(take).ok().as_deref() != Some(clearance.take_id.as_str())
+            if let Some((_, want_key)) = clearance.take_id.split_once('~') {
+                take.get("key").and_then(Value::as_str) != Some(want_key)
+            } else {
+                vt_city::record::record_id(take).ok().as_deref() != Some(clearance.take_id.as_str())
+            }
         });
         if another_take {
             sent.take = None;
@@ -1712,6 +1964,36 @@ impl ZuTalkCore {
     ) -> Result<Value, &'static str> {
         if let Some(take) = &sent.take {
             return Ok(take.clone());
+        }
+        if account.is_zu() {
+            let take_key = clearance
+                .take_id
+                .split_once('~')
+                .map(|(_, k)| k)
+                .ok_or(code::SERVER)?;
+            let found = self
+                .runtime
+                .block_on(hub.zu_query_all(
+                    &[
+                        ("by", account.person_id.as_str()),
+                        ("to", account.city_id.as_str()),
+                        ("type", "tape/take"),
+                        ("key", take_key),
+                    ],
+                    false,
+                ))
+                .map_err(|error| failure_code(&error))?;
+            let latest = found.into_iter().max_by_key(|r| r.at).ok_or(code::SERVER)?;
+            let body_map = latest.body.ok_or(code::SERVER)?;
+            let state = json!({
+                "city": account.city_id,
+                "key": latest.key,
+                "cid": latest.cid.to_string(),
+                "at": latest.at,
+                "body": URL_SAFE_NO_PAD.encode(vt_city::zu::encode_map(&body_map)),
+            });
+            sent.take = Some(state.clone());
+            return Ok(state);
         }
         let on_tag = self
             .runtime
@@ -1741,10 +2023,16 @@ impl ZuTalkCore {
         if account.is_resident() {
             return Ok(());
         }
-        let roles = self
-            .runtime
-            .block_on(hub.roles(&account.city_id, &account.person_id))
-            .map_err(|error| failure_code(&error))?;
+        let roles = if account.is_zu() {
+            self.runtime
+                .block_on(hub.zu_city_view(&account.city_id))
+                .map_err(|error| failure_code(&error))?
+                .roles_of(&account.person_id)
+        } else {
+            self.runtime
+                .block_on(hub.roles(&account.city_id, &account.person_id))
+                .map_err(|error| failure_code(&error))?
+        };
         if roles.is_empty() {
             return Err(code::AUDIO_REFUSED);
         }
@@ -1793,9 +2081,12 @@ impl ZuTalkCore {
         if !looks_like_mp4(&bytes) {
             return Err(code::AUDIO_BAD_PART.into());
         }
-        let file = file_name(&bytes);
-
         let account = self.city_stored_account().ok_or(code::SIGNED_OUT)?;
+        let file = if account.is_zu() {
+            vt_city::zu::raw_cid_string(&bytes)
+        } else {
+            file_name(&bytes)
+        };
         let identity = self.city_identity(&account).map_err(|_| code::SIGNED_OUT)?;
         let hub = self
             .city_hub(&account.server, REQUEST_TIMEOUT)
@@ -1803,7 +2094,16 @@ impl ZuTalkCore {
         let failed = |error: CityError| audio_failure(&error, now_epoch());
         self.city_housed(&hub, &account)?;
 
-        // 城对每个段号只认它最先看到的那一条记录(按签的时刻排)。
+        let take = self.city_take_record(&hub, &account, clearance, &mut sent)?;
+        let prev_zu_at = take["at"].as_i64().unwrap_or(0);
+        let reused_signed = sent
+            .parts
+            .get(&n)
+            .filter(|earlier| account.is_zu() && earlier.file == file)
+            .and_then(|earlier| earlier.signed.clone());
+
+        // 城对每个段号只认它最先看到的那一条记录(按签的时刻排); V0.3 则每次
+        // 更新同一路径的 `tape/take`,时刻必须严格晚于前一条。
         let at_ms = match sent.parts.get(&n) {
             // 上一次签过、字节没变:沿用那一刻,签出来的就是同一条。
             Some(earlier) if earlier.file == file => earlier.at_ms,
@@ -1811,7 +2111,7 @@ impl ZuTalkCore {
             // 相同)。那一条记录贴上去过的话,先问它的文件是不是其实传完了,
             // 只是没来得及记:是,这一段就已经交了,不再传第二份。不是 ——
             // 或者那一条有没有贴上去都说不准 —— 它指着的就是一个城里没有的
-            // 文件:新的这一条要排到它前面,不然城里这一段永远放不出来。
+            // 文件:新的这一条要排到它前面(V0.2)或接在它后面(V0.3)。
             Some(earlier) => {
                 let earlier = earlier.clone();
                 if earlier.posted
@@ -1830,29 +2130,52 @@ impl ZuTalkCore {
                     write_private_json(&sent_path, &sent).map_err(|_| code::SERVER)?;
                     return Ok(());
                 }
-                earlier.at_ms - 1
+                if account.is_zu() {
+                    now_ms().max(prev_zu_at + 1)
+                } else {
+                    earlier.at_ms - 1
+                }
             }
-            None => now_ms(),
+            None => {
+                if account.is_zu() {
+                    now_ms().max(prev_zu_at + 1)
+                } else {
+                    now_ms()
+                }
+            }
         };
-        let take = self.city_take_record(&hub, &account, clearance, &mut sent)?;
-        let part = publish::build_part(
-            &identity,
-            &PartInput {
-                take_id: clearance.take_id.clone(),
-                n,
-                file: file.clone(),
-                size,
-                t0_ms,
-                dur_ms,
-                mime: AUDIO_MIME.to_string(),
-                levels: levels.to_string(),
-            },
-            at_ms,
-        )
-        .map_err(|error| match error {
-            CityError::FileTooBig => code::AUDIO_TOO_BIG,
-            _ => code::AUDIO_BAD_PART,
-        })?;
+        let target_take_id = if account.is_zu() {
+            let take_key = take["key"].as_str().ok_or(code::SERVER)?;
+            let prev_cid = take["cid"].as_str().ok_or(code::SERVER)?;
+            let prev_body = take["body"].as_str().ok_or(code::SERVER)?;
+            vt_city::zu::pack_v03_part_target(&account.city_id, take_key, prev_cid, prev_body)
+        } else {
+            clearance.take_id.clone()
+        };
+        let part_rec = match reused_signed {
+            Some(cached) => cached,
+            None => {
+                publish::build_part(
+                    &identity,
+                    &PartInput {
+                        take_id: target_take_id,
+                        n,
+                        file: file.clone(),
+                        size,
+                        t0_ms,
+                        dur_ms,
+                        mime: AUDIO_MIME.to_string(),
+                        levels: levels.to_string(),
+                    },
+                    at_ms,
+                )
+                .map_err(|error| match error {
+                    CityError::FileTooBig => code::AUDIO_TOO_BIG,
+                    _ => code::AUDIO_BAD_PART,
+                })?
+                .rec
+            }
+        };
 
         // 先记下签了什么,再贴。
         let mut entry = SentPart {
@@ -1863,16 +2186,35 @@ impl ZuTalkCore {
             at_ms,
             posted: false,
             uploaded: false,
+            signed: account.is_zu().then(|| part_rec.clone()),
         };
         sent.parts.insert(n, entry.clone());
         write_private_json(&sent_path, &sent).map_err(|_| code::SERVER)?;
 
-        let card = self.city_card(&hub, &account, &identity);
+        let card = if account.is_zu() {
+            Vec::new()
+        } else {
+            self.city_card(&hub, &account, &identity)
+        };
         let tags = [event_tag(&clearance.event_id)];
+        let post_records = if account.is_zu() {
+            vec![part_rec.clone()]
+        } else {
+            vec![take, part_rec.clone()]
+        };
         self.runtime
-            .block_on(Self::city_post(&hub, &tags, &card, &[take, part.rec]))
+            .block_on(Self::city_post(&hub, &tags, &card, &post_records))
             .map_err(failed)?;
         entry.posted = true;
+        if account.is_zu() {
+            sent.take = Some(json!({
+                "city": part_rec["city"],
+                "key": part_rec["key"],
+                "cid": part_rec["cid"],
+                "at": part_rec["at"],
+                "body": part_rec["body"],
+            }));
+        }
         sent.parts.insert(n, entry.clone());
         write_private_json(&sent_path, &sent).map_err(|_| code::SERVER)?;
 
@@ -2130,12 +2472,20 @@ impl ZuTalkCore {
     /// 开始登录:问这个地址是哪座城,出一个给旧设备扫的码。走网络。
     pub fn city_login_begin(&self, server: String) -> Result<FfiCityLoginOffer, CoreError> {
         let hub = self.city_hub(&server, REQUEST_TIMEOUT)?;
-        let door = self.runtime.block_on(hub.door()).map_err(city_error)?;
+        let door = self.runtime.block_on(hub.door_any()).map_err(city_error)?;
         let city = door.city.ok_or_else(|| refuse(code::NO_CITY))?;
-        let session = LinkSession::new().map_err(city_error)?;
+        let (code_str, session) = if vt_city::zu::is_accepted_did(&city.id) {
+            let zu_session = vt_city::zu::ZuLoginSession::new(hub.base());
+            let code_str = zu_session.code().to_string();
+            (code_str, PendingLoginSession::V03(zu_session))
+        } else {
+            let v02_session = LinkSession::new().map_err(city_error)?;
+            let code_str = v02_session.code();
+            (code_str, PendingLoginSession::V02(v02_session))
+        };
         let started_at = now_epoch();
         let offer = FfiCityLoginOffer {
-            code: session.code(),
+            code: code_str,
             server: hub.base().to_string(),
             city_name: city.name.clone(),
             expires_at_epoch: started_at + LOGIN_TTL_SECS,
@@ -2157,55 +2507,200 @@ impl ZuTalkCore {
 
     /// 等旧设备的下一句话,最多挂二十几秒。走网络,调用方在后台线程上循环调。
     pub fn city_login_poll(&self) -> Result<FfiCityLoginStep, CoreError> {
-        let (generation, server, room, since, started_at) = {
+        enum PollTarget {
+            V02 {
+                generation: u64,
+                server: String,
+                room: String,
+                since: u64,
+                started_at: i64,
+            },
+            V03 {
+                generation: u64,
+                server: String,
+                room: String,
+                started_at: i64,
+                already_digits: Option<String>,
+            },
+        }
+        let target = {
             let guard = self.city.login.lock().unwrap();
             let Some(pending) = guard.as_ref() else {
                 return Ok(FfiCityLoginStep::Cancelled);
             };
+            match &pending.session {
+                PendingLoginSession::V02(session) => PollTarget::V02 {
+                    generation: pending.generation,
+                    server: pending.server.clone(),
+                    room: session.room().to_string(),
+                    since: session.since(),
+                    started_at: pending.started_at,
+                },
+                PendingLoginSession::V03(session) => PollTarget::V03 {
+                    generation: pending.generation,
+                    server: pending.server.clone(),
+                    room: session.room().to_string(),
+                    started_at: pending.started_at,
+                    already_digits: session.ready().map(|r| r.digits.clone()),
+                },
+            }
+        };
+
+        match target {
+            PollTarget::V03 {
+                generation,
+                server,
+                room,
+                started_at,
+                already_digits,
+            } => {
+                if let Some(digits) = already_digits {
+                    return Ok(FfiCityLoginStep::Check { digits });
+                }
+                if now_epoch() - started_at > LOGIN_TTL_SECS {
+                    self.city_login_cancel();
+                    return Ok(FfiCityLoginStep::Expired);
+                }
+                let hub = self.city_hub(&server, REQUEST_TIMEOUT)?;
+                let deadline = std::time::Instant::now() + Duration::from_secs(18);
+                loop {
+                    {
+                        let guard = self.city.login.lock().unwrap();
+                        let still_same = guard.as_ref().is_some_and(|p| p.generation == generation);
+                        if !still_same {
+                            return Ok(FfiCityLoginStep::Cancelled);
+                        }
+                    }
+                    if now_epoch() - started_at > LOGIN_TTL_SECS {
+                        self.city_login_cancel();
+                        return Ok(FfiCityLoginStep::Expired);
+                    }
+                    let last_offline = match self.runtime.block_on(hub.zu_relay_poll(&room)) {
+                        Ok(Some(bytes)) => {
+                            let mut guard = self.city.login.lock().unwrap();
+                            let Some(pending) =
+                                guard.as_mut().filter(|p| p.generation == generation)
+                            else {
+                                return Ok(FfiCityLoginStep::Cancelled);
+                            };
+                            let PendingLoginSession::V03(session) = &mut pending.session else {
+                                return Ok(FfiCityLoginStep::Cancelled);
+                            };
+                            let digits = session.unseal(&bytes).map_err(city_error)?;
+                            return Ok(FfiCityLoginStep::Check { digits });
+                        }
+                        Ok(None) => false,
+                        Err(CityError::Offline) => true,
+                        Err(other) => return Err(city_error(other)),
+                    };
+                    if std::time::Instant::now() >= deadline {
+                        if last_offline {
+                            return Err(refuse(code::OFFLINE));
+                        }
+                        return Ok(FfiCityLoginStep::Waiting);
+                    }
+                    std::thread::sleep(Duration::from_millis(1_000));
+                }
+            }
+            PollTarget::V02 {
+                generation,
+                server,
+                room,
+                since,
+                started_at,
+            } => {
+                if now_epoch() - started_at > LOGIN_TTL_SECS {
+                    self.city_login_cancel();
+                    return Ok(FfiCityLoginStep::Expired);
+                }
+                let hub = self.city_hub(&server, RELAY_TIMEOUT)?;
+                let (messages, n) = self
+                    .runtime
+                    .block_on(hub.relay_get(&room, since))
+                    .map_err(city_error)?;
+                let step = {
+                    let mut guard = self.city.login.lock().unwrap();
+                    // 等的这一会儿里取消了、换了一个码:这一句不作数。
+                    let Some(pending) = guard
+                        .as_mut()
+                        .filter(|pending| pending.generation == generation)
+                    else {
+                        return Ok(FfiCityLoginStep::Cancelled);
+                    };
+                    let PendingLoginSession::V02(session) = &mut pending.session else {
+                        return Ok(FfiCityLoginStep::Cancelled);
+                    };
+                    session.absorb(&messages, n).map_err(city_error)?
+                };
+                match step {
+                    LinkStep::Waiting => Ok(FfiCityLoginStep::Waiting),
+                    LinkStep::Check(digits) => Ok(FfiCityLoginStep::Check { digits }),
+                    LinkStep::Cancelled => {
+                        self.city_login_cancel();
+                        Ok(FfiCityLoginStep::Cancelled)
+                    }
+                    LinkStep::Done { identity, name } => {
+                        let Some(pending) = self.city.login.lock().unwrap().take() else {
+                            return Ok(FfiCityLoginStep::Cancelled);
+                        };
+                        let account = self.finish_city_login(
+                            &pending.server,
+                            &pending.city,
+                            identity,
+                            &name,
+                        )?;
+                        Ok(FfiCityLoginStep::Done { account })
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pol V0.3 扫码登录后,在电脑端核对六位数字一致、确认完成登录。走网络。
+    pub fn city_login_confirm(&self) -> Result<FfiCityAccount, CoreError> {
+        let (generation, server, city, did, seed) = {
+            let guard = self.city.login.lock().unwrap();
+            let Some(pending) = guard.as_ref() else {
+                return Err(refuse(code::SIGNED_OUT));
+            };
+            let PendingLoginSession::V03(session) = &pending.session else {
+                return Err(refuse(code::SERVER));
+            };
+            let Some(ready) = session.ready() else {
+                return Err(refuse(code::SERVER));
+            };
             (
                 pending.generation,
                 pending.server.clone(),
-                pending.session.room().to_string(),
-                pending.session.since(),
-                pending.started_at,
+                pending.city.clone(),
+                ready.did.clone(),
+                ready.seed,
             )
         };
-        if now_epoch() - started_at > LOGIN_TTL_SECS {
-            self.city_login_cancel();
-            return Ok(FfiCityLoginStep::Expired);
-        }
-        let hub = self.city_hub(&server, RELAY_TIMEOUT)?;
-        let (messages, n) = self
+        let multikey = vt_city::zu::multikey_of_seed(&seed);
+        let hub = self.city_hub(&server, REQUEST_TIMEOUT)?;
+        let (handles, roles, person_name) = self
             .runtime
-            .block_on(hub.relay_get(&room, since))
+            .block_on(async {
+                let handles = hub.verify_zu_did_key(&did, &multikey).await?;
+                let roles = hub
+                    .zu_city_view(&city.id)
+                    .await
+                    .map(|view| view.roles_of(&did))
+                    .unwrap_or_default();
+                let person_name = hub.zu_person_name(&did, &handles).await.unwrap_or_default();
+                Ok::<_, CityError>((handles, roles, person_name))
+            })
             .map_err(city_error)?;
-        let step = {
-            let mut guard = self.city.login.lock().unwrap();
-            // 等的这一会儿里取消了、换了一个码:这一句不作数。
-            let Some(pending) = guard
-                .as_mut()
-                .filter(|pending| pending.generation == generation)
-            else {
-                return Ok(FfiCityLoginStep::Cancelled);
-            };
-            pending.session.absorb(&messages, n).map_err(city_error)?
-        };
-        match step {
-            LinkStep::Waiting => Ok(FfiCityLoginStep::Waiting),
-            LinkStep::Check(digits) => Ok(FfiCityLoginStep::Check { digits }),
-            LinkStep::Cancelled => {
-                self.city_login_cancel();
-                Ok(FfiCityLoginStep::Cancelled)
-            }
-            LinkStep::Done { identity, name } => {
-                let Some(pending) = self.city.login.lock().unwrap().take() else {
-                    return Ok(FfiCityLoginStep::Cancelled);
-                };
-                let account =
-                    self.finish_city_login(&pending.server, &pending.city, identity, &name)?;
-                Ok(FfiCityLoginStep::Done { account })
-            }
+        let _ = handles;
+        let identity = Identity::from_zu_seed(&did, &seed).map_err(|_| refuse(code::BAD_KEY))?;
+        let account =
+            self.city_keep_login(hub.base(), &city, identity, roles, Vec::new(), &person_name)?;
+        let mut guard = self.city.login.lock().unwrap();
+        if guard.as_ref().is_some_and(|p| p.generation == generation) {
+            *guard = None;
         }
+        Ok(account)
     }
 
     pub fn city_login_cancel(&self) {
@@ -2221,8 +2716,11 @@ impl ZuTalkCore {
         let identity =
             Identity::from_key_string(&recovery_key).map_err(|_| refuse(code::BAD_KEY))?;
         let hub = self.city_hub(&server, REQUEST_TIMEOUT)?;
-        let door = self.runtime.block_on(hub.door()).map_err(city_error)?;
+        let door = self.runtime.block_on(hub.door_any()).map_err(city_error)?;
         let city = door.city.ok_or_else(|| refuse(code::NO_CITY))?;
+        if vt_city::zu::is_accepted_did(&city.id) {
+            return Err(refuse(code::BAD_KEY));
+        }
         self.city_login_cancel();
         self.finish_city_login(hub.base(), &city, identity, "")
     }
@@ -4318,5 +4816,283 @@ mod tests {
             .city_audio_plan("session-a".into())
             .parts_filed
             .is_empty());
+    }
+
+    #[test]
+    fn pol_v03_qr_login_calendar_filing_audio_and_withdraw() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://localhost:{port}");
+        let city_did = "did:zu:cityv0300000000000000000";
+        let person_did = format!("did:web:localhost%3A{port}");
+        let city_seed = [21u8; 32];
+        let person_seed = [22u8; 32];
+        let person_multikey = vt_city::zu::multikey_of_seed(&person_seed);
+
+        // Pre-build governance (resident), profile card, event, and channel records.
+        let mut join_body = vt_city::zu::ZuMap::new();
+        join_body.insert("who".into(), vt_city::zu::ZuValue::Text(person_did.clone()));
+        join_body.insert("kind".into(), vt_city::zu::ZuValue::Text("resident".into()));
+        join_body.insert("ok".into(), vt_city::zu::ZuValue::Bool(true));
+        let join_rec = vt_city::zu::sign_zu_record(
+            &person_seed,
+            &person_did,
+            Some(city_did),
+            "city/role",
+            "j1",
+            1_000,
+            &[],
+            Some(join_body),
+        )
+        .unwrap();
+
+        let mut admit_body = vt_city::zu::ZuMap::new();
+        admit_body.insert("who".into(), vt_city::zu::ZuValue::Text(person_did.clone()));
+        admit_body.insert("kind".into(), vt_city::zu::ZuValue::Text("resident".into()));
+        admit_body.insert("ok".into(), vt_city::zu::ZuValue::Bool(true));
+        let admit_rec = vt_city::zu::sign_zu_record(
+            &city_seed,
+            city_did,
+            Some(city_did),
+            "city/role",
+            "a1",
+            2_000,
+            &[join_rec.cid],
+            Some(admit_body),
+        )
+        .unwrap();
+
+        let mut card_body = vt_city::zu::ZuMap::new();
+        card_body.insert("name".into(), vt_city::zu::ZuValue::Text("林清迈".into()));
+        let card_rec = vt_city::zu::sign_zu_record(
+            &person_seed,
+            &person_did,
+            None,
+            "site/card",
+            "card",
+            3_000,
+            &[],
+            Some(card_body),
+        )
+        .unwrap();
+
+        let mut ev_body = vt_city::zu::ZuMap::new();
+        ev_body.insert(
+            "title".into(),
+            vt_city::zu::ZuValue::Text("Morning Sync".into()),
+        );
+        ev_body.insert("start".into(), vt_city::zu::ZuValue::Int(1_795_000_000_000));
+        ev_body.insert("end".into(), vt_city::zu::ZuValue::Int(1_795_003_600_000));
+        ev_body.insert(
+            "place".into(),
+            vt_city::zu::ZuValue::Text("Courtyard".into()),
+        );
+        ev_body.insert("about".into(), vt_city::zu::ZuValue::Text("Daily".into()));
+        let ev_rec = vt_city::zu::sign_zu_record(
+            &city_seed,
+            city_did,
+            Some(city_did),
+            "ev/event",
+            "ev1",
+            4_000,
+            &[],
+            Some(ev_body),
+        )
+        .unwrap();
+        let expected_event_ref = format!("{city_did}~ev1");
+
+        type RelaySlot = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+        let relay_slot: RelaySlot = Arc::default();
+        let delivered_types: Arc<Mutex<Vec<String>>> = Arc::default();
+        let blobs: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
+
+        let relay_srv = relay_slot.clone();
+        let delivered_srv = delivered_types.clone();
+        let blobs_srv = blobs.clone();
+        let did_doc = json!({
+            "id": person_did,
+            "verificationMethod": [{
+                "id": format!("{person_did}#zu"),
+                "type": "Multikey",
+                "controller": person_did,
+                "publicKeyMultibase": person_multikey,
+            }],
+            "alsoKnownAs": ["zu://lin.zuchiangmai.com"],
+        });
+        let roles_cbor = vt_city::zu::encode_delivery(&[join_rec, admit_rec]);
+        let card_cbor = vt_city::zu::encode_delivery(&[card_rec]);
+        let ev_cbor = vt_city::zu::encode_delivery(&[ev_rec]);
+        let empty_cbor = vt_city::zu::encode_delivery(&[]);
+
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 16 * 1024];
+                let (head_end, length) = loop {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break (0, 0);
+                    }
+                    buf.extend_from_slice(&chunk[..read]);
+                    if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..at]).to_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (at + 4, len);
+                    }
+                };
+                if head_end == 0 {
+                    continue;
+                }
+                while buf.len() < head_end + length {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..read]);
+                }
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let mut words = head.split_whitespace();
+                let method = words.next().unwrap_or("");
+                let target = words.next().unwrap_or("");
+                let body = &buf[head_end..];
+
+                let (status, content_type, reply): (u16, &str, Vec<u8>) = if method == "GET"
+                    && target == "/.well-known/pol-city"
+                {
+                    (
+                        200,
+                        "application/json",
+                        json!({ "did": city_did, "name": "Chiang Mai", "listed": true })
+                            .to_string()
+                            .into_bytes(),
+                    )
+                } else if method == "GET" && target == "/.well-known/did.json" {
+                    (200, "application/json", did_doc.to_string().into_bytes())
+                } else if let Some(room) = target.strip_prefix("/.well-known/zu-relay/") {
+                    let slot = relay_srv.lock().unwrap();
+                    match slot.as_ref() {
+                        Some((r, bytes)) if r == room => (200, "application/cbor", bytes.clone()),
+                        _ => (404, "application/json", b"{}".to_vec()),
+                    }
+                } else if method == "GET" && target.starts_with("/.well-known/zu-recs") {
+                    let data = if target.contains("city%2Frole") || target.contains("city/role") {
+                        roles_cbor.clone()
+                    } else if target.contains("site%2Fcard") || target.contains("site/card") {
+                        card_cbor.clone()
+                    } else if target.contains("ev%2F") || target.contains("ev/*") {
+                        ev_cbor.clone()
+                    } else {
+                        empty_cbor.clone()
+                    };
+                    (200, "application/cbor", data)
+                } else if method == "POST" && target == "/.well-known/zu-recs" {
+                    let page = vt_city::zu::decode_query_page(body).unwrap();
+                    let mut stat = vt_city::zu::ZuMap::new();
+                    for rec in &page.records {
+                        delivered_srv.lock().unwrap().push(rec.record_type.clone());
+                        stat.insert(rec.cid.to_string(), vt_city::zu::ZuValue::Text("ok".into()));
+                    }
+                    let mut root = vt_city::zu::ZuMap::new();
+                    root.insert("stat".into(), vt_city::zu::ZuValue::Map(stat));
+                    (200, "application/cbor", vt_city::zu::encode_map(&root))
+                } else if let Some(cid) = target.strip_prefix("/.well-known/rasl/") {
+                    if blobs_srv.lock().unwrap().contains_key(cid) {
+                        (206, "application/octet-stream", vec![0u8])
+                    } else {
+                        (404, "application/json", b"{}".to_vec())
+                    }
+                } else if let Some(cid) = target.strip_prefix("/.well-known/zu-blob/") {
+                    assert_eq!(vt_city::zu::raw_cid_string(body), cid);
+                    blobs_srv
+                        .lock()
+                        .unwrap()
+                        .insert(cid.to_string(), body.to_vec());
+                    (201, "application/json", Vec::new())
+                } else {
+                    (404, "application/json", b"{}".to_vec())
+                };
+                let resp_head = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.len()
+                );
+                let _ = stream.write_all(resp_head.as_bytes());
+                let _ = stream.write_all(&reply);
+            }
+        });
+
+        let (_temp, core, _notebook, _run, _doc) =
+            crate::notebook_capture_api::tests::projected_core_fixture();
+        // 1. Begin V0.3 login -> produces `/.well-known/zu-relay/<room>#<pk>` QR code.
+        let offer = core.city_login_begin(base.clone()).unwrap();
+        assert_eq!(offer.city_name, "Chiang Mai");
+        assert!(offer
+            .code
+            .starts_with(&format!("{base}/.well-known/zu-relay/")));
+
+        // 2. Simulate Pol phone sealing the user's Ed25519 key into the relay room.
+        let (room_url, pub_b64) = offer.code.split_once('#').unwrap();
+        let room = room_url.rsplit('/').next().unwrap().to_string();
+        let rx_pub_bytes = URL_SAFE_NO_PAD.decode(pub_b64.as_bytes()).unwrap();
+        let rx_arr: [u8; 65] = rx_pub_bytes.try_into().unwrap();
+        let (sealed_bytes, expected_digits) =
+            vt_city::zu::seal_login_key(room_url, &rx_arr, &person_did, &person_seed).unwrap();
+        *relay_slot.lock().unwrap() = Some((room, sealed_bytes));
+
+        // 3. Poll receives the 6-digit check code; user confirms on Mac -> signed in!
+        let step = core.city_login_poll().unwrap();
+        let FfiCityLoginStep::Check { digits } = step else {
+            panic!("expected 6-digit check step, got {step:?}");
+        };
+        assert_eq!(digits, expected_digits);
+
+        let account = core.city_login_confirm().unwrap();
+        assert_eq!(account.person_id, person_did);
+        assert_eq!(account.person_name, "林清迈");
+        assert_eq!(account.roles, vec!["resident"]);
+
+        // 4. Refresh calendar -> sees V0.3 event, binds, files transcript + translations.
+        let cal = core.city_calendar(true).unwrap();
+        assert_eq!(cal.events.len(), 1);
+        assert_eq!(cal.events[0].id, expected_event_ref);
+        core.city_bind_session("session-a".into(), Some(cal.events[0].clone()))
+            .unwrap();
+        let filed = core.city_file_session("session-a".into()).unwrap();
+        assert_eq!(filed.state, FfiCityFilingState::Filed);
+        let url = filed.web_url.as_deref().unwrap();
+        assert!(
+            url.starts_with(&format!(
+                "{base}/archive/c/{}/b/",
+                vt_city::zu::archive_url_id(&expected_event_ref)
+            )),
+            "Pol V0.3 archive URL hashes refs with SHA-256: {url}"
+        );
+        assert!(
+            !blobs.lock().unwrap().is_empty(),
+            "transcript/translation JSON blobs uploaded"
+        );
+
+        // 5. Upload one .m4a audio part -> updates tape/take + uploads raw CID blob.
+        let audio_tmp = tempfile::tempdir().unwrap();
+        let part_bytes = m4a(9, 24_000);
+        let part_path = part_file(&audio_tmp, "0.m4a", &part_bytes);
+        let with_audio = send_part(&core, 0, 1, &part_path).unwrap();
+        assert_eq!(with_audio.audio_parts_filed, 1);
+        assert_eq!(with_audio.audio_error_code, None);
+        assert!(blobs
+            .lock()
+            .unwrap()
+            .contains_key(&vt_city::zu::raw_cid_string(&part_bytes)));
+
+        // 6. Withdraw -> delivers arc/mark { to: "drop" }.
+        let withdrawn = core.city_withdraw_filing("session-a".into()).unwrap();
+        assert_eq!(withdrawn.state, FfiCityFilingState::Withdrawn);
+        let types = delivered_types.lock().unwrap().clone();
+        assert!(types.contains(&"tape/take".to_string()));
+        assert!(types.contains(&"arc/item".to_string()));
+        assert!(types.contains(&"arc/mark".to_string()));
     }
 }

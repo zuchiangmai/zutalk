@@ -958,6 +958,11 @@ public protocol ZuTalkCoreProtocol: AnyObject, Sendable {
     func cityLoginCancel()
 
     /**
+     * Pol V0.3 扫码登录后,在电脑端核对六位数字一致、确认完成登录。走网络。
+     */
+    func cityLoginConfirm() throws  -> FfiCityAccount
+
+    /**
      * 等旧设备的下一句话,最多挂二十几秒。走网络,调用方在后台线程上循环调。
      */
     func cityLoginPoll() throws  -> FfiCityLoginStep
@@ -2480,6 +2485,17 @@ open func cityLoginCancel()  {try! rustCall() {
             self.uniffiCloneHandle(),$0
     )
 }
+}
+
+    /**
+     * Pol V0.3 扫码登录后,在电脑端核对六位数字一致、确认完成登录。走网络。
+     */
+open func cityLoginConfirm()throws  -> FfiCityAccount  {
+    return try  FfiConverterTypeFfiCityAccount_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+    uniffi_vt_ffi_fn_method_zutalkcore_city_login_confirm(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
 
     /**
@@ -13910,6 +13926,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vt_ffi_checksum_method_zutalkcore_city_login_cancel() != 12351) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vt_ffi_checksum_method_zutalkcore_city_login_confirm() != 17076) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vt_ffi_checksum_method_zutalkcore_city_login_poll() != 24077) {

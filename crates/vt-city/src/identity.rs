@@ -132,7 +132,37 @@ impl Identity {
         Ok((identity, name))
     }
 
-    /// The person's identity number: the fingerprint of their inception.
+    /// Creates a version 3 (`did:zu` / `did:web`) identity from its 32-byte
+    /// Ed25519 Zu signing key seed.
+    pub fn from_zu_seed(did: &str, seed: &[u8; 32]) -> Result<Identity> {
+        if !crate::zu::is_accepted_did(did) {
+            return Err(CityError::malformed("not an accepted Zu DID"));
+        }
+        let signing = SigningKey::from_bytes(seed);
+        let did_key = ed::did_key(&signing.verifying_key().to_bytes());
+        Ok(Identity {
+            inner: Arc::new(Inner {
+                version: 3,
+                id: did.to_string(),
+                did_key,
+                controller: Some(did.to_string()),
+                inception: Value::Null,
+                signing,
+            }),
+        })
+    }
+
+    /// Whether this identity speaks Pol V0.3 / Zu (`did:zu:` or `did:web:`).
+    pub fn is_zu(&self) -> bool {
+        self.inner.version == 3
+    }
+
+    pub fn seed_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.inner.signing.to_bytes())
+    }
+
+    /// The person's identity number: the fingerprint of their inception (V0.2)
+    /// or their DID (V0.3).
     pub fn id(&self) -> &str {
         &self.inner.id
     }
@@ -191,6 +221,7 @@ impl Identity {
                 stored.controller.as_deref().unwrap_or(""),
                 &stored.inception,
             ),
+            3 => Self::from_zu_seed(&stored.id, &seed),
             _ => Err(CityError::malformed(
                 "stored identity has an unknown version",
             )),
