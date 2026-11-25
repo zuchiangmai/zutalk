@@ -1,0 +1,6 @@
+阶段：P6（知识库 `talk/topic`、双路上下文注入与 AI 标题/话题）
+状态：通过
+基线：60255019da8b76ee4210d67922bfd349b61c6f9d
+收尾提交：22f5036a5badd64da91fa43fb28c8506605ebb9a
+审查记录：docs/build/reviews/P6-r1.md、docs/build/reviews/P6-r2.md（结论：通过）
+全量门禁：RUSTC_WRAPPER="" scripts/build/check.sh — check: all green（10/10 规则全绿零欠账，Rust 782 passed / 0 failed / 6 ignored，UI 16 files / 124 passed，零新增外部依赖，零新增 Stats 行）
