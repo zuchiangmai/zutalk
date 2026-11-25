@@ -5,6 +5,7 @@ import {
   go,
   langSource,
   noticesSource,
+  openIdentitySheet,
   overlaySource,
   resolvedThemeSource,
   routeSource,
@@ -20,6 +21,7 @@ import {
   waterSource,
 } from '../bus';
 import { HomePage } from '../pages/HomePage';
+import { IdentitySheet } from '../pages/IdentitySheet';
 import { LibraryPage } from '../pages/LibraryPage';
 import { LivePage } from '../pages/LivePage';
 import { ReaderPage } from '../pages/ReaderPage';
@@ -98,9 +100,11 @@ export function Shell() {
         spokenLanguages={state?.setup.spoken ?? []}
         route={route}
         me={state?.me ?? null}
+        handle={state?.handle ?? null}
         nowMs={nowMs}
         onGo={go}
         onOpenSearch={() => setPaletteOpen(true)}
+        onOpenIdentity={() => openIdentitySheet('ask')}
       />
 
       <main className="main">
@@ -143,6 +147,8 @@ export function Shell() {
       </main>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+
+      <IdentitySheet />
 
       <HealthOverlay
         open={overlayOpen}

@@ -1,6 +1,7 @@
 import type { LibraryRow } from '$proto/LibraryRow';
 import type { LibrarySummary } from '$proto/LibrarySummary';
 import type { Session } from '$proto/Session';
+import { shortDid } from '../bus/identity';
 import type { Route } from '../bus/route';
 import { clock, formatMonth, langName, t } from '../bus/words';
 import { Icon } from '../ds/icons';
@@ -64,9 +65,11 @@ export type SidebarProps = {
   spokenLanguages?: readonly string[];
   route: Route;
   me: string | null;
+  handle?: string | null;
   nowMs?: number;
   onGo: (route: Route) => void;
   onOpenSearch: () => void;
+  onOpenIdentity?: () => void;
 };
 
 export function Sidebar({
@@ -77,15 +80,22 @@ export function Sidebar({
   spokenLanguages = [],
   route,
   me,
+  handle = null,
   nowMs = Date.now(),
   onGo,
   onOpenSearch,
+  onOpenIdentity,
 }: SidebarProps) {
   // Exclude active live recording id from static recent rows so it only appears once at the top.
   const filteredRecent = session ? recent.filter((r) => r.id !== session.id) : recent;
   const groups = groupRecentByDay(filteredRecent.slice(0, LIBRARY_SIDEBAR_RECENT_ROWS), nowMs);
   const totalCount = summary?.total ?? recent.length;
-  const avatarChar = me ? me.replace(/^did:zu:|^@/, '').slice(0, 1).toUpperCase() || 'Z' : 'L';
+  const avatarChar = handle
+    ? handle.replace(/^@/, '').slice(0, 1).toUpperCase() || 'Z'
+    : me
+      ? me.replace(/^did:zu:|^@/, '').slice(0, 1).toUpperCase() || 'Z'
+      : 'L';
+  const identityLabel = me ? (handle ? `@${handle}` : shortDid(me)) : t('identity.local');
 
   return (
     <aside className="side">
@@ -198,10 +208,26 @@ export function Sidebar({
       </nav>
 
       <div className="side-foot">
-        <span className={`avatar${me ? '' : ' local'}`} aria-hidden="true">
-          {avatarChar}
-        </span>
-        <span className="me">{me ?? t('identity.local')}</span>
+        {me ? (
+          <>
+            <span className="avatar" aria-hidden="true">
+              {avatarChar}
+            </span>
+            <span className={`me${handle ? ' handle' : ''}`}>{identityLabel}</span>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="side-id"
+            aria-label={t('identity.local')}
+            onClick={onOpenIdentity}
+          >
+            <span className="avatar local" aria-hidden="true">
+              {avatarChar}
+            </span>
+            <span className="me">{identityLabel}</span>
+          </button>
+        )}
         <button
           type="button"
           className="icon-btn"

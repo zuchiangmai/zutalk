@@ -195,6 +195,40 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: /October 2026/i }));
     expect(onGo).toHaveBeenCalledWith({ page: 'library', month: '2026-10' });
   });
+
+  it('displays @handle when signed in and invokes onOpenIdentity from local footer when signed out', () => {
+    const onOpenIdentity = vi.fn();
+    const { rerender } = render(
+      <Sidebar
+        recent={[]}
+        summary={null}
+        session={null}
+        route={{ page: 'home' }}
+        me="did:zu:7kq2mxw4abcdef1234f9a"
+        handle="demo.zuzalu.ink"
+        onGo={vi.fn()}
+        onOpenSearch={vi.fn()}
+        onOpenIdentity={onOpenIdentity}
+      />,
+    );
+    expect(screen.getByText('@demo.zuzalu.ink')).toBeTruthy();
+
+    rerender(
+      <Sidebar
+        recent={[]}
+        summary={null}
+        session={null}
+        route={{ page: 'home' }}
+        me={null}
+        handle={null}
+        onGo={vi.fn()}
+        onOpenSearch={vi.fn()}
+        onOpenIdentity={onOpenIdentity}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Local only' }));
+    expect(onOpenIdentity).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('CommandPalette (⌘K) inside Shell', () => {

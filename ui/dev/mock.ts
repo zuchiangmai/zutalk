@@ -152,14 +152,25 @@ function makeTakeInfos(rec: MockRec): TakeInfo[] {
 
 export function mockBus(recording = false): Bus {
   const now = Date.now();
+  const makeDemoQuota = () => ({
+    resets_at: Date.now() + 12 * HOUR_MS,
+    services: [
+      { service: 'soniox', used: 6, limit: 40, remaining: 34 },
+      { service: 'openrouter', used: 4, limit: 30, remaining: 26 },
+    ],
+  });
+
   const s: State = structuredClone({
     ...EMPTY,
     me: 'did:zu:z6Mkq3demo8Fh2',
+    handle: 'demo.zuzalu.ink',
     keys: [
       ['soniox', 'Granted'],
       ['openrouter', 'Own'],
     ],
     left: 12_400_000,
+    quota: makeDemoQuota(),
+    local_shelf: { recordings: 2, adopted: true },
     update: '0.9.1',
     setup: { spoken: ['zh', 'th'], shown: ['zh', 'th', 'en'], sound: 'Mic', device: null, mode: 'Audience', language: null, keep: 30 },
     devices: [
@@ -433,8 +444,12 @@ export function mockBus(recording = false): Bus {
       s.rooms = s.rooms.filter((r) => r.id !== c.room);
     },
     SignIn: () => {
-      s.auth = { is: 'Scanning', url: 'https://zu.example/.well-known/zu-relay/00000000000000000000000000000000#demo', expires_at: Date.now() + 300_000 };
-      later(2000, () => {
+      s.auth = {
+        is: 'Scanning',
+        url: 'https://zu.example/.well-known/zu-relay/00000000000000000000000000000000#demo',
+        expires_at: Date.now() + 300_000,
+      };
+      later(2_500, () => {
         if (s.auth.is === 'Scanning') {
           s.auth = { is: 'Confirm', did: 'did:zu:z6Mkq3demo8Fh2', handle: 'demo.zuzalu.ink', code: null };
         }
@@ -448,6 +463,8 @@ export function mockBus(recording = false): Bus {
       s.me = s.auth.did;
       s.handle = s.auth.handle;
       s.auth = { is: 'Idle' };
+      s.quota = makeDemoQuota();
+      s.local_shelf = { recordings: 2, adopted: true };
     },
     CancelSignIn: () => {
       s.auth = { is: 'Idle' };
@@ -457,12 +474,14 @@ export function mockBus(recording = false): Bus {
       s.me = 'did:zu:z6Mkq3demo8Fh2';
       s.handle = c.handle ? (c.handle.includes('.') ? c.handle : `${c.handle}.zuzalu.ink`) : null;
       s.rotation_unsaved = true;
+      s.quota = makeDemoQuota();
     },
     RecoverIdentity: (c) => {
       s.auth = { is: 'Idle' };
       s.me = c.did;
       s.handle = 'demo.zuzalu.ink';
       s.rotation_unsaved = false;
+      s.quota = makeDemoQuota();
     },
     RefreshQuota: () => {
       s.quota = {

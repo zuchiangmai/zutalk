@@ -413,6 +413,32 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.me.handle {
+  font-family: var(--f-ui);
+  font-weight: 500;
+}
+.side-id {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin: -4px 0 -4px -6px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.side-id:hover {
+  background: var(--soft);
+}
+.side-id .me {
+  font-family: var(--f-ui);
+}
 .top {
   display: flex;
   align-items: center;
@@ -1042,15 +1068,148 @@
   padding: 72px 24px 24px;
   background: rgba(0, 30, 21, 0.4);
 }
+.scrim.center {
+  place-items: center;
+  padding: 24px;
+}
 .dialog {
   position: relative;
   width: 100%;
-  max-width: 520px;
-  padding: 20px;
+  max-width: 440px;
+  padding: 26px 26px 22px;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 20px;
   background: var(--raise);
   box-shadow: var(--shadow);
+  animation: zt-rise 0.42s var(--e-spring) both;
+}
+.dialog.wide {
+  max-width: 520px;
+}
+.dialog-t {
+  margin: 0;
+  padding-right: 32px;
+  font: 700 20px/1.35 var(--f-read);
+}
+.dialog-d {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: var(--ink2);
+}
+.dialog-a {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+.dialog-a.between {
+  justify-content: space-between;
+  align-items: center;
+}
+.dialog-a-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dialog-x {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+.label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink2);
+}
+.field-prefix {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0 12px;
+}
+.field-prefix input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: 0;
+  background: none;
+  outline: 0;
+  font: inherit;
+  color: inherit;
+}
+.field-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+}
+.qr-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 22px;
+  margin-top: 20px;
+}
+.qr-steps {
+  flex: 1;
+  min-width: 200px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.qr-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.qr-step-n {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--soft2);
+  color: var(--accent);
+  font: 600 12px/1 var(--f-num);
+}
+.qr-timer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+.check-digits {
+  margin: 24px 0 22px;
+  font-size: 48px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+.check-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.check-identity-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.check-handle {
+  font-weight: 600;
 }
 
 /* ---- Command Palette (⌘K) ---- */

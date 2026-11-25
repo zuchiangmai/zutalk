@@ -10,6 +10,7 @@ import type { Signal } from '$proto/Signal';
 import type { State } from '$proto/State';
 import type { Tally } from '$proto/Tally';
 import type { Water } from '$proto/Water';
+import { dispatchIdentityEvent, resetIdentitySheet } from './identity';
 import { queryCache } from './query';
 import { navigate, resetRoute } from './route';
 import { createCell, type Source } from './source';
@@ -99,6 +100,9 @@ let noticeSeq = 0;
 
 /** Appends a notice, dropping the oldest if NOTICE_MAX_ITEMS is exceeded. */
 export function say(code: string, undo?: Command): number {
+  if (code === 'sign_in.first') {
+    dispatchIdentityEvent({ is: 'SignInRequired' });
+  }
   const id = ++noticeSeq;
   const item: NoticeItem = { n: id, code, undo, at: Date.now() };
   noticesCell.update((prev) => {
@@ -204,6 +208,12 @@ export function take(event: Event): void {
   if (event.kind === 'State') {
     stateCell.set(event.is);
     setLang(event.is.setup.language ?? system);
+    dispatchIdentityEvent({
+      is: 'AuthChanged',
+      auth: event.is.auth,
+      signedIn: event.is.me !== null,
+      rotationUnsaved: event.is.rotation_unsaved,
+    });
   } else if (event.kind === 'Signal') {
     const { seq, signal } = event.is;
     if (seq <= (seenSeq[signal.of] ?? 0)) return;
@@ -325,5 +335,6 @@ export function resetChannel(): void {
   noticesCell.set([]);
   overlayCell.set(false);
   queryCache.clear();
+  resetIdentitySheet();
   resetRoute();
 }
