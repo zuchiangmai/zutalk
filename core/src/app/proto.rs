@@ -194,6 +194,16 @@ pub enum Event {
     Notice(String),
 }
 
+/// One operation on a recording's timestamped notes (`P2.md` §3.3.1).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "op")]
+pub enum NoteOp {
+    Add { at_ms: u32, text: String, anchor: Option<String> },
+    Edit { key: String, text: String },
+    Remove { key: String },
+}
+
 /// One change a person makes to a recording; each is one more record. A line's `language`
 /// is its own for what was said, or a translation's.
 #[derive(Debug, Clone, PartialEq, Deserialize, TS)]
@@ -229,6 +239,8 @@ pub enum Command {
     Open { id: String },
     Close,
     Change { id: String, change: Change },
+    Note { id: String, op: NoteOp },
+    Refine { id: String },
     Remove { id: String },
     Restore { id: String },
     Search { query: String },
@@ -264,6 +276,8 @@ impl Command {
             Command::Open { .. } => "Open",
             Command::Close => "Close",
             Command::Change { .. } => "Change",
+            Command::Note { .. } => "Note",
+            Command::Refine { .. } => "Refine",
             Command::Remove { .. } => "Remove",
             Command::Restore { .. } => "Restore",
             Command::Search { .. } => "Search",
@@ -300,6 +314,8 @@ impl Command {
             | Command::Open { .. }
             | Command::Close
             | Command::Change { .. }
+            | Command::Note { .. }
+            | Command::Refine { .. }
             | Command::Remove { .. }
             | Command::Restore { .. }
             | Command::Search { .. }

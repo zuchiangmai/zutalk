@@ -134,6 +134,7 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `job.done` | info；`code != "ok"` 时 warn | `desk` 或 `Work` 的一件活结束时发出 | `kind`（同上） `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败码） `ms` |
 | `job.again` | warn | 后台或重试任务（`write`、`file`、`create`、`claim`）遇可恢复失败，退避等待下一次重试时发出 | `kind` `why` `wait_ms` `n` |
 | `write.skipped` | info | 有音频的草稿因无钥匙可取（`keys.none`）未送去整场转写，留在现场稿等待时发出 | `n` `why`（`keys.none`） |
+| `refine.state` | info；到 `Failed` 时 warn | 整场精修状态机 `RefineStatus` 切换时发出（`Draft` / `Refining` / `Refined` / `Failed`） | `rec` `from` `to` `why` `take` |
 | `diagnose.wrote` | info | `desk` 原子写完一份自检包并清理超额旧包后发出 | `files`（包内文件总数） `bytes`（总字节数） |
 
 ### 采集与落盘

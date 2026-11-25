@@ -22,6 +22,7 @@ use crate::live::lane::{self, Mode};
 use crate::out::city::{Calendar, Filing};
 use crate::out::export::EXPORTERS;
 use crate::record::shelf::About;
+use crate::record::takes::RefineStatus;
 use crate::rt::queue::Rx;
 use crate::rt::signal::Register;
 use crate::rt::stats::{Counter, Spread};
@@ -101,6 +102,10 @@ pub(crate) enum Msg {
     Ended(String),
     Writing(Writing),
     Wrote(String),
+    RefineReady {
+        id: String,
+        from: RefineStatus,
+    },
     SignInFailed(&'static str),
     Signed(Result<SignedOut, &'static str>),
     Copied,
@@ -140,6 +145,7 @@ impl Msg {
             Msg::Ended(_) => "Ended",
             Msg::Writing(_) => "Writing",
             Msg::Wrote(_) => "Wrote",
+            Msg::RefineReady { .. } => "RefineReady",
             Msg::SignInFailed(_) => "SignInFailed",
             Msg::Signed(_) => "Signed",
             Msg::Copied => "Copied",
@@ -424,6 +430,16 @@ impl Hub {
                 self.need_retain = true;
                 self.mark_dirty();
             }
+            Msg::RefineReady { id, from } => {
+                if self.under_way(&id) {
+                    return Err("recording.under_way");
+                }
+                if self.busy(&id) {
+                    return Err("recording.writing");
+                }
+                self.state.writing.push(writing(&id, "closing"));
+                self.work.write_manual(id, from, self.state.terms.clone());
+            }
             Msg::SignInFailed(c) => {
                 self.state.login = None;
                 return Err(c);
@@ -559,6 +575,16 @@ impl Hub {
                 return Err("recording.writing");
             }
             Command::Change { id, change } => self.work.change(id, change)?,
+            Command::Note { id, op } => self.work.note(id, op)?,
+            Command::Refine { id } => {
+                if self.under_way(&id) {
+                    return Err("recording.under_way");
+                }
+                if self.busy(&id) {
+                    return Err("recording.writing");
+                }
+                self.work.refine(id)?;
+            }
             Command::Remove { id } => {
                 if self.under_way(&id) {
                     self.stop();

@@ -57,7 +57,8 @@ fn destroying_a_tape_takes_every_minute_and_leaves_what_the_service_is_still_owe
     // A write that left something at the service keeps its journal: the start-up sweep reads it.
     fill(&tape);
     let owed = vec!["files/file-1".to_string()];
-    let journal = Journal { name: Some("zutalk-kx7q2m5v4tbn3hpw.wav".into()), owed, take: 0 };
+    let journal =
+        Journal { name: Some("zutalk-kx7q2m5v4tbn3hpw.wav".into()), owed, take: 0, failed: None };
     journal.save(&tape).expect("the journal is kept");
     tapes::destroy(&tape).expect("it is destroyed");
     assert!(!tapes::kept(&tape));
@@ -137,7 +138,7 @@ async fn audio_destroyed_at_the_persons_word_is_gone_for_good_and_its_text_stays
     assert!(!data.join("tape/written").exists());
     // A draft whose write left something at the service: the journal stays for the sweep.
     let owed = vec!["files/file-1".to_string()];
-    let journal = Journal { name: Some("zutalk-draft.wav".into()), owed, take: 0 };
+    let journal = Journal { name: Some("zutalk-draft.wav".into()), owed, take: 0, failed: None };
     journal.save(&data.join("tape/draft")).expect("the journal is kept");
     app.send(Command::DestroyAudio { id: "draft".into() });
     let state = app.until(|state| audio(state, "draft") == Some(false)).await;

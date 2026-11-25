@@ -221,5 +221,8 @@
  "code.update.installing": "Instalando actualización",
  "code.diagnose": "No se pudo guardar el diagnóstico",
  "code.diagnose.done": "Diagnóstico guardado",
+ "code.note.gone": "Esta nota ya no existe",
+ "code.tape.none": "No queda audio para esta grabación",
+ "code.keys.async_refused": "Sin refinar · se necesita una clave que pueda transcribir la grabación completa",
  "reconnect": "Reconectar"
 }

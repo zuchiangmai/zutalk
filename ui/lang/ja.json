@@ -221,5 +221,8 @@
  "code.update.installing": "アップデートをインストール中です",
  "code.diagnose": "診断情報を保存できませんでした",
  "code.diagnose.done": "診断情報を保存しました",
+ "code.note.gone": "このメモはもうありません",
+ "code.tape.none": "この録音の音声は残っていません",
+ "code.keys.async_refused": "未清書 · 録音全体を文字起こしできるキーが必要です",
  "reconnect": "再接続"
 }

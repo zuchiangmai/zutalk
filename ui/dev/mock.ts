@@ -110,6 +110,8 @@ export function mockBus(recording = false): Bus {
         line.via[line.language === c.language ? 'text' : c.language] = 'hand';
       }
     },
+    Note: () => {},
+    Refine: (c) => write(c.id),
     Remove: (c) => {
       gone.set(c.id, s.library.find((r) => r.id === c.id)!);
       s.library = s.library.filter((r) => r.id !== c.id);

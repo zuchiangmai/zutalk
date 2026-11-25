@@ -221,5 +221,8 @@
  "code.update.installing": "Installation de la mise à jour",
  "code.diagnose": "Impossible d’enregistrer le diagnostic",
  "code.diagnose.done": "Diagnostic enregistré",
+ "code.note.gone": "Cette note n’existe plus",
+ "code.tape.none": "Il ne reste plus d’audio pour cet enregistrement",
+ "code.keys.async_refused": "Non affiné · nécessite une clé permettant de transcrire tout l’enregistrement",
  "reconnect": "Reconnecter"
 }

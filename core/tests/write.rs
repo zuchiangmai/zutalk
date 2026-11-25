@@ -269,6 +269,7 @@ fn the_journal_is_whole_on_disk_or_not_there() {
         name: Some(NAME.into()),
         owed: strings(&["files/f1", "transcriptions/t1"]),
         take: 2,
+        failed: None,
     };
     journal.save(dir.path()).unwrap();
     assert_eq!(Journal::load(dir.path()), Ok(journal));
@@ -764,7 +765,12 @@ async fn a_remote_file_left_by_an_interrupted_write_is_deleted_by_the_next_sweep
     let left = Journal::load(&recording.tape).unwrap();
     assert_eq!(
         left,
-        Journal { name: Some(NAME.into()), owed: strings(&["files/file-1"]), take: 0 }
+        Journal {
+            name: Some(NAME.into()),
+            owed: strings(&["files/file-1"]),
+            take: 0,
+            failed: None
+        }
     );
 
     // At the next start, the file is deleted by its id, and the transcription found by name.

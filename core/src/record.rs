@@ -2,5 +2,7 @@
 //! record path (L2, seconds), which must never hold the live path back.
 
 pub mod migrate;
+pub mod notes;
 pub mod retain;
 pub mod shelf;
+pub mod takes;

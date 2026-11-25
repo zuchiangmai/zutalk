@@ -221,5 +221,8 @@
  "code.update.installing": "Installing an update",
  "code.diagnose": "Could not save diagnostics",
  "code.diagnose.done": "Diagnostics saved",
+ "code.note.gone": "This note is no longer there",
+ "code.tape.none": "No audio left for this recording",
+ "code.keys.async_refused": "Not refined · needs a key that can transcribe the whole recording",
  "reconnect": "Reconnect"
 }

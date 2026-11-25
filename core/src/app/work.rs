@@ -6,7 +6,7 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, Open, Room, Row, Setup, Sound, State, Writing};
+use crate::app::proto::{Change, From, NoteOp, Open, Room, Row, Setup, Sound, State, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -17,9 +17,11 @@ use crate::live::lines::Line;
 use crate::out::city::{self, Calendar, FileGate, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
+use crate::record::notes;
 use crate::record::shelf::{
     About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf, Words,
 };
+use crate::record::takes::{RefineEvent, RefineStatus, initial_refine_status, refine_step};
 use crate::record::{migrate, retain};
 use crate::rt::queue::{self, Full, Tx};
 use crate::rt::signal::Reading;
@@ -31,12 +33,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
-use zutalk_log::{info, warn};
+use zutalk_log::{Id, info, warn};
 
 const WHOLE: &str = "stt-async-v6";
 /// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
@@ -254,6 +256,8 @@ enum Job {
     RotationSaved,
     Refresh { rev: u64, opened: Option<String>, retain: Option<Option<u32>>, include_rooms: bool },
     Change { id: String, change: Change },
+    Note { id: String, op: NoteOp },
+    RefinePrepare { id: String },
     Remove { id: String },
     Restore { id: String },
     Term { said: String, written: Option<BTreeMap<String, String>> },
@@ -278,6 +282,8 @@ impl DeskJob for Job {
             Job::RotationSaved => "rotation_saved",
             Job::Refresh { .. } => "refresh",
             Job::Change { .. } => "change",
+            Job::Note { .. } => "note",
+            Job::RefinePrepare { .. } => "refine.prepare",
             Job::Remove { .. } => "remove",
             Job::Restore { .. } => "restore",
             Job::Term { .. } => "term",
@@ -330,6 +336,10 @@ enum DeskOut {
     FileReady {
         id: String,
         filing: Filing,
+    },
+    RefineStart {
+        id: String,
+        from: RefineStatus,
     },
     OwnKey(OwnKeyOut),
 }
@@ -608,6 +618,9 @@ impl Work {
                         Ok(DeskOut::FileReady { id, filing }) => {
                             let _ = results.send(Msg::FilingReady(id, filing)).await; // dropped: the hub has ended
                         }
+                        Ok(DeskOut::RefineStart { id, from }) => {
+                            let _ = results.send(Msg::RefineReady { id, from }).await; // dropped: the hub has ended
+                        }
                         Ok(DeskOut::OwnKey(out)) => {
                             let _ = results.send(Msg::OwnKeyDone(Ok(out))).await; // dropped: the hub has ended
                         }
@@ -807,6 +820,14 @@ impl Work {
         self.desk.offer(Job::Change { id, change }).map(|_| ())
     }
 
+    pub(crate) fn note(&self, id: String, op: NoteOp) -> Result<(), &'static str> {
+        self.desk.offer(Job::Note { id, op }).map(|_| ())
+    }
+
+    pub(crate) fn refine(&self, id: String) -> Result<(), &'static str> {
+        self.desk.offer(Job::RefinePrepare { id }).map(|_| ())
+    }
+
     pub(crate) fn remove(&self, id: String) -> Result<(), &'static str> {
         self.desk.offer(Job::Remove { id }).map(|_| ())
     }
@@ -994,6 +1015,8 @@ impl Work {
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
             terms,
+            manual: false,
+            from_state: RefineStatus::Draft { why: None },
         };
         self.root.spawn("recording", async move {
             let done = recording::run(rec_start).await;
@@ -1052,11 +1075,47 @@ impl Work {
                     jobs_done: jobs_done.clone(),
                     jobs_failed: jobs_failed.clone(),
                     terms: terms.clone(),
+                    manual: false,
+                    from_state: RefineStatus::Draft { why: None },
                 };
                 work_tree.spawn("job.write", async move {
                     ctx.finish_recovered().await;
                 });
             }
+        });
+    }
+
+    /// Starts a manual whole-recording refinement on the `work` subtree (`Command::Refine`).
+    pub(crate) fn write_manual(&self, id: String, from: RefineStatus, terms: Vec<Term>) {
+        let snap = snapshot(&self.identity);
+        let Ok(shelf) = snap.shelf else {
+            let results = self.results.clone();
+            self.tree.spawn("job.write", async move {
+                let _ = results.send(Msg::Wrote(id)).await; // dropped: the hub has ended
+            });
+            return;
+        };
+        let ctx = WriteCtx {
+            id,
+            shelf,
+            keys: snap.keys,
+            config: self.config.clone(),
+            results: self.results.clone(),
+            progress: self.progress.clone(),
+            said: self.said.clone(),
+            work_tree: self.tree.clone(),
+            root: self.root.clone(),
+            bg: self.bg.clone(),
+            next_seq: self.next_seq.clone(),
+            jobs_done: self.jobs_done.clone(),
+            jobs_failed: self.jobs_failed.clone(),
+            terms,
+            manual: true,
+            from_state: from,
+        };
+        self.tree.spawn("job.write", async move {
+            ctx.write_job().await;
+            let _ = ctx.results.send(Msg::Wrote(ctx.id.clone())).await; // dropped: the hub has ended
         });
     }
 
@@ -1220,6 +1279,44 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             apply(&shelf, &id, change)?;
             Ok(DeskOut::Changed)
         }
+        Job::Note { id, op } => {
+            let shelf = snapshot(identity).shelf?;
+            if shelf.about(&id).map_err(fail)?.is_none() {
+                return Err("recording.gone");
+            }
+            match op {
+                NoteOp::Add { at_ms, text, anchor } => {
+                    let rand = getrandom::u32().map_err(|_| "random")?;
+                    notes::add(&shelf, &id, at_ms, text, anchor, rand, now()).map_err(fail)?;
+                }
+                NoteOp::Edit { key, text } => {
+                    notes::edit(&shelf, &id, &key, text, now())?;
+                }
+                NoteOp::Remove { key } => {
+                    notes::remove(&shelf, &id, &key, now())?;
+                }
+            }
+            Ok(DeskOut::Changed)
+        }
+        Job::RefinePrepare { id } => {
+            let snap = snapshot(identity);
+            let shelf = snap.shelf?;
+            let rec = shelf.about(&id).map_err(fail)?.ok_or("recording.gone")?;
+            let tape_dir = config.tapes().join(&id);
+            let audio = tape::kept(&tape_dir);
+            if !audio {
+                return Err("tape.none");
+            }
+            let has_key = snap.keys.from(Service::Soniox) != From::Nowhere;
+            if !has_key {
+                return Err("keys.none");
+            }
+            let journal = write::Journal::load(&tape_dir).unwrap_or_default();
+            let from =
+                initial_refine_status(rec.about.take, audio, has_key, journal.failed.as_ref());
+            let _ = write::clear_failure(&tape_dir); // dropped: write_job also clears failure before signing
+            Ok(DeskOut::RefineStart { id, from })
+        }
         Job::Remove { id } => {
             let shelf = snapshot(identity).shelf?;
             shelf.put::<About>(&id, RECORDING, &[(id.clone(), None)], now()).map_err(fail)?;
@@ -1293,11 +1390,33 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::OwnKey { service, key, busy } => {
             let snap = snapshot(identity);
+            let had_own = key.is_some();
             snap.keys.own(service, key.as_deref()).map_err(code)?;
             let keys_from: Vec<(String, From)> =
                 Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
             let left = snap.keys.left();
             let has_soniox = snap.keys.from(Service::Soniox) != From::Nowhere;
+            if service == Service::Soniox
+                && had_own
+                && let Ok(shelf) = &snap.shelf
+            {
+                let tapes = config.tapes();
+                if let Ok(recs) = shelf.list() {
+                    for rec in recs {
+                        if rec.about.take != 0 {
+                            continue;
+                        }
+                        let dir = tapes.join(&rec.id);
+                        if let Ok(journal) = write::Journal::load(&dir)
+                            && journal.failed.as_ref().is_some_and(|f| {
+                                f.code == "keys.async_refused" || f.code == "keys.none"
+                            })
+                        {
+                            let _ = write::clear_failure(&dir); // dropped: best-effort retry unlock after entering own key
+                        }
+                    }
+                }
+            }
             let survey = if service == Service::Soniox && has_soniox {
                 Some(run_survey(config, &snap, &busy, false)?)
             } else {
@@ -1694,6 +1813,14 @@ fn run_survey(
         if busy.iter().any(|id| id == &r.id) {
             continue;
         }
+        // Skip drafts that stopped with a persistent fatal refinement error until the user
+        // supplies a new key or retries manually (`P2.md` §3.3.2).
+        if r.draft
+            && r.audio
+            && write::Journal::load(&tapes.join(&r.id)).is_ok_and(|j| j.failed.is_some())
+        {
+            continue;
+        }
         // Nothing is written again without its audio, nor for one moved from 0.8: it keeps the
         // transcript it had there, or the lack of one, and its sound is not sent anywhere.
         let moved = r.draft
@@ -2044,6 +2171,8 @@ struct WriteCtx {
     jobs_done: Counter,
     jobs_failed: Counter,
     terms: Vec<Term>,
+    manual: bool,
+    from_state: RefineStatus,
 }
 
 impl WriteCtx {
@@ -2132,6 +2261,10 @@ impl WriteCtx {
         let terms: Vec<_> = self.terms.iter().cloned().map(|t| (t.said, t.written)).collect();
         let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
         let slot_ref = &slot;
+        let state: Mutex<RefineStatus> = Mutex::new(self.from_state.clone());
+        let state_ref = &state;
+        let entered = AtomicBool::new(false);
+        let entered_ref = &entered;
         let written = again(
             || async {
                 let wait_at = tokio::time::Instant::now();
@@ -2142,13 +2275,30 @@ impl WriteCtx {
                 info!("job.start", kind = "write", job = seq, waited_ms = waited_ms);
                 let started = std::time::Instant::now();
                 let outcome = async {
-                    // Removed meanwhile, written, or its audio destroyed: nothing to do.
+                    // Removed meanwhile, already written (for auto jobs), or audio destroyed: skip.
                     let about = match self.shelf.about(&self.id) {
-                        Ok(Some(read)) if read.about.take == 0 && tape::kept(&self.tape()) => {
+                        Ok(Some(read))
+                            if (self.manual || read.about.take == 0)
+                                && tape::kept(&self.tape()) =>
+                        {
                             read.about
                         }
                         _ => return Ok(()),
                     };
+                    if !entered_ref.swap(true, Ordering::AcqRel) {
+                        let mut cur = state_ref.lock().unwrap_or_else(PoisonError::into_inner);
+                        let from = cur.code();
+                        let next = refine_step(&cur, RefineEvent::Start, now());
+                        info!(
+                            "refine.state",
+                            rec = Id(&self.id),
+                            from = from,
+                            to = next.code(),
+                            why = "",
+                            take = about.take
+                        );
+                        *cur = next;
+                    }
                     let key = keys::derive("tape", &self.id)?;
                     let (soniox, openrouter) =
                         (self.config.soniox.clone(), self.config.openrouter.clone());
@@ -2206,8 +2356,49 @@ impl WriteCtx {
             },
         )
         .await;
-        if let Err(end) = written {
-            self.said.say(code(end));
+        match written {
+            Ok(()) if entered.load(Ordering::Acquire) => {
+                let new_take =
+                    self.shelf.about(&self.id).ok().flatten().map(|r| r.about.take).unwrap_or(0);
+                let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let from = cur.code();
+                let next = refine_step(&cur, RefineEvent::Succeeded { take: new_take }, now());
+                info!(
+                    "refine.state",
+                    rec = Id(&self.id),
+                    from = from,
+                    to = next.code(),
+                    why = "",
+                    take = new_take
+                );
+                *cur = next;
+            }
+            Ok(()) => {}
+            Err(end) => {
+                let raw = code(end);
+                let mapped = if matches!(end, End::Fatal(_)) {
+                    let mapped = write::refine_error_code(raw, self.keys.from(Service::Soniox));
+                    let _ = write::record_failure(&self.tape(), mapped, now()); // dropped: best-effort failure persistence beside audio
+                    mapped
+                } else {
+                    raw
+                };
+                if entered.load(Ordering::Acquire) {
+                    let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let from = cur.code();
+                    let next = refine_step(&cur, RefineEvent::Failed { code: mapped }, now());
+                    warn!(
+                        "refine.state",
+                        rec = Id(&self.id),
+                        from = from,
+                        to = next.code(),
+                        why = mapped,
+                        take = 0u32
+                    );
+                    *cur = next;
+                }
+                self.said.say(mapped);
+            }
         }
     }
 }

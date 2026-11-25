@@ -221,5 +221,8 @@
  "code.update.installing": "正在安装更新",
  "code.diagnose": "写不出自检包",
  "code.diagnose.done": "自检包已保存",
+ "code.note.gone": "这条笔记已经不在了",
+ "code.tape.none": "这场录音没有保留音频",
+ "code.keys.async_refused": "没精修 · 需要能整场转写的钥匙",
  "reconnect": "重连"
 }

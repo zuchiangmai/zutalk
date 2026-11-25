@@ -4,6 +4,7 @@
 
 use crate::live::lang::profile;
 use crate::live::lines::Line;
+use crate::record::notes::{self, Note};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -71,6 +72,7 @@ pub struct Recording {
     pub lines: Vec<(String, Said)>, // each with its key, in the order they were said
     pub speakers: BTreeMap<String, String>,
     pub note: String,
+    pub notes: Vec<Note>,
 }
 
 /// What a room carries: one recording, or the live captions.
@@ -138,12 +140,38 @@ impl Draft for Writer {
     }
 }
 
+/// Append-only writer for live draft lines (`<id>.0.<seq>`). Keeps O(1) memory across hours of
+/// recording by omitting per-path head maps since draft line keys are strictly unique (`P2.md` §3.3.3).
+pub struct DraftWriter {
+    pack: Pack,
+    by: String,
+    key: Arc<SecretKey>,
+    last_at: i64,
+}
+
+impl Draft for DraftWriter {
+    fn put(&mut self, key: &str, said: &Said, now: i64) -> Result<(), Error> {
+        let path = Path::new(&self.by, LINE, key)?;
+        let at = now.max(self.last_at);
+        let json = serde_json::to_string(said).map_err(|_| Error::Json)?;
+        let body = self.pack.keep(&Value::from_json(&json)?)?;
+        let record = Record::sign(&self.key, path, Some(body), Vec::new(), at, None)?;
+        self.pack.append(&record)?;
+        self.last_at = at + 1;
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), Error> {
+        self.pack.sync()
+    }
+}
+
 /// Opens a recording's live draft for writing.
 pub type Drafts = Arc<dyn Fn(&Shelf, &str) -> Result<Box<dyn Draft>, Error> + Send + Sync>;
 
-/// The real draft port: writes `talk/line` records directly onto the shelf.
+/// The real draft port: writes `talk/line` records directly onto the shelf with O(1) writer state.
 pub fn drafts() -> Drafts {
-    Arc::new(|shelf, id| Ok(Box::new(shelf.open(id, LINE)?) as Box<dyn Draft>))
+    Arc::new(|shelf, id| Ok(Box::new(shelf.open_draft(id)?) as Box<dyn Draft>))
 }
 
 /// The range and count of consecutive draft lines dropped while the draft queue was full.
@@ -256,6 +284,16 @@ impl Shelf {
         &self.by
     }
 
+    /// The root directory holding this shelf's packs.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Path to the pack file of recording `id` for record type `ty`.
+    pub fn pack_path(&self, id: &str, ty: &str) -> PathBuf {
+        self.pack(id, ty)
+    }
+
     /// Lines are many and the rest is little, so each has a pack: a list reads the little.
     /// What is the person's, not a recording's (their rooms, glossary, filings), has its own.
     fn pack(&self, id: &str, ty: &str) -> PathBuf {
@@ -266,6 +304,16 @@ impl Shelf {
             FILING => self.root.join("filings.jsonl"),
             _ => self.root.join(id).join("about.jsonl"),
         }
+    }
+
+    /// Opens `<id>/lines.jsonl` for append-only live draft writing without retaining per-path heads.
+    pub fn open_draft(&self, id: &str) -> Result<DraftWriter, Error> {
+        let pack = self.pack(id, LINE);
+        fs::create_dir_all(pack.parent().unwrap_or(&self.root))?;
+        let (pack, held) = Pack::open(pack)?;
+        let last_at = held.records.iter().map(|record| record.at + 1).max().unwrap_or(i64::MIN);
+        drop(held);
+        Ok(DraftWriter { pack, by: self.by.clone(), key: self.key.clone(), last_at })
     }
 
     /// The pack of recording `id` that holds type `ty`, open for adding records.
@@ -328,21 +376,21 @@ impl Shelf {
     pub fn about(&self, id: &str) -> Result<Option<Recording>, Error> {
         let held = held(self.pack(id, RECORDING))?;
         let mut recording = None;
-        let (mut speakers, mut note) = (BTreeMap::new(), String::new());
+        let mut speakers = BTreeMap::new();
         for (path, current) in record::paths(&held.records) {
             let label = path.key.strip_prefix(id).and_then(|rest| rest.strip_prefix('.'));
             match (path.ty.as_str(), label) {
                 (RECORDING, _) => recording = says::<About>(&held, &current)?,
-                (NOTE, _) => note = says::<Words>(&held, &current)?.unwrap_or_default().text,
                 (SPEAKER, Some(label)) => {
                     let name = says::<Words>(&held, &current)?;
                     speakers.extend(name.map(|name| (label.to_string(), name.text)));
                 }
-                _ => {} // a type this version does not know: kept, not shown
+                _ => {} // notes are parsed below; unknown types are kept, not shown
             }
         }
+        let (note, notes) = notes::from_held(id, &held)?;
         let id = id.to_string();
-        Ok(recording.map(|about| Recording { id, about, lines: Vec::new(), speakers, note }))
+        Ok(recording.map(|about| Recording { id, about, lines: Vec::new(), speakers, note, notes }))
     }
 
     /// The recording as it reads now.

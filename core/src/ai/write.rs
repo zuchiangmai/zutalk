@@ -5,10 +5,11 @@
 
 use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::capture::tape::{self, Pass};
-use crate::id::keys::{Keys, Lease, Service};
+use crate::id::keys::{From, Keys, Lease, Service};
 use crate::live::lang::{self, Script, profile};
 use crate::live::lines::{Assembler, Boundary, Line, Token};
 use crate::record::shelf::{self, About, LINE, RECORDING, Said, Shelf};
+use crate::record::takes::RefineFailure;
 use crate::rt::queue::{self, Full};
 use crate::rt::supervise::{End, Tree};
 use futures_util::stream;
@@ -139,6 +140,48 @@ pub struct Journal {
     pub name: Option<String>,
     pub owed: Vec<String>, // `files/<id>`, `transcriptions/<id>`, as they were made
     pub take: u32,
+    /// Persistent fatal refinement failure so the UI can explain why it stopped and boot survey
+    /// skips retrying blindly until the user changes keys or retries manually (`P2.md` §3.3.2).
+    #[serde(default)]
+    pub failed: Option<RefineFailure>,
+}
+
+/// Maps a fatal transcription error to the user-facing code: a granted quota key refused for
+/// async whole-session transcription becomes `"keys.async_refused"` (`DECISIONS.md` #4).
+pub fn refine_error_code(end_code: &'static str, soniox_from: From) -> &'static str {
+    if end_code == "key-refused" && soniox_from == From::Granted {
+        "keys.async_refused"
+    } else {
+        end_code
+    }
+}
+
+/// Records a fatal refinement failure into `<dir>/write.json` when the tape folder still exists.
+pub fn record_failure(dir: &Path, code: &str, at: i64) -> Result<(), End> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut journal = Journal::load(dir).unwrap_or_default();
+    journal.failed = Some(RefineFailure { code: code.to_owned(), at });
+    journal.save(dir)
+}
+
+/// Clears any stored fatal refinement failure from `<dir>/write.json`.
+pub fn clear_failure(dir: &Path) -> Result<(), End> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let Ok(mut journal) = Journal::load(dir) else {
+        return Ok(());
+    };
+    if journal.failed.take().is_none() {
+        return Ok(());
+    }
+    if journal.name.is_none() && journal.owed.is_empty() && journal.take == 0 {
+        let _ = fs::remove_file(dir.join(Journal::FILE)); // dropped: best-effort cleanup of empty journal
+        return Ok(());
+    }
+    journal.save(dir)
 }
 
 impl Journal {
@@ -644,6 +687,7 @@ pub async fn write(
             None
         };
         let mut journal = Journal::load(dir)?;
+        journal.failed = None;
         soniox.clear(dir, &mut journal).await?;
         let (path, key) = (dir.to_path_buf(), *tape.1);
         let length = tree

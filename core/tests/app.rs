@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zutalk_core::app::hub::{Clip, Config, HUB_MAIL_MSGS, Install, Notices};
-use zutalk_core::app::proto::{Change, Command, Session, Setup, State, Status};
+use zutalk_core::app::proto::{Change, Command, NoteOp, Session, Setup, State, Status};
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::id::keys;
 use zutalk_core::rt::queue::{self, Back, Full};
@@ -102,6 +102,14 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Open { id: "id".into() }, false),
         (Command::Close, false),
         (Command::Change { id: "id".into(), change: Change::Title { text: "t".into() } }, false),
+        (
+            Command::Note {
+                id: "id".into(),
+                op: NoteOp::Add { at_ms: 0, text: "n".into(), anchor: None },
+            },
+            false,
+        ),
+        (Command::Refine { id: "id".into() }, false),
         (Command::Remove { id: "id".into() }, false),
         (Command::Restore { id: "id".into() }, false),
         (Command::Search { query: "q".into() }, false),

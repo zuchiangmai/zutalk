@@ -221,5 +221,8 @@
  "code.update.installing": "업데이트를 설치하는 중입니다",
  "code.diagnose": "진단 정보를 저장하지 못했습니다",
  "code.diagnose.done": "진단 정보를 저장했습니다",
+ "code.note.gone": "이 메모는 더 이상 없습니다",
+ "code.tape.none": "이 녹음에는 남아 있는 오디오가 없습니다",
+ "code.keys.async_refused": "정리되지 않음 · 전체 녹음을 전사할 수 있는 키가 필요합니다",
  "reconnect": "다시 연결"
 }

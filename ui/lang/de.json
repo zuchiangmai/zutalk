@@ -221,5 +221,8 @@
  "code.update.installing": "Update wird installiert",
  "code.diagnose": "Diagnose konnte nicht gespeichert werden",
  "code.diagnose.done": "Diagnose gespeichert",
+ "code.note.gone": "Diese Notiz ist nicht mehr vorhanden",
+ "code.tape.none": "Für diese Aufnahme ist kein Audio mehr vorhanden",
+ "code.keys.async_refused": "Nicht verfeinert · ein Schlüssel für die vollständige Transkription ist erforderlich",
  "reconnect": "Neu verbinden"
 }
