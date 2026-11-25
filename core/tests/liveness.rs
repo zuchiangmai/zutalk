@@ -341,6 +341,17 @@ async fn nothing_said_or_secret_reaches_the_log() {
     if let Err(leak) = check_log_lines(&lines, &forbidden) {
         panic!("privacy log check failed: {leak}");
     }
+    let mut covered: Vec<String> = lines
+        .iter()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v.get("event")?.as_str().map(str::to_owned))
+        })
+        .collect();
+    covered.sort();
+    covered.dedup();
+    eprintln!("privacy_log_events ({}): {:?}", covered.len(), covered);
 }
 
 // ---- 2. I1: speech-to-screen latency and bounded frames ----
@@ -359,6 +370,10 @@ struct I1Run {
     caption_lag_most: u64,
     judge_verdicts: usize,
     stall_snapshots: usize,
+    h1_running: Option<usize>,
+    h8_running: Option<usize>,
+    h1_events: BTreeMap<String, usize>,
+    h8_events: BTreeMap<String, usize>,
     wall: Duration,
 }
 
@@ -378,10 +393,34 @@ async fn run_i1(spec: SpeechSpec, shown: &[&str], hours: usize) -> I1Run {
     let total_ms = u64::from(duration_ms) + 3_000;
     let mut elapsed = 0u64;
     let step = 60_000u64;
+    let mut h1_running = None;
+    let mut h8_running = None;
+    let mut h1_events = BTreeMap::new();
+    let mut h7_end_count = 0usize;
+    let mut h8_events = BTreeMap::new();
+    let count_codes = |lines: &[zutalk_log::Line]| -> BTreeMap<String, usize> {
+        let mut map = BTreeMap::new();
+        for l in lines {
+            *map.entry(l.code.to_owned()).or_insert(0) += 1;
+        }
+        map
+    };
     while elapsed < total_ms {
         let chunk = (total_ms - elapsed).min(step);
         tokio::time::sleep(Duration::from_millis(chunk)).await;
         elapsed += chunk;
+        if hours >= 8 {
+            if elapsed == u64::from(ONE_HOUR_MS) {
+                h1_running = Some(bench.running().len());
+                h1_events = count_codes(&bench.seen().all());
+            } else if elapsed == 7 * u64::from(ONE_HOUR_MS) {
+                h7_end_count = bench.seen().all().len();
+            } else if elapsed == 8 * u64::from(ONE_HOUR_MS) {
+                h8_running = Some(bench.running().len());
+                let all = bench.seen().all();
+                h8_events = count_codes(&all[h7_end_count.min(all.len())..]);
+            }
+        }
     }
 
     let seen_words = bench.word_seen();
@@ -433,6 +472,10 @@ async fn run_i1(spec: SpeechSpec, shown: &[&str], hours: usize) -> I1Run {
         caption_lag_most,
         judge_verdicts,
         stall_snapshots,
+        h1_running,
+        h8_running,
+        h1_events,
+        h8_events,
         wall: wall_start.elapsed(),
     }
 }
@@ -516,6 +559,15 @@ async fn i1_eight_hours_in_the_caption_is_as_quick_as_in_the_first() {
         run.max_frame_bytes <= MAX_FRAME_BYTES,
         "max frame {} bytes > {MAX_FRAME_BYTES} bytes",
         run.max_frame_bytes
+    );
+    assert_eq!(
+        run.h1_running, run.h8_running,
+        "Tree::running() count drifted between hour 1 ({:?}) and hour 8 ({:?})",
+        run.h1_running, run.h8_running
+    );
+    eprintln!(
+        "i1_eight_hours cost: h1_running={:?} h8_running={:?} h1_events={:?} h8_events={:?}",
+        run.h1_running, run.h8_running, run.h1_events, run.h8_events
     );
 }
 
@@ -3093,5 +3145,414 @@ async fn the_screen_mark_follows_what_the_interface_says_it_drew() {
 
     bench.stop_recording().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
+    bench.finish();
+}
+
+// ---- 9. P1-25: E10 event catalogue, read-the-log sequences, and stats audit ----
+
+/// Parses every event code listed under `## 事件` in `docs/EVENTS.md` in document order.
+fn parse_events_catalogue(doc: &str) -> Vec<String> {
+    let mut in_table = false;
+    let mut codes = Vec::new();
+    for line in doc.lines() {
+        if line.starts_with("## ") {
+            in_table = line.trim() == "## 事件";
+            continue;
+        }
+        if !in_table || !line.starts_with("| `") {
+            continue;
+        }
+        let Some(cell) = line.split('|').nth(1) else { continue };
+        let mut rest = cell;
+        while let Some(start) = rest.find('`') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('`') else { break };
+            codes.push(after[..end].to_owned());
+            rest = &after[end + 1..];
+        }
+    }
+    codes
+}
+
+#[test]
+fn every_event_in_the_catalogue_can_be_told_apart() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/EVENTS.md");
+    let doc = fs::read_to_string(&path).expect("read docs/EVENTS.md");
+    let codes = parse_events_catalogue(&doc);
+    assert!(!codes.is_empty(), "docs/EVENTS.md has no event rows under `## 事件`");
+
+    let mut seen = std::collections::BTreeSet::new();
+    for code in &codes {
+        assert!(
+            zutalk_log::is_code(code),
+            "event code `{code}` in docs/EVENTS.md fails zutalk_log::is_code"
+        );
+        assert!(seen.insert(code.clone()), "duplicate event code `{code}` in docs/EVENTS.md");
+    }
+}
+
+/// Reads all JSONL lines written to `dir` in chronological order and parses each as a JSON value.
+fn read_jsonl(dir: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .expect("read log dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for path in files {
+        let content = fs::read_to_string(&path).expect("read jsonl");
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).expect("valid json line");
+            out.push((line.to_owned(), val));
+        }
+    }
+    out
+}
+
+type LogStep = (&'static str, fn(&serde_json::Value) -> bool);
+
+/// Asserts that `steps` appear in order as a subsequence of `entries`, returning matched indices.
+fn assert_log_sequence(entries: &[(String, serde_json::Value)], steps: &[LogStep]) -> Vec<usize> {
+    let mut cursor = 0usize;
+    let mut matched = Vec::with_capacity(steps.len());
+    for (label, pred) in steps {
+        let found = entries[cursor..].iter().position(|(_, v)| pred(v)).map(|off| cursor + off);
+        let Some(idx) = found else {
+            let summary: Vec<&str> =
+                entries.iter().map(|(_, v)| v["event"].as_str().unwrap_or("?")).collect();
+            panic!("missing step `{label}` after index {cursor}; events={summary:?}");
+        };
+        matched.push(idx);
+        cursor = idx + 1;
+    }
+    matched
+}
+
+#[tokio::test(start_paused = true)]
+async fn log_tells_the_story_of_a_silent_service() {
+    let _store = STORE.lock().await;
+    let log_dir = tempfile::tempdir().expect("log tempdir");
+    let (scope, guard) =
+        zutalk_log::files(log_dir.path(), "zutalk", Level::Info, Limits::default())
+            .expect("open file log");
+    let entered = scope.enter();
+
+    let speech = Speech::build(SpeechSpec::standard(35_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.capture_log = false;
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::Silent { connections: 1 };
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(22_000)).await;
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bench.finish();
+
+    drop(entered);
+    drop(guard);
+
+    let entries = read_jsonl(log_dir.path());
+    let steps: &[LogStep] = &[
+        ("recording.start", |v| v["event"] == "recording.start"),
+        ("lane.open(ok)", |v| v["event"] == "lane.open" && v["code"] == "ok"),
+        ("judge.verdict(Heard->Slow)", |v| {
+            v["event"] == "judge.verdict" && v["stage"] == "Heard" && v["to"] == "Slow"
+        }),
+        ("judge.verdict(Heard->Stalled,silent,reopen)", |v| {
+            v["event"] == "judge.verdict"
+                && v["stage"] == "Heard"
+                && v["to"] == "Stalled"
+                && v["why"] == "silent"
+                && v["action"] == "reopen"
+        }),
+        ("stall.snapshot(Heard,silent)", |v| {
+            v["event"] == "stall.snapshot" && v["stage"] == "Heard" && v["why"] == "silent"
+        }),
+        ("stall.snapshot.end", |v| v["event"] == "stall.snapshot.end"),
+        ("lane.kick(silent)", |v| v["event"] == "lane.kick" && v["why"] == "silent"),
+        ("part.state(lane.0->Waiting,silent)", |v| {
+            v["event"] == "part.state"
+                && v["part"] == "lane.0"
+                && v["to"] == "Waiting"
+                && v["why"] == "silent"
+        }),
+        ("lane.open(ok) after kick", |v| v["event"] == "lane.open" && v["code"] == "ok"),
+        ("lane.gap(silent)", |v| v["event"] == "lane.gap" && v["why"] == "silent"),
+        ("judge.verdict(Heard->Live)", |v| {
+            v["event"] == "judge.verdict" && v["stage"] == "Heard" && v["to"] == "Live"
+        }),
+        ("recording.end(done)", |v| v["event"] == "recording.end" && v["code"] == "done"),
+    ];
+    let matched = assert_log_sequence(&entries, steps);
+    eprintln!("=== STORY 1: SILENT SERVICE ===");
+    for idx in matched {
+        eprintln!("{}", entries[idx].0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn log_tells_the_story_of_going_offline_and_reconnecting() {
+    let _store = STORE.lock().await;
+    let log_dir = tempfile::tempdir().expect("log tempdir");
+    let (scope, guard) =
+        zutalk_log::files(log_dir.path(), "zutalk", Level::Info, Limits::default())
+            .expect("open file log");
+    let entered = scope.enter();
+
+    let speech = Speech::build(SpeechSpec::standard(60_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.capture_log = false;
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::Offline;
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    // 30 virtual seconds suffices for 8 failed dials, Stalled, gave_up, and Dead.
+    tokio::time::sleep(Duration::from_millis(30_000)).await;
+    bench.service.set_fault(Fault::None);
+    bench.send(Command::Reconnect);
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bench.finish();
+
+    drop(entered);
+    drop(guard);
+
+    let entries = read_jsonl(log_dir.path());
+    let connect_opens =
+        entries.iter().filter(|(_, v)| v["event"] == "lane.open" && v["code"] == "connect").count();
+    assert_eq!(connect_opens, 8, "expected 8 failed lane.open(connect) lines");
+    let steps: &[LogStep] = &[
+        ("recording.start", |v| v["event"] == "recording.start"),
+        ("lane.open(connect)", |v| v["event"] == "lane.open" && v["code"] == "connect"),
+        ("judge.verdict(Sent->Stalled,connect)", |v| {
+            v["event"] == "judge.verdict"
+                && v["stage"] == "Sent"
+                && v["to"] == "Stalled"
+                && v["why"] == "connect"
+        }),
+        ("stall.snapshot(Sent,connect)", |v| {
+            v["event"] == "stall.snapshot" && v["stage"] == "Sent" && v["why"] == "connect"
+        }),
+        ("stall.snapshot.end", |v| v["event"] == "stall.snapshot.end"),
+        ("part.gave_up(lane.0,connect)", |v| {
+            v["event"] == "part.gave_up" && v["part"] == "lane.0" && v["why"] == "connect"
+        }),
+        ("judge.verdict(Sent->Dead,connect)", |v| {
+            v["event"] == "judge.verdict"
+                && v["stage"] == "Sent"
+                && v["to"] == "Dead"
+                && v["why"] == "connect"
+        }),
+        ("command.done(Reconnect,ok)", |v| {
+            v["event"] == "command.done" && v["kind"] == "Reconnect" && v["code"] == "ok"
+        }),
+        ("lane.reconnect", |v| v["event"] == "lane.reconnect" && v["lane"] == 0),
+        ("lane.open(ok)", |v| v["event"] == "lane.open" && v["code"] == "ok"),
+        ("lane.link(Live)", |v| v["event"] == "lane.link" && v["to"] == "Live"),
+        ("judge.verdict(Sent->Live)", |v| {
+            v["event"] == "judge.verdict" && v["stage"] == "Sent" && v["to"] == "Live"
+        }),
+        ("recording.end(done)", |v| v["event"] == "recording.end" && v["code"] == "done"),
+    ];
+    let matched = assert_log_sequence(&entries, steps);
+    eprintln!("=== STORY 2: OFFLINE TO GAVE_UP AND RECONNECT ===");
+    for idx in matched {
+        eprintln!("{}", entries[idx].0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn log_tells_the_story_of_a_tape_writer_panic() {
+    let _store = STORE.lock().await;
+    let log_dir = tempfile::tempdir().expect("log tempdir");
+    let (scope, guard) =
+        zutalk_log::files(log_dir.path(), "zutalk", Level::Info, Limits::default())
+            .expect("open file log");
+    let entered = scope.enter();
+
+    let speech = Speech::build(SpeechSpec::standard(25_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.capture_log = false;
+    opts.tape = TapeMode::Gated;
+
+    let bench = Bench::start(opts).await;
+    bench.gated_tape.panic_at(10_000);
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _rec_id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(20_000)).await;
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bench.finish();
+
+    drop(entered);
+    drop(guard);
+
+    let entries = read_jsonl(log_dir.path());
+    let steps: &[LogStep] = &[
+        ("recording.start", |v| v["event"] == "recording.start"),
+        ("keep.lost(tape,panic)", |v| {
+            v["event"] == "keep.lost" && v["part"] == "tape" && v["why"] == "panic"
+        }),
+        ("part.state(tape->Waiting,panic)", |v| {
+            v["event"] == "part.state"
+                && v["part"] == "tape"
+                && v["to"] == "Waiting"
+                && v["why"] == "panic"
+        }),
+        ("part.state(tape->Opening)", |v| {
+            v["event"] == "part.state" && v["part"] == "tape" && v["to"] == "Opening"
+        }),
+        ("part.state(tape->Running)", |v| {
+            v["event"] == "part.state" && v["part"] == "tape" && v["to"] == "Running"
+        }),
+        ("tape.pad", |v| v["event"] == "tape.pad"),
+        ("recording.end(done)", |v| v["event"] == "recording.end" && v["code"] == "done"),
+    ];
+    let matched = assert_log_sequence(&entries, steps);
+    eprintln!("=== STORY 3: TAPE WRITER PANIC ===");
+    for idx in matched {
+        eprintln!("{}", entries[idx].0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_minute_recording_tally_matches_the_table() {
+    let _store = STORE.lock().await;
+    let export_dir = tempfile::tempdir().expect("export tempdir");
+    let export_path = export_dir.path().join("out.md");
+
+    let speech = Speech::build(SpeechSpec::standard(130_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::panic_at(30_000);
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(60_000)).await;
+    bench.send(Command::Search { query: "w000".into() });
+    bench.send(Command::Export {
+        id: rec_id.clone(),
+        exporter: "markdown".into(),
+        languages: vec![],
+        to: export_path.to_string_lossy().into_owned(),
+    });
+    tokio::time::sleep(Duration::from_millis(60_000)).await;
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let tally = bench.tally();
+    let count_names: Vec<&str> = tally.counts.iter().map(|r| r.name).collect();
+    let peak_names: Vec<&str> = tally.peaks.iter().map(|r| r.name).collect();
+    let spread_names: Vec<&str> = tally.spreads.iter().map(|r| r.name).collect();
+    let queue_names: Vec<&str> = tally.queues.iter().map(|r| r.name).collect();
+
+    eprintln!("=== 2-MIN TALLY AUDIT ===");
+    eprintln!("counts ({}): {count_names:?}", count_names.len());
+    eprintln!("peaks ({}): {peak_names:?}", peak_names.len());
+    eprintln!("spreads ({}): {spread_names:?}", spread_names.len());
+    eprintln!("queues ({}): {queue_names:?}", queue_names.len());
+
+    // Every name produced must belong to the documented P1.md §3.13.4 table.
+    let known_counts = [
+        "log.lost",
+        "log.refused",
+        "task.started",
+        "task.panics",
+        "part.restarts",
+        "part.gave_up",
+        "frame.made",
+        "frame.cut",
+        "lane.gaps",
+        "state.sent",
+        "notices.said",
+        "commands.done",
+        "commands.refused",
+        "hub.turns",
+        "hub.turns.slow",
+        "capture.blocks",
+        "capture.padded_ms",
+        "capture.ring.lost_samples",
+        "capture.reopens",
+        "tape.blocks",
+        "tape.padded_blocks",
+        "draft.lines",
+        "draft.lost_lines",
+        "keep.lost_batches",
+        "judge.stalled",
+        "judge.dead",
+        "lane.kicks",
+        "jobs.done",
+        "jobs.failed",
+        "search.stale",
+        "refresh.merged",
+        "shell.pushed",
+        "shell.sinks.gone",
+        "shell.beats.stalled",
+        "ui.gaps",
+    ];
+    let known_peaks = ["tree.tasks", "frame.bound_bytes"];
+    let known_spreads = [
+        "hub.turn_us",
+        "tape.batch_ms",
+        "draft.batch_ms",
+        "caption.lag_ms",
+        "lane.keys_ms",
+        "lane.dial_ms",
+        "desk.wait_ms",
+        "desk.job_ms",
+        "shell.beat_ms",
+        "ui.gap_ms",
+    ];
+    let known_queues = [
+        "capture.pump",
+        "capture.ended",
+        "capture.file",
+        "audio",
+        "tape",
+        "lane.events",
+        "draft",
+        "hub.mail",
+        "desk",
+        "shell.joins",
+        "shell.updates",
+        "write.wav",
+        "city.audio",
+    ];
+    for name in &count_names {
+        assert!(known_counts.contains(name), "undocumented counter `{name}`");
+    }
+    for name in &peak_names {
+        assert!(known_peaks.contains(name), "undocumented peak `{name}`");
+    }
+    for name in &spread_names {
+        assert!(known_spreads.contains(name), "undocumented spread `{name}`");
+    }
+    for name in &queue_names {
+        assert!(known_queues.contains(name), "undocumented queue `{name}`");
+    }
+    assert!(count_names.contains(&"part.restarts"));
+    assert!(count_names.contains(&"lane.gaps"));
+    assert!(count_names.contains(&"jobs.done"));
+    assert!(spread_names.contains(&"caption.lag_ms"));
+    assert!(spread_names.contains(&"hub.turn_us"));
+    assert!(queue_names.contains(&"desk"));
+    assert!(queue_names.contains(&"tape"));
+    assert!(queue_names.contains(&"draft"));
+
     bench.finish();
 }

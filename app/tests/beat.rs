@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use zutalk::beat::{BEAT_EVERY_MS, BEAT_STALLED_MS, Beat, Effect, Tick, run, step};
+use zutalk::beat::{BEAT_EVERY_MS, BEAT_STALLED_MS, Beat, Effect, Tick, note_frame_gap, run, step};
 use zutalk_core::rt::stats::Stats;
 use zutalk_log::Level;
 
@@ -223,4 +223,30 @@ async fn the_beat_ends_when_the_app_is_going() {
     .await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_frame_gap_from_the_ui_is_logged_and_counted() {
+    let seen = zutalk_log::capture(Level::Info);
+    let stats = Stats::new();
+    let spread = stats.spread("ui.gap_ms");
+    let count = stats.counter("ui.gaps");
+
+    // Zero gaps: nothing emitted or recorded.
+    note_frame_gap("main", 0, 0, &spread, &count);
+    assert!(seen.of("ui.frame.gap").is_empty());
+
+    // Non-zero gaps: emits warn ui.frame.gap and records ui.gap_ms and ui.gaps.
+    note_frame_gap("captions", 420, 2, &spread, &count);
+    let events = seen.of("ui.frame.gap");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].level, Level::Warn);
+    assert_eq!(events[0].text("window"), Some("captions"));
+    assert_eq!(events[0].u64("gap_ms"), Some(420));
+    assert_eq!(events[0].u64("n"), Some(2));
+
+    let tally = stats.tally();
+    assert_eq!(tally.counts.iter().find(|c| c.name == "ui.gaps").map(|c| c.n), Some(2));
+    assert_eq!(tally.spreads.iter().find(|s| s.name == "ui.gap_ms").map(|s| s.most), Some(420));
+    assert_eq!(seen.refused(), 0);
 }

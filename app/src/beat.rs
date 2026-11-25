@@ -9,8 +9,8 @@
 
 use std::time::Duration;
 use zutalk_core::rt::signal::Register;
-use zutalk_core::rt::stats::Stats;
-use zutalk_log::{info, warn};
+use zutalk_core::rt::stats::{Counter, Spread, Stats};
+use zutalk_log::{Id, info, warn};
 
 /// How often a beat is posted to the main thread (`PLAN.md` §4.5.2).
 pub const BEAT_EVERY_MS: u64 = 1_000;
@@ -122,5 +122,15 @@ pub async fn run(post: impl Fn(Box<dyn FnOnce() + Send>) -> bool, stats: Stats) 
                 }
             }
         }
+    }
+}
+
+/// Records an interface frame-gap report from `drawn` (`P1.md` §3.13.8, `P1-24`).
+/// Emits `ui.frame.gap` and updates `ui.gap_ms` and `ui.gaps` only when `gaps > 0`.
+pub fn note_frame_gap(window: &str, gap_ms: u32, gaps: u32, spread: &Spread, count: &Counter) {
+    if gaps > 0 {
+        warn!("ui.frame.gap", window = Id(window), gap_ms = gap_ms, n = gaps);
+        spread.note(u64::from(gap_ms));
+        count.add(u64::from(gaps));
     }
 }

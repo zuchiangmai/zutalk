@@ -43,6 +43,23 @@ pub fn channel(stats: &Stats) -> (InstallTx, Rx<oneshot::Sender<()>>) {
     queue::bounded::<oneshot::Sender<()>>(stats, "shell.updates", UPDATE_INSTALL_MSGS, Full::Reject)
 }
 
+/// Outcome of one check for a newer release, emitted as `update.look`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    Ready,
+    None,
+    Failed,
+}
+
+/// Emits the `update.look` event for one update check (`P1.md` §3.13.3).
+pub fn note_look(look: Look) {
+    match look {
+        Look::Ready => info!("update.look", code = "ready"),
+        Look::None => info!("update.look", code = "none"),
+        Look::Failed => warn!("update.look", code = "update"),
+    }
+}
+
 /// Starts the `updates` task on `shell`. When `check_enabled` is false (dev builds), no remote
 /// check is made and any install request replies immediately.
 pub fn start(shell: &Tree, app: AppHandle, rx: Rx<oneshot::Sender<()>>, check_enabled: bool) {
@@ -66,15 +83,15 @@ async fn run(app: AppHandle, mut rx: Rx<oneshot::Sender<()>>, check_enabled: boo
                 Ok(Some((update, bytes))) => {
                     let version = update.version.clone();
                     ready = Some((update, bytes));
-                    info!("update.look", code = "ready");
+                    note_look(Look::Ready);
                     app.state::<Core>().looked(Ok(version)).await;
                 }
                 Ok(None) => {
                     told = false;
-                    info!("update.look", code = "none");
+                    note_look(Look::None);
                 }
                 Err(_) => {
-                    warn!("update.look", code = "update");
+                    note_look(Look::Failed);
                     if !told {
                         told = true;
                         app.state::<Core>().looked(Err("update")).await;

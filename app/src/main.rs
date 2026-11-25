@@ -15,7 +15,7 @@ use zutalk_core::id::keys;
 use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::stats::{Counter, Spread};
 use zutalk_core::rt::supervise::Tree;
-use zutalk_log::{Id, LOG_FLUSH_WAIT_MS, info, warn};
+use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
 
 struct UiVitals {
     gap_ms: Spread,
@@ -46,11 +46,7 @@ async fn drawn(
     vitals: State<'_, UiVitals>,
 ) -> Result<(), String> {
     core.drawn(seq);
-    if gaps > 0 {
-        warn!("ui.frame.gap", window = Id(window.label()), gap_ms = gap_ms, n = gaps);
-        vitals.gap_ms.note(u64::from(gap_ms));
-        vitals.gaps.add(u64::from(gaps));
-    }
+    beat::note_frame_gap(window.label(), gap_ms, gaps, &vitals.gap_ms, &vitals.gaps);
     Ok(())
 }
 

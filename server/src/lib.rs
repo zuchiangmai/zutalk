@@ -104,7 +104,9 @@ impl Server {
 
     /// What time does by itself: rooms not written to for too long are removed.
     pub fn sweep(&self, now: i64) {
+        let started = Instant::now();
         room::sweep(self, now);
+        debug!("server.sweep", ms = started.elapsed().as_millis() as u64);
     }
 
     /// The record in `sent`, checked: of type `ty`, its body the one signed, by one of `only`
@@ -214,9 +216,7 @@ pub async fn serve(listener: tokio::net::TcpListener, server: Arc<Server>) -> st
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(SWEEP_EVERY_MS)).await;
-            let started = Instant::now();
             sweeper.sweep(now());
-            debug!("server.sweep", ms = started.elapsed().as_millis() as u64);
         }
     });
     axum::serve(listener, app(server)).await

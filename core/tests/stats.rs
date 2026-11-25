@@ -308,3 +308,32 @@ async fn once_a_minute_what_moved_is_written() {
     runner.wait().await;
     assert_eq!(seen.refused(), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_peak_that_moved_is_written_in_the_summary() {
+    let seen = capture(Level::Debug);
+    let stats = Stats::new();
+    let out = Register::new(Tally::default());
+    let runner = Tree::root("test", Stats::new());
+    runner.spawn("stats", publish(stats.clone(), out));
+    tokio::task::yield_now().await;
+
+    let peak = stats.peak("frame.bound_bytes");
+    peak.set(2_048);
+    peak.set(512);
+
+    tokio::time::advance(Duration::from_millis(STATS_SUMMARY_EVERY_MS)).await;
+    tokio::task::yield_now().await;
+
+    let peaks = seen.of("stat.peak");
+    assert_eq!(peaks.len(), 1, "expected one stat.peak event: {peaks:?}");
+    assert_eq!(peaks[0].level, Level::Info);
+    assert_eq!(peaks[0].u64("snap"), Some(0));
+    assert_eq!(peaks[0].text("name"), Some("frame.bound_bytes"));
+    assert_eq!(peaks[0].u64("now"), Some(512));
+    assert_eq!(peaks[0].u64("most"), Some(2_048));
+
+    runner.cancel();
+    runner.wait().await;
+    assert_eq!(seen.refused(), 0);
+}

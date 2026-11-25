@@ -130,3 +130,21 @@ fn a_release_the_app_would_refuse_is_refused_before_it_is_published() {
     assert!(refused(&key, &[]), "nothing built");
     assert!(!refused(&key, &[("ZuTalk.app.tar.gz", Some(KEY))]));
 }
+
+#[test]
+fn looking_for_an_update_says_what_it_found() {
+    use zutalk::updates::{Look, note_look};
+    use zutalk_log::{Level, capture};
+
+    let seen = capture(Level::Info);
+    note_look(Look::None);
+    note_look(Look::Ready);
+    note_look(Look::Failed);
+
+    let events = seen.of("update.look");
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!((events[0].level, events[0].text("code")), (Level::Info, Some("none")));
+    assert_eq!((events[1].level, events[1].text("code")), (Level::Info, Some("ready")));
+    assert_eq!((events[2].level, events[2].text("code")), (Level::Warn, Some("update")));
+    assert_eq!(seen.refused(), 0);
+}
