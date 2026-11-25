@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { encode as encodeQr } from 'uqr';
+import type { Quota } from '$proto/Quota';
+import type { ServiceQuota } from '$proto/ServiceQuota';
 import type { Setup } from '$proto/Setup';
 import type { State } from '$proto/State';
 import type { Term } from '$proto/Term';
@@ -10,49 +11,44 @@ import {
   diagnose,
   langName,
   langSource,
+  openIdentitySheet,
   overlaySource,
   send,
   sessionSource,
   setOverlay,
   setTheme,
+  shortDid,
   stateSource,
   t,
   themeSource,
   useQuery,
   useSource,
 } from '../bus';
-import { Button, Pill, Seg, Tag, type SegOption } from '../ds/primitives';
+import { Button, InlineConfirm, Pill, Seg, Tag, type SegOption } from '../ds/primitives';
 import { keyFromView } from '../ds/stateView';
 
 /** All four audio retention policies exposed by Settings (null = forever, 30d, 7d, 0 = delete after refined). */
 export const KEEP_OPTIONS: readonly (number | null)[] = [null, 30, 7, 0];
 
-/** Safe SVG QR renderer using uqr's boolean matrix with direct React <rect> elements. */
-function QrSvg({ value, label }: { value: string; label: string }) {
-  const matrix = useMemo(() => encodeQr(value, { border: 2 }), [value]);
-  const cells: { x: number; y: number }[] = [];
-  for (let y = 0; y < matrix.size; y++) {
-    for (let x = 0; x < matrix.size; x++) {
-      if (matrix.data[y]?.[x]) cells.push({ x, y });
-    }
+/** Pure helper returning remaining percentage clamped to 0..100 for daily quota bars. */
+export function quotaPercent(remaining: number, limit: number): number {
+  if (limit <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((remaining / limit) * 100)));
+}
+
+/** Pure helper extracting one service's daily quota entry from a Quota snapshot. */
+export function findServiceQuota(
+  quota: Quota | null,
+  service: 'soniox' | 'openrouter',
+): ServiceQuota | null {
+  return quota?.services.find((s) => s.service === service) ?? null;
+}
+
+function avatarInitial(handle: string | null, did: string): string {
+  if (handle) {
+    return handle.replace(/^@/, '').slice(0, 1).toUpperCase() || 'Z';
   }
-  return (
-    <div className="qr">
-      <svg
-        width={156}
-        height={156}
-        viewBox={`0 0 ${matrix.size} ${matrix.size}`}
-        role="img"
-        aria-label={label}
-        shapeRendering="crispEdges"
-      >
-        <rect width={matrix.size} height={matrix.size} fill="#ffffff" />
-        {cells.map(({ x, y }) => (
-          <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill="#01291F" />
-        ))}
-      </svg>
-    </div>
-  );
+  return did.replace(/^did:zu:|^did:web:|^@/, '').slice(0, 1).toUpperCase() || 'Z';
 }
 
 function encodeKeep(keep: number | null): string {
@@ -69,8 +65,10 @@ export type SettingsViewProps = {
   theme: ThemePref;
   overlayOpen: boolean;
   recording: boolean;
-  onSignIn: () => void;
+  onOpenIdentity: (step: 'ask' | 'login' | 'create' | 'recover') => void;
   onSignOut: () => void;
+  onRefreshQuota: () => void;
+  onDiscardLocal: () => void;
   onCopyRotation: () => void;
   onRotationSaved: () => void;
   onOwnKey: (service: string, key: string | null) => void;
@@ -83,15 +81,17 @@ export type SettingsViewProps = {
   onUpdate: () => void;
 };
 
-/** Pure presentational P3 Settings shell (Settings.dc.html + Diagnose + HealthOverlay toggle). */
+/** Pure presentational Settings page (Settings.dc.html + P4 identity, daily quota, and local adoption). */
 export function SettingsView({
   state,
   terms,
   theme,
   overlayOpen,
   recording,
-  onSignIn,
+  onOpenIdentity,
   onSignOut,
+  onRefreshQuota,
+  onDiscardLocal,
   onCopyRotation,
   onRotationSaved,
   onOwnKey,
@@ -119,6 +119,13 @@ export function SettingsView({
   ];
 
   const sortedLangs = useMemo(() => [...LANGS].sort(), []);
+  const showAdoptBanner =
+    state.me !== null && state.local_shelf.adopted && state.local_shelf.recordings > 0;
+
+  const quotaServices: readonly { id: 'soniox' | 'openrouter'; label: string }[] = [
+    { id: 'soniox', label: t('settings.quota_service_soniox') },
+    { id: 'openrouter', label: t('settings.quota_service_openrouter') },
+  ];
 
   return (
     <div className="page">
@@ -129,29 +136,34 @@ export function SettingsView({
         <h2 className="h">{t('s.identity')}</h2>
         {state.me ? (
           <div className="line">
-            <span className="avatar" aria-hidden="true">
-              {state.me.slice(-2).toUpperCase()}
+            <span
+              className="avatar"
+              style={{ width: 36, height: 36, fontSize: 15 }}
+              aria-hidden="true"
+            >
+              {avatarInitial(state.handle, state.me)}
             </span>
-            <span className="grow mono" style={{ color: 'var(--ink2)' }}>
-              {state.me}
+            <span className="grow" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontSize: 15, fontWeight: 600 }}>
+                {state.handle ? `@${state.handle}` : shortDid(state.me)}
+              </span>
+              {state.handle && (
+                <span className="mono" style={{ color: 'var(--ink3)' }}>
+                  {shortDid(state.me)}
+                </span>
+              )}
             </span>
             <Pill onClick={onSignOut}>{t('signout')}</Pill>
-          </div>
-        ) : state.auth.is === 'Scanning' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
-            <QrSvg value={state.auth.url} label={t('qr')} />
-            <p className="k" style={{ margin: 0 }}>
-              {t('signin.tip')}
-            </p>
-            <span className="mono" style={{ color: 'var(--ink3)', wordBreak: 'break-all' }}>
-              {state.auth.url}
-            </span>
           </div>
         ) : (
           <div className="line">
             <Tag>{t('identity.local')}</Tag>
             <span className="spacer" />
-            <Pill onClick={onSignIn}>{t('signin')}</Pill>
+            <Pill onClick={() => onOpenIdentity('login')}>{t('signin')}</Pill>
+            <Pill onClick={() => onOpenIdentity('create')}>{t('identity.ask.create')}</Pill>
+            <Pill quiet onClick={() => onOpenIdentity('recover')}>
+              {t('identity.recover.submit')}
+            </Pill>
           </div>
         )}
 
@@ -164,11 +176,84 @@ export function SettingsView({
             <Pill onClick={onRotationSaved}>{t('recovery.saved')}</Pill>
           </div>
         )}
+
+        {showAdoptBanner && (
+          <div className="card adopt-banner">
+            <span className="grow k">
+              {t('settings.local_adopted', state.local_shelf.recordings)}
+            </span>
+            <InlineConfirm
+              label={t('settings.local_discard')}
+              confirmLabel={t('settings.local_discard_confirm')}
+              onConfirm={onDiscardLocal}
+              disabled={recording}
+            />
+          </div>
+        )}
       </section>
 
-      {/* Own API keys */}
+      {/* Community daily quota & own API keys */}
       <section className="group">
-        <h2 className="h">{t('s.keys')}</h2>
+        <h2 className="h">{t('settings.quota_section')}</h2>
+
+        <div className="card quota-card">
+          {state.me ? (
+            <>
+              <div className="line" style={{ minHeight: 0 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>
+                  {t('settings.quota_community')}
+                </span>
+                <Tag>{t('settings.quota_resets_daily')}</Tag>
+                <span className="spacer" />
+                {state.left !== null && (
+                  <span className="k num">{t('left', clock(state.left))}</span>
+                )}
+                <Pill onClick={onRefreshQuota}>{t('settings.quota_refresh')}</Pill>
+              </div>
+
+              {state.quota ? (
+                <div className="quota-grid">
+                  {quotaServices.map(({ id, label }) => {
+                    const sq = findServiceQuota(state.quota, id);
+                    const remaining = sq?.remaining ?? 0;
+                    const limit = sq?.limit ?? 0;
+                    const pct = quotaPercent(remaining, limit);
+                    const exhausted = limit > 0 && remaining === 0;
+                    return (
+                      <div key={id} className="quota-row">
+                        <span className="k">{label}</span>
+                        <span className="bar">
+                          <i className={exhausted ? 'warn' : undefined} style={{ width: `${pct}%` }} />
+                        </span>
+                        <span className="k quota-count">
+                          <span className="num">
+                            {t('settings.quota_remaining_today', remaining, limit)}
+                          </span>
+                          {exhausted && <Tag tone="warn">{t('settings.quota_exhausted')}</Tag>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="k" style={{ margin: 0 }}>
+                  {t('settings.quota_loading')}
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="line" style={{ minHeight: 0 }}>
+              <span className="grow k">{t('settings.quota_signin_tip')}</span>
+              <Pill onClick={() => onOpenIdentity('ask')}>{t('signin')}</Pill>
+            </div>
+          )}
+        </div>
+
+        <div className="line" style={{ marginTop: 16 }}>
+          <span className="k">{t('settings.own_keys')}</span>
+          <Tag>{t('settings.own_keys_precedence')}</Tag>
+        </div>
+
         {state.keys.map(([service, from]) => {
           const badge = keyFromView(from);
           const inputVal = keyInputs[service] ?? '';
@@ -199,9 +284,6 @@ export function SettingsView({
             >
               <span style={{ width: 96, fontWeight: 500 }}>{displayName}</span>
               <Tag tone={badge.tone === 'ok' ? 'ok' : 'neutral'}>{t(badge.labelKey)}</Tag>
-              {from === 'Granted' && state.left !== null && (
-                <span className="k num">{t('left', clock(state.left))}</span>
-              )}
               <span className="spacer" />
               <input
                 className="field"
@@ -377,8 +459,10 @@ export function SettingsPage() {
       theme={theme}
       overlayOpen={overlayOpen}
       recording={session !== null}
-      onSignIn={() => void send({ do: 'SignIn' })}
+      onOpenIdentity={openIdentitySheet}
       onSignOut={() => void send({ do: 'SignOut' })}
+      onRefreshQuota={() => void send({ do: 'RefreshQuota' })}
+      onDiscardLocal={() => void send({ do: 'DiscardLocal' })}
       onCopyRotation={() => void send({ do: 'CopyRotation' })}
       onRotationSaved={() => void send({ do: 'RotationSaved' })}
       onOwnKey={(service, key) => void send({ do: 'OwnKey', service, key })}

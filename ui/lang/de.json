@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu-DID",
  "identity.recover.submit": "Identität wiederherstellen",
  "identity.recover.recovering": "Wird wiederhergestellt…",
- "identity.back": "Zurück"
+ "identity.back": "Zurück",
+ "settings.quota_section": "Kontingent & Schlüssel",
+ "settings.quota_community": "Gemeinschaftskontingent",
+ "settings.quota_resets_daily": "Täglich zurückgesetzt",
+ "settings.quota_refresh": "Aktualisieren",
+ "settings.quota_service_soniox": "Untertitel",
+ "settings.quota_service_openrouter": "KI",
+ "settings.quota_remaining_today": "Heute noch {0} / {1} übrig",
+ "settings.quota_exhausted": "Heute aufgebraucht",
+ "settings.quota_loading": "Tageskontingent noch nicht geladen – auf Aktualisieren klicken.",
+ "settings.quota_signin_tip": "Melde dich an, um dein tägliches Gemeinschaftskontingent zu sehen und zu nutzen.",
+ "settings.own_keys": "Eigene Schlüssel",
+ "settings.own_keys_precedence": "Werden zuerst verwendet, wenn gesetzt",
+ "settings.local_adopted": "{0} lokale Aufnahmen wurden in deine Identität übernommen. Die lokale Sicherung bleibt zum Rückgängigmachen erhalten.",
+ "settings.local_discard": "Lokale Sicherung entfernen",
+ "settings.local_discard_confirm": "Entfernen bestätigen"
 }

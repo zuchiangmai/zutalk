@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "Recover identity",
  "identity.recover.recovering": "Recovering…",
- "identity.back": "Back"
+ "identity.back": "Back",
+ "settings.quota_section": "Quota & keys",
+ "settings.quota_community": "Community quota",
+ "settings.quota_resets_daily": "Resets daily",
+ "settings.quota_refresh": "Refresh",
+ "settings.quota_service_soniox": "Captions",
+ "settings.quota_service_openrouter": "AI",
+ "settings.quota_remaining_today": "{0} / {1} left today",
+ "settings.quota_exhausted": "Used up today",
+ "settings.quota_loading": "Daily quota not loaded yet — click Refresh to check.",
+ "settings.quota_signin_tip": "Sign in to view and use your daily community quota.",
+ "settings.own_keys": "Your own keys",
+ "settings.own_keys_precedence": "Used first when set",
+ "settings.local_adopted": "{0} local recordings were copied to your identity. The local backup is kept in case you need to undo.",
+ "settings.local_discard": "Remove local backup",
+ "settings.local_discard_confirm": "Confirm remove backup"
 }

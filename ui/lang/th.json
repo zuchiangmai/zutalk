@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "กู้คืนตัวตน",
  "identity.recover.recovering": "กำลังกู้คืน…",
- "identity.back": "กลับ"
+ "identity.back": "กลับ",
+ "settings.quota_section": "โควตาและคีย์",
+ "settings.quota_community": "โควตาชุมชน",
+ "settings.quota_resets_daily": "รีเซ็ตทุกวัน",
+ "settings.quota_refresh": "รีเฟรช",
+ "settings.quota_service_soniox": "ถอดเสียง",
+ "settings.quota_service_openrouter": "AI",
+ "settings.quota_remaining_today": "วันนี้เหลือ {0} / {1} ครั้ง",
+ "settings.quota_exhausted": "วันนี้ใช้ครบแล้ว",
+ "settings.quota_loading": "ยังไม่ได้โหลดโควตาประจำวัน กดรีเฟรชเพื่อตรวจสอบ",
+ "settings.quota_signin_tip": "เข้าสู่ระบบเพื่อดูและใช้โควตาชุมชนประจำวันของคุณ",
+ "settings.own_keys": "คีย์ของคุณเอง",
+ "settings.own_keys_precedence": "ใช้ก่อนเมื่อตั้งค่าไว้",
+ "settings.local_adopted": "คัดลอกการบันทึกในเครื่อง {0} รายการมายังตัวตนของคุณแล้ว ระบบยังเก็บสำรองไว้เผื่อต้องการย้อนกลับ",
+ "settings.local_discard": "ลบข้อมูลสำรองในเครื่อง",
+ "settings.local_discard_confirm": "ยืนยันการลบข้อมูลสำรอง"
 }

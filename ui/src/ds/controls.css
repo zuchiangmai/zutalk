@@ -949,6 +949,40 @@
   border-radius: 2px;
   background: var(--accent);
 }
+.bar i.warn {
+  background: var(--warn);
+}
+.quota-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+}
+.quota-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.quota-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 12px 14px;
+  align-items: center;
+}
+.quota-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.adopt-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+}
 
 /* ---- sidebar folds & kbd ---- */
 .fold {

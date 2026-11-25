@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "ID を復元",
  "identity.recover.recovering": "復元中…",
- "identity.back": "戻る"
+ "identity.back": "戻る",
+ "settings.quota_section": "利用枠とキー",
+ "settings.quota_community": "コミュニティ利用枠",
+ "settings.quota_resets_daily": "毎日リセット",
+ "settings.quota_refresh": "更新",
+ "settings.quota_service_soniox": "文字起こし",
+ "settings.quota_service_openrouter": "AI",
+ "settings.quota_remaining_today": "本日の残り {0} / {1} 回",
+ "settings.quota_exhausted": "本日分を使い切りました",
+ "settings.quota_loading": "本日の利用枠は未取得です。「更新」を押して確認してください。",
+ "settings.quota_signin_tip": "サインインすると毎日のコミュニティ利用枠を確認・利用できます。",
+ "settings.own_keys": "自分のキー",
+ "settings.own_keys_precedence": "設定時は自分のキーを優先",
+ "settings.local_adopted": "ローカル録音 {0} 件をこの ID に引き継ぎました。元に戻せるようローカルの控えを残しています。",
+ "settings.local_discard": "ローカルの控えを削除",
+ "settings.local_discard_confirm": "削除を確定"
 }

@@ -18,6 +18,7 @@ import {
   startBus,
   themeSource,
 } from '../src/bus/channel';
+import { identitySheetSource } from '../src/bus/identity';
 import { routeSource } from '../src/bus/route';
 import { ui } from '../src/bus/words';
 import {
@@ -25,7 +26,11 @@ import {
   LibraryPage,
   LibraryView,
 } from '../src/pages/LibraryPage';
-import { SettingsPage } from '../src/pages/SettingsPage';
+import {
+  findServiceQuota,
+  quotaPercent,
+  SettingsPage,
+} from '../src/pages/SettingsPage';
 import { installDomMocks } from './dom';
 
 let restoreDom: () => void = () => {};
@@ -353,11 +358,10 @@ describe('LibraryPage month rail, filters, debounced search, and undo remove', (
 });
 
 describe('SettingsPage', () => {
-  it('submits and clears OwnKey immediately, sets 30-day retention, switches theme/language, exports diagnostics, toggles overlay, and renders QR SVG', async () => {
+  it('submits and clears OwnKey immediately, sets 30-day retention, switches theme/language, exports diagnostics, and toggles overlay', async () => {
     const sent: Command[] = [];
     const state: State = {
       ...EMPTY,
-      auth: { is: 'Scanning', url: 'https://zu.example/login#ABCD-1234', expires_at: Date.now() + 300_000 },
       keys: [
         ['soniox', 'Nowhere'],
         ['openrouter', 'Granted'],
@@ -387,12 +391,13 @@ describe('SettingsPage', () => {
     };
 
     stopBus = startBus(bus);
-    const { container } = render(<SettingsPage />);
+    render(<SettingsPage />);
 
-    // QR code rendered safely as SVG <rect> elements without dangerouslySetInnerHTML
-    const qrSvg = container.querySelector('.qr svg');
-    expect(qrSvg).toBeTruthy();
-    expect(qrSvg?.querySelectorAll('rect').length).toBeGreaterThan(10);
+    // Pure helpers: quotaPercent & findServiceQuota
+    expect(quotaPercent(34, 40)).toBe(85);
+    expect(quotaPercent(0, 40)).toBe(0);
+    expect(quotaPercent(5, 0)).toBe(0);
+    expect(findServiceQuota(null, 'soniox')).toBeNull();
 
     // Own API key: submit Soniox key -> dispatches OwnKey and clears input immediately
     const sonioxInput = screen.getByLabelText('Soniox key') as HTMLInputElement;
@@ -433,5 +438,166 @@ describe('SettingsPage', () => {
 
     // Glossary term loaded & removable
     await waitFor(() => expect(screen.getByText('Zuzalu')).toBeTruthy());
+  });
+
+  it('settings_shows_handle_daily_quota_bars_and_refresh', () => {
+    const sent: Command[] = [];
+    const state: State = {
+      ...EMPTY,
+      me: 'did:zu:7kq2mxw4abcdef1234f9a',
+      handle: 'demo.zuzalu.ink',
+      quota: {
+        resets_at: Date.UTC(2026, 10, 27, 0, 0, 0),
+        services: [
+          { service: 'soniox', used: 6, limit: 40, remaining: 34 },
+          { service: 'openrouter', used: 4, limit: 30, remaining: 26 },
+        ],
+      },
+    };
+    const bus: Bus = {
+      async send(cmd) {
+        sent.push(cmd);
+      },
+      async query(): Promise<QueryReply> {
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: state });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    const { container } = render(<SettingsPage />);
+
+    expect(screen.getByText('@demo.zuzalu.ink')).toBeTruthy();
+    expect(screen.getByText('did:zu:7kq2mxw4…f9a')).toBeTruthy();
+    expect(screen.getByText('34 / 40 left today')).toBeTruthy();
+    expect(screen.getByText('26 / 30 left today')).toBeTruthy();
+    const bars = container.querySelectorAll('.quota-grid .bar i');
+    expect(bars).toHaveLength(2);
+    expect((bars[0] as HTMLElement).style.width).toBe('85%');
+    expect((bars[1] as HTMLElement).style.width).toBe('87%');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(sent).toContainEqual({ do: 'RefreshQuota' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(sent).toContainEqual({ do: 'SignOut' });
+  });
+
+  it('settings_highlights_exhausted_daily_quota', () => {
+    const state: State = {
+      ...EMPTY,
+      me: 'did:zu:7kq2mxw4abcdef1234f9a',
+      handle: 'demo.zuzalu.ink',
+      quota: {
+        resets_at: Date.UTC(2026, 10, 27, 0, 0, 0),
+        services: [
+          { service: 'soniox', used: 40, limit: 40, remaining: 0 },
+          { service: 'openrouter', used: 2, limit: 30, remaining: 28 },
+        ],
+      },
+    };
+    const bus: Bus = {
+      async send() {},
+      async query(): Promise<QueryReply> {
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: state });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    const { container } = render(<SettingsPage />);
+
+    expect(screen.getByText('0 / 40 left today')).toBeTruthy();
+    expect(screen.getByText('Used up today')).toBeTruthy();
+    expect(container.querySelector('.tag.warn')?.textContent).toBe('Used up today');
+    expect(container.querySelector('.quota-grid .bar i.warn')).toBeTruthy();
+  });
+
+  it('settings_shows_local_adoption_banner_and_two_step_discard', () => {
+    const sent: Command[] = [];
+    const state: State = {
+      ...EMPTY,
+      me: 'did:zu:7kq2mxw4abcdef1234f9a',
+      handle: 'demo.zuzalu.ink',
+      local_shelf: { recordings: 3, adopted: true },
+    };
+    const bus: Bus = {
+      async send(cmd) {
+        sent.push(cmd);
+      },
+      async query(): Promise<QueryReply> {
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: state });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    render(<SettingsPage />);
+
+    expect(screen.getByText(/3 local recordings were copied to your identity/i)).toBeTruthy();
+
+    // First click arms InlineConfirm without dispatching DiscardLocal yet.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove local backup' }));
+    expect(sent).toHaveLength(0);
+    const confirmBtn = screen.getByRole('button', { name: 'Confirm remove backup' });
+    expect(confirmBtn).toBeTruthy();
+
+    // Second click dispatches DiscardLocal.
+    fireEvent.click(confirmBtn);
+    expect(sent).toContainEqual({ do: 'DiscardLocal' });
+  });
+
+  it('settings_signed_out_offers_on_demand_identity_and_quota_prompt', () => {
+    const sent: Command[] = [];
+    const state: State = {
+      ...EMPTY,
+      me: null,
+      keys: [
+        ['soniox', 'Own'],
+        ['openrouter', 'Nowhere'],
+      ],
+    };
+    const bus: Bus = {
+      async send(cmd) {
+        sent.push(cmd);
+      },
+      async query(): Promise<QueryReply> {
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: state });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    render(<SettingsPage />);
+
+    expect(screen.getByText('Local only')).toBeTruthy();
+    expect(screen.getByText('Sign in to view and use your daily community quota.')).toBeTruthy();
+    expect(screen.getByText('Used first when set')).toBeTruthy();
+
+    // Clicking identity entry opens IdentitySheet on demand.
+    fireEvent.click(screen.getByRole('button', { name: 'Create identity' }));
+    expect(identitySheetSource.getSnapshot()).toBe('create');
+
+    // Own keys still work while signed out: save clears input, remove clears key.
+    const openrouterInput = screen.getByLabelText('OpenRouter key') as HTMLInputElement;
+    fireEvent.change(openrouterInput, { target: { value: 'or-test-key' } });
+    fireEvent.submit(openrouterInput.closest('form')!);
+    expect(sent).toContainEqual({ do: 'OwnKey', service: 'openrouter', key: 'or-test-key' });
+    expect(openrouterInput.value).toBe('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(sent).toContainEqual({ do: 'OwnKey', service: 'soniox', key: null });
   });
 });

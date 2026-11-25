@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "Recuperar identidad",
  "identity.recover.recovering": "Recuperando…",
- "identity.back": "Atrás"
+ "identity.back": "Atrás",
+ "settings.quota_section": "Cuota y claves",
+ "settings.quota_community": "Cuota comunitaria",
+ "settings.quota_resets_daily": "Se reinicia a diario",
+ "settings.quota_refresh": "Actualizar",
+ "settings.quota_service_soniox": "Subtítulos",
+ "settings.quota_service_openrouter": "IA",
+ "settings.quota_remaining_today": "Quedan {0} / {1} hoy",
+ "settings.quota_exhausted": "Agotado hoy",
+ "settings.quota_loading": "La cuota diaria aún no se ha cargado; pulsa Actualizar.",
+ "settings.quota_signin_tip": "Inicia sesión para ver y usar tu cuota comunitaria diaria.",
+ "settings.own_keys": "Tus propias claves",
+ "settings.own_keys_precedence": "Se usan primero si están configuradas",
+ "settings.local_adopted": "Se copiaron {0} grabaciones locales a tu identidad. La copia local se conserva por si necesitas deshacerlo.",
+ "settings.local_discard": "Eliminar copia local",
+ "settings.local_discard_confirm": "Confirmar eliminación"
 }

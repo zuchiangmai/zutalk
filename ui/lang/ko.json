@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "신원 복구",
  "identity.recover.recovering": "복구 중…",
- "identity.back": "뒤로"
+ "identity.back": "뒤로",
+ "settings.quota_section": "할당량 및 키",
+ "settings.quota_community": "커뮤니티 할당량",
+ "settings.quota_resets_daily": "매일 초기화",
+ "settings.quota_refresh": "새로고침",
+ "settings.quota_service_soniox": "자막",
+ "settings.quota_service_openrouter": "AI",
+ "settings.quota_remaining_today": "오늘 {0} / {1}회 남음",
+ "settings.quota_exhausted": "오늘 소진됨",
+ "settings.quota_loading": "오늘 할당량을 아직 불러오지 못했습니다. 새로고침을 눌러 확인하세요.",
+ "settings.quota_signin_tip": "로그인하면 매일 제공되는 커뮤니티 할당량을 확인하고 사용할 수 있습니다.",
+ "settings.own_keys": "내 API 키",
+ "settings.own_keys_precedence": "설정 시 내 키를 우선 사용",
+ "settings.local_adopted": "로컬 녹음 {0}건을 내 신원으로 가져왔습니다. 되돌릴 수 있도록 로컬 백업을 유지하고 있습니다.",
+ "settings.local_discard": "로컬 백업 삭제",
+ "settings.local_discard_confirm": "백업 삭제 확인"
 }

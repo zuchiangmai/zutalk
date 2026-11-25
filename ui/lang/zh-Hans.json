@@ -354,5 +354,20 @@
  "identity.recover.did": "Zu DID",
  "identity.recover.submit": "恢复身份",
  "identity.recover.recovering": "正在恢复…",
- "identity.back": "返回"
+ "identity.back": "返回",
+ "settings.quota_section": "额度与密钥",
+ "settings.quota_community": "社区额度",
+ "settings.quota_resets_daily": "每天重置",
+ "settings.quota_refresh": "刷新",
+ "settings.quota_service_soniox": "出字",
+ "settings.quota_service_openrouter": "AI",
+ "settings.quota_remaining_today": "今天还剩 {0} / {1} 次",
+ "settings.quota_exhausted": "今日已用完",
+ "settings.quota_loading": "暂未加载今日额度，点击刷新查看。",
+ "settings.quota_signin_tip": "登录后可查看并使用每日社区额度。",
+ "settings.own_keys": "自己的密钥",
+ "settings.own_keys_precedence": "设置后优先使用自己的密钥",
+ "settings.local_adopted": "已从本机身份领回 {0} 场录音。本机备份暂时保留，以便需要时撤销。",
+ "settings.local_discard": "清除本机备份",
+ "settings.local_discard_confirm": "确认清除本机备份"
 }
