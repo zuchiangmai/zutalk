@@ -23,7 +23,7 @@ use crate::out::export::{Doc, EXPORTERS};
 use crate::out::room::{self, Write};
 use crate::record::notes;
 use crate::record::shelf::{
-    About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf, Words,
+    About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf, TERM, Words,
 };
 use crate::record::takes::{
     RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
@@ -254,11 +254,19 @@ struct Snapshot {
     keys: Arc<Chain>,
 }
 
+/// Updated write target returned by [`IndexSync::recording_sealed`] so post-seal refinement
+/// runs against the active shelf (including a newly adopted person shelf) with fresh keys/terms.
+pub(crate) struct SealTarget {
+    shelf: Arc<Shelf>,
+    keys: Arc<Chain>,
+    terms: Vec<Term>,
+}
+
 enum SyncKind {
     RecordingOpened { id: String },
     RecordingSealed { id: String, started_by: String },
-    Refined { id: String },
-    RefineFailed { id: String, failure: RefineFailure },
+    Refined { id: String, shelf_by: String },
+    RefineFailed { id: String, shelf_by: String, failure: RefineFailure },
     FilingUpdated { id: String, state: String },
     Migrated,
 }
@@ -284,19 +292,29 @@ impl IndexSync {
         self.run(SyncKind::RecordingOpened { id }).await;
     }
 
-    pub(crate) async fn recording_sealed(&self, id: String, started_by: String) {
+    pub(crate) async fn recording_sealed(
+        &self,
+        id: String,
+        started_by: String,
+    ) -> Option<SealTarget> {
         self.views.set_active_recording(None);
-        self.run(SyncKind::RecordingSealed { id, started_by }).await;
+        let (tx, rx) = oneshot::channel();
+        let kind = SyncKind::RecordingSealed { id, started_by };
+        if self.desk.send(Job::IndexSync { kind, done: tx }).await.is_ok() {
+            rx.await.ok().flatten()
+        } else {
+            None
+        }
     }
 
-    pub(crate) async fn refined(&self, id: String) {
+    pub(crate) async fn refined(&self, id: String, shelf_by: String) {
         self.views.set_active_refine(id.clone(), None);
-        self.run(SyncKind::Refined { id }).await;
+        self.run(SyncKind::Refined { id, shelf_by }).await;
     }
 
-    pub(crate) async fn refine_failed(&self, id: String, failure: RefineFailure) {
+    pub(crate) async fn refine_failed(&self, id: String, shelf_by: String, failure: RefineFailure) {
         self.views.set_active_refine(id.clone(), None);
-        self.run(SyncKind::RefineFailed { id, failure }).await;
+        self.run(SyncKind::RefineFailed { id, shelf_by, failure }).await;
     }
 
     pub(crate) async fn filing_updated(&self, id: String, state: String) {
@@ -322,6 +340,7 @@ enum Job {
         initial_handle: Option<Option<String>>,
     },
     ConfirmSignIn {
+        auth_gen: u64,
         keep: Option<u32>,
         busy: Vec<String>,
     },
@@ -398,7 +417,7 @@ enum Job {
     },
     IndexSync {
         kind: SyncKind,
-        done: oneshot::Sender<()>,
+        done: oneshot::Sender<Option<SealTarget>>,
     },
 }
 
@@ -489,6 +508,7 @@ struct DeskEnv {
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
     pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
+    confirm_gen: Arc<AtomicU64>,
     keep_hint: Arc<Mutex<Option<u32>>>,
     root: Tree,
     water: Reading<Water>,
@@ -554,6 +574,7 @@ impl Work {
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
         let pending_signin: Arc<Mutex<Option<PendingSignIn>>> = Arc::new(Mutex::new(None));
+        let confirm_gen = Arc::new(AtomicU64::new(0));
         let keep_hint: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let slot: Arc<Mutex<Option<(String, CancellationToken)>>> = Arc::new(Mutex::new(None));
 
@@ -567,6 +588,7 @@ impl Work {
             invite: invite.clone(),
             signing: signing.clone(),
             pending_signin: pending_signin.clone(),
+            confirm_gen: confirm_gen.clone(),
             keep_hint: keep_hint.clone(),
             root: root.clone(),
             water,
@@ -587,6 +609,7 @@ impl Work {
         let deliver_id = identity.clone();
         let deliver_invite = invite.clone();
         let deliver_signing = signing.clone();
+        let deliver_confirm_gen = confirm_gen;
         let deliver_keep = keep_hint.clone();
 
         let desk_tx_holder: Arc<Mutex<Option<Desk<Job>>>> = Arc::new(Mutex::new(None));
@@ -610,6 +633,7 @@ impl Work {
                 let identity = deliver_id.clone();
                 let invite = deliver_invite.clone();
                 let signing = deliver_signing.clone();
+                let confirm_gen = deliver_confirm_gen.clone();
                 let keep_hint = deliver_keep.clone();
                 let desk_holder = deliver_desk.clone();
                 async move {
@@ -849,7 +873,10 @@ impl Work {
                             let msg = match kind {
                                 "refresh" => Msg::Refreshed(Err(code)),
                                 "sign" | "signout" => Msg::Signed(Err(code)),
-                                "confirm_signin" => Msg::SignInFailed(code),
+                                "confirm_signin" => Msg::SignInFailed {
+                                    auth_gen: confirm_gen.load(Ordering::Acquire),
+                                    code,
+                                },
                                 "discard_local" => Msg::LocalDiscarded(Err(code)),
                                 "own_key" => Msg::OwnKeyDone(Err(code)),
                                 _ => Msg::DeskFailed(code),
@@ -929,12 +956,12 @@ impl Work {
 
     /// Starts a sign-in relay wait on `net.signin` and returns `(url, expires_at)`.
     /// Keys stay inside `Work::pending_signin` until `confirm_sign_in` commits them.
-    pub(crate) fn sign_in(&self) -> Result<(String, i64), &'static str> {
+    pub(crate) fn sign_in(&self, auth_gen: u64) -> Result<(String, i64), &'static str> {
         let sign_in = SignIn::begin(&self.config.server).map_err(code)?;
         let url = sign_in.code().to_owned();
         let expires_at = now() + SIGN_IN_WAIT_MS as i64;
-        clear_pending(&self.pending_signin);
         let cancel = replace_signing(&self.signing);
+        clear_pending(&self.pending_signin);
         let http = self.http.clone();
         let directory = self.config.directory.clone();
         let pending_signin = self.pending_signin.clone();
@@ -958,16 +985,30 @@ impl Work {
                     let did = pending.did().to_owned();
                     let handle = pending.handle().map(str::to_owned);
                     let code_str = pending.code().map(str::to_owned);
-                    *pending_signin.lock().unwrap_or_else(PoisonError::into_inner) = Some(pending);
+                    let stored = {
+                        let mut guard =
+                            pending_signin.lock().unwrap_or_else(PoisonError::into_inner);
+                        if cancel.is_cancelled() {
+                            false
+                        } else {
+                            *guard = Some(pending);
+                            true
+                        }
+                    };
+                    if !stored {
+                        info!("job.done", kind = "signin", job = seq, code = "cancelled", ms = ms);
+                        return;
+                    }
                     info!("job.done", kind = "signin", job = seq, code = "ok", ms = ms);
                     jobs_done.add(1);
-                    let _ = results.send(Msg::SignInPending { did, handle, code: code_str }).await; // dropped: the hub has ended
+                    let msg = Msg::SignInPending { auth_gen, did, handle, code: code_str };
+                    let _ = results.send(msg).await; // dropped: the hub has ended
                 }
                 Some(Err(end)) => {
                     let c = code(end);
                     warn!("job.done", kind = "signin", job = seq, code = c, ms = ms);
                     jobs_failed.add(1);
-                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                    let _ = results.send(Msg::SignInFailed { auth_gen, code: c }).await; // dropped: the hub has ended
                 }
             }
         });
@@ -976,10 +1017,11 @@ impl Work {
 
     pub(crate) fn confirm_sign_in(
         &self,
+        auth_gen: u64,
         keep: Option<u32>,
         busy: Vec<String>,
     ) -> Result<(), &'static str> {
-        self.desk.offer(Job::ConfirmSignIn { keep, busy }).map(|_| ())
+        self.desk.offer(Job::ConfirmSignIn { auth_gen, keep, busy }).map(|_| ())
     }
 
     pub(crate) fn cancel_sign_in(&self) {
@@ -987,9 +1029,9 @@ impl Work {
     }
 
     /// Creates a new `did:zu` (with optional normalized handle) on `net.create_manual`.
-    pub(crate) fn create_identity(&self, handle: Option<String>) {
-        clear_pending(&self.pending_signin);
+    pub(crate) fn create_identity(&self, handle: Option<String>, auth_gen: u64) {
         let cancel = replace_signing(&self.signing);
+        clear_pending(&self.pending_signin);
         let http = self.http.clone();
         let directory = self.config.directory.clone();
         let desk = self.desk.clone();
@@ -1028,7 +1070,7 @@ impl Work {
                     let c = code(end);
                     warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
                     jobs_failed.add(1);
-                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                    let _ = results.send(Msg::SignInFailed { auth_gen, code: c }).await; // dropped: the hub has ended
                 }
             }
         });
@@ -1036,10 +1078,10 @@ impl Work {
 
     /// Recovers an existing `did:zu` using its P-256 rotation key on `net.recover`.
     /// Immediately wraps the key string in `Zeroizing` so it is wiped on drop.
-    pub(crate) fn recover_identity(&self, did: String, key: String) {
+    pub(crate) fn recover_identity(&self, did: String, key: String, auth_gen: u64) {
         let key = Zeroizing::new(key);
-        clear_pending(&self.pending_signin);
         let cancel = replace_signing(&self.signing);
+        clear_pending(&self.pending_signin);
         let http = self.http.clone();
         let directory = self.config.directory.clone();
         let desk = self.desk.clone();
@@ -1078,7 +1120,7 @@ impl Work {
                     let c = code(end);
                     warn!("job.done", kind = "recover", job = seq, code = c, ms = ms);
                     jobs_failed.add(1);
-                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                    let _ = results.send(Msg::SignInFailed { auth_gen, code: c }).await; // dropped: the hub has ended
                 }
             }
         });
@@ -1566,11 +1608,13 @@ fn clear_pending(cell: &Mutex<Option<PendingSignIn>>) {
 }
 
 fn cancel_signing(cell: &Mutex<Option<CancellationToken>>, pending: &Mutex<Option<PendingSignIn>>) {
-    clear_pending(pending);
-    let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(old) = guard.take() {
-        old.cancel();
+    {
+        let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(old) = guard.take() {
+            old.cancel();
+        }
     }
+    clear_pending(pending);
 }
 
 fn snapshot(identity: &Mutex<Identity>) -> Snapshot {
@@ -1654,7 +1698,8 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             };
             Ok(DeskOut::Signed { out, start_claim })
         }
-        Job::ConfirmSignIn { keep, busy } => {
+        Job::ConfirmSignIn { auth_gen, keep, busy } => {
+            env.confirm_gen.store(auth_gen, Ordering::Release);
             let pending = env
                 .pending_signin
                 .lock()
@@ -1681,16 +1726,47 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             .ok_or("sign_in.first")?;
             let local_me = keys::local_kept().map_err(code)?;
             let local_shelf = if let Some(local_me) = local_me {
-                if let Err(c) = adopt::discard_local(&config.data, &local_me.did) {
-                    warn!("identity.discard_local", code = c);
-                    return Err(c);
-                }
-                info!("identity.discard_local", code = "ok");
                 let shelf = Shelf::new(
                     config.data.join("records").join(local_me.did.replace(':', "-")),
                     &local_me.did,
                     local_me.key,
                 );
+                let has_local_data = if shelf.root().is_dir() {
+                    let has_recs = match shelf.list() {
+                        Ok(list) => !list.is_empty(),
+                        Err(_) => {
+                            warn!("identity.discard_local", code = "adopt.failed");
+                            return Err("adopt.failed");
+                        }
+                    };
+                    let has_terms = match shelf.kept::<serde_json::Value>(TERM) {
+                        Ok(terms) => !terms.is_empty(),
+                        Err(_) => {
+                            warn!("identity.discard_local", code = "adopt.failed");
+                            return Err("adopt.failed");
+                        }
+                    };
+                    has_recs || has_terms
+                } else {
+                    false
+                };
+                let marker = match adopt::read_marker(&config.data) {
+                    Ok(marker) => marker,
+                    Err(c) => {
+                        warn!("identity.discard_local", code = c);
+                        return Err(c);
+                    }
+                };
+                if !adopt::can_discard(marker.as_ref(), &local_me.did, &person_did, has_local_data)
+                {
+                    warn!("identity.discard_local", code = "adopt.failed");
+                    return Err("adopt.failed");
+                }
+                if let Err(c) = adopt::discard_local(&config.data, &local_me.did) {
+                    warn!("identity.discard_local", code = c);
+                    return Err(c);
+                }
+                info!("identity.discard_local", code = "ok");
                 adopt::status(&config.data, Some(&shelf), Some(&person_did))
             } else {
                 info!("identity.discard_local", code = "ok");
@@ -1699,14 +1775,25 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             Ok(DeskOut::LocalDiscarded(local_shelf))
         }
         Job::Clip => {
-            let key = keys::rotation().map_err(code)?.ok_or("rotation.none")?;
+            let person_did = {
+                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.who.person().map(|me| me.did.clone())
+            }
+            .ok_or("rotation.none")?;
+            let key = keys::rotation_for(&person_did).map_err(code)?.ok_or("rotation.none")?;
             if !(config.clip)(&key) {
                 return Err("clip");
             }
             Ok(DeskOut::Copied)
         }
         Job::RotationSaved => {
-            keys::saved().map_err(code)?;
+            let person_did = {
+                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.who.person().map(|me| me.did.clone())
+            };
+            if let Some(did) = person_did {
+                keys::saved_for(&did).map_err(code)?;
+            }
             Ok(DeskOut::RotationSaved)
         }
         Job::Refresh { rev, retain, include_rooms } => {
@@ -1942,16 +2029,16 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             run_diagnose(env, spoken, shown, sound, captions)
         }
         Job::IndexSync { kind, done } => {
-            let local_shelf = run_index_sync(env, kind);
-            let _ = done.send(()); // dropped: background caller was cancelled
+            let (local_shelf, target) = run_index_sync(env, kind);
+            let _ = done.send(target); // dropped: background caller was cancelled
             Ok(local_shelf.map_or(DeskOut::Silent, DeskOut::LocalShelf))
         }
     }
 }
 
-fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
+fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<SealTarget>) {
     let snap = snapshot(&env.identity);
-    let Ok(shelf) = snap.shelf else { return None };
+    let Ok(shelf) = snap.shelf else { return (None, None) };
     let tapes = env.config.tapes();
     match kind {
         SyncKind::RecordingOpened { id } => {
@@ -1960,13 +2047,14 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
-            None
+            (None, None)
         }
         SyncKind::RecordingSealed { id, started_by } => {
             let person_did = {
                 let guard = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.who.person().map(|me| me.did.clone())
             };
+            let current_terms = || env.terms.lock().unwrap_or_else(PoisonError::into_inner).clone();
             if started_by.starts_with("did:key:")
                 && let Some(person_did) = person_did
             {
@@ -1993,19 +2081,29 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
                             env.views.invalidate(ViewKind::Search, None);
                             env.views.invalidate(ViewKind::Recording, Some(id.clone()));
                             env.views.invalidate(ViewKind::Transcript, Some(id));
-                            return Some(adopt::status(
+                            let local_status = adopt::status(
                                 &env.config.data,
                                 Some(&local_shelf),
                                 Some(&person_did),
-                            ));
+                            );
+                            let target =
+                                SealTarget { shelf, keys: snap.keys, terms: current_terms() };
+                            return (Some(local_status), Some(target));
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            let local_status = adopt::status(
+                                &env.config.data,
+                                Some(&local_shelf),
+                                Some(&person_did),
+                            );
+                            return (Some(local_status), None);
+                        }
                         Err(c) => {
                             warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
                         }
                     }
                 }
-                return None;
+                return (None, None);
             }
             if shelf.by() == started_by {
                 env.with_index(|idx| {
@@ -2015,26 +2113,31 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
                 env.views.invalidate(ViewKind::Search, None);
                 env.views.invalidate(ViewKind::Recording, Some(id.clone()));
                 env.views.invalidate(ViewKind::Transcript, Some(id));
+                return (None, Some(SealTarget { shelf, keys: snap.keys, terms: current_terms() }));
             }
-            None
+            (None, None)
         }
-        SyncKind::Refined { id } => {
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
-            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-            env.views.invalidate(ViewKind::Transcript, Some(id));
-            None
+        SyncKind::Refined { id, shelf_by } => {
+            if shelf.by() == shelf_by {
+                env.with_index(|idx| {
+                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+                });
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Search, None);
+                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+                env.views.invalidate(ViewKind::Transcript, Some(id));
+            }
+            (None, None)
         }
-        SyncKind::RefineFailed { id, failure } => {
-            env.with_index(|idx| {
-                let _ = idx.update_refine_error(&id, Some(&failure)); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            None
+        SyncKind::RefineFailed { id, shelf_by, failure } => {
+            if shelf.by() == shelf_by {
+                env.with_index(|idx| {
+                    let _ = idx.update_refine_error(&id, Some(&failure)); // dropped: index.sync logged error
+                });
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Recording, Some(id));
+            }
+            (None, None)
         }
         SyncKind::FilingUpdated { id, state } => {
             env.with_index(|idx| {
@@ -2043,7 +2146,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Recording, Some(id));
             env.views.invalidate(ViewKind::Outbound, None);
-            None
+            (None, None)
         }
         SyncKind::Migrated => {
             env.with_index(|idx| {
@@ -2051,7 +2154,7 @@ fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> Option<LocalShelf> {
             });
             env.views.invalidate(ViewKind::Library, None);
             env.views.invalidate(ViewKind::Search, None);
-            None
+            (None, None)
         }
     }
 }
@@ -2311,7 +2414,7 @@ fn run_sign(
     });
     let keys = Arc::new(Chain::new(ours.clone()));
     let me = who.person().map(|me| me.did.clone());
-    let rotation_unsaved = keys::unsaved();
+    let rotation_unsaved = me.as_deref().is_some_and(keys::unsaved_for);
     if let (Some(h), Some(s)) = (initial_handle.as_ref(), shelf.as_deref()) {
         let _ = identity::write_cached_handle(s.root(), h.as_deref()); // dropped: offline handle cache is best-effort
     }
@@ -2596,7 +2699,7 @@ fn spawn_create_net(
                 let c = code(end);
                 warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
                 jobs_failed.add(1);
-                let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                let _ = results.send(Msg::SignInFailed { auth_gen: 0, code: c }).await; // dropped: the hub has ended
             }
         }
     });
@@ -2992,7 +3095,7 @@ impl WriteCtx {
     }
 
     async fn after_seal_inner(
-        self,
+        mut self,
         sealed: Result<Option<About>, &'static str>,
         on_write_task: bool,
     ) {
@@ -3004,7 +3107,11 @@ impl WriteCtx {
                 if matches!(destroyed, Ok(Err(_))) {
                     self.said.say("tape.destroy");
                 }
-                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
+                let target = self
+                    .index_sync
+                    .recording_sealed(self.id.clone(), self.started_by.clone())
+                    .await;
+                let _ = target; // dropped: zero-length recording is not refined
             }
             Ok(Some(about)) => {
                 let tape_dir = self.tape();
@@ -3013,7 +3120,16 @@ impl WriteCtx {
                     .blocking("tape.kept", move || tape::kept(&tape_dir))
                     .await
                     .unwrap_or(false);
-                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
+                let sealed_target = self
+                    .index_sync
+                    .recording_sealed(self.id.clone(), self.started_by.clone())
+                    .await;
+                if let Some(target) = sealed_target {
+                    self.started_by = target.shelf.by().to_owned();
+                    self.shelf = target.shelf;
+                    self.keys = target.keys;
+                    self.terms = target.terms;
+                }
                 let key = self.keys.from(Service::Soniox) != From::Nowhere;
                 match write::owed(about.take == 0, audio, about.moved, key) {
                     write::Owed::Yes => {
@@ -3033,10 +3149,18 @@ impl WriteCtx {
                 }
             }
             Ok(None) => {
-                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
+                let target = self
+                    .index_sync
+                    .recording_sealed(self.id.clone(), self.started_by.clone())
+                    .await;
+                let _ = target; // dropped: recording removed before seal
             } // removed meanwhile: the tape stays for a restore
             Err(_) => {
-                self.index_sync.recording_sealed(self.id.clone(), self.started_by.clone()).await;
+                let target = self
+                    .index_sync
+                    .recording_sealed(self.id.clone(), self.started_by.clone())
+                    .await;
+                let _ = target; // dropped: seal failed, no refinement will run
             }
         }
         let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
@@ -3167,7 +3291,7 @@ impl WriteCtx {
                     );
                     *cur = next;
                 }
-                self.index_sync.refined(self.id.clone()).await;
+                self.index_sync.refined(self.id.clone(), self.shelf.by().to_owned()).await;
             }
             Ok(()) => {
                 self.views.set_active_refine(self.id.clone(), None);
@@ -3200,6 +3324,7 @@ impl WriteCtx {
                     self.index_sync
                         .refine_failed(
                             self.id.clone(),
+                            self.shelf.by().to_owned(),
                             RefineFailure { code: mapped.into(), at: failed_at },
                         )
                         .await;

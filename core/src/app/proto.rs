@@ -248,7 +248,7 @@ pub enum Change {
 /// puts a term in the glossary, or (none) takes it out. `City` reads the calendar of the city at
 /// an address; `File` files a recording to one of its events, with its audio unless `audio` is
 /// false or none is left.
-#[derive(Debug, Clone, PartialEq, Deserialize, TS)]
+#[derive(Clone, PartialEq, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "do")]
 pub enum Command {
@@ -285,6 +285,75 @@ pub enum Command {
     City { address: String },
     File { id: String, event: String, audio: bool },
     Diagnose,
+}
+
+/// Redacts secret fields (`RecoverIdentity.key`, `OwnKey.key`) so secrets never reach `Debug`
+/// output (`CLAUDE.md` Principle 6).
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::Start => f.write_str("Start"),
+            Command::Import { path } => f.debug_struct("Import").field("path", path).finish(),
+            Command::Pause => f.write_str("Pause"),
+            Command::Resume => f.write_str("Resume"),
+            Command::Stop => f.write_str("Stop"),
+            Command::Reconnect => f.write_str("Reconnect"),
+            Command::Setup { setup } => f.debug_struct("Setup").field("setup", setup).finish(),
+            Command::Change { id, change } => {
+                f.debug_struct("Change").field("id", id).field("change", change).finish()
+            }
+            Command::Note { id, op } => {
+                f.debug_struct("Note").field("id", id).field("op", op).finish()
+            }
+            Command::Refine { id } => f.debug_struct("Refine").field("id", id).finish(),
+            Command::Remove { id } => f.debug_struct("Remove").field("id", id).finish(),
+            Command::Restore { id } => f.debug_struct("Restore").field("id", id).finish(),
+            Command::Export { id, exporter, languages, to } => f
+                .debug_struct("Export")
+                .field("id", id)
+                .field("exporter", exporter)
+                .field("languages", languages)
+                .field("to", to)
+                .finish(),
+            Command::Share { recording } => {
+                f.debug_struct("Share").field("recording", recording).finish()
+            }
+            Command::Unshare { room } => f.debug_struct("Unshare").field("room", room).finish(),
+            Command::SignIn => f.write_str("SignIn"),
+            Command::ConfirmSignIn => f.write_str("ConfirmSignIn"),
+            Command::CancelSignIn => f.write_str("CancelSignIn"),
+            Command::CreateIdentity { handle } => {
+                f.debug_struct("CreateIdentity").field("handle", handle).finish()
+            }
+            Command::RecoverIdentity { did, key: _ } => {
+                f.debug_struct("RecoverIdentity").field("did", did).field("key", &"…").finish()
+            }
+            Command::RefreshQuota => f.write_str("RefreshQuota"),
+            Command::DiscardLocal => f.write_str("DiscardLocal"),
+            Command::SignOut => f.write_str("SignOut"),
+            Command::RotationSaved => f.write_str("RotationSaved"),
+            Command::CopyRotation => f.write_str("CopyRotation"),
+            Command::Update => f.write_str("Update"),
+            Command::OwnKey { service, key } => f
+                .debug_struct("OwnKey")
+                .field("service", service)
+                .field("key", &key.as_ref().map(|_| "…"))
+                .finish(),
+            Command::Captions { show } => f.debug_struct("Captions").field("show", show).finish(),
+            Command::DestroyAudio { id } => f.debug_struct("DestroyAudio").field("id", id).finish(),
+            Command::Term { said, written } => {
+                f.debug_struct("Term").field("said", said).field("written", written).finish()
+            }
+            Command::City { address } => f.debug_struct("City").field("address", address).finish(),
+            Command::File { id, event, audio } => f
+                .debug_struct("File")
+                .field("id", id)
+                .field("event", event)
+                .field("audio", audio)
+                .finish(),
+            Command::Diagnose => f.write_str("Diagnose"),
+        }
+    }
 }
 
 impl Command {

@@ -111,7 +111,8 @@ describe('IdentitySheet bus state machine and UI flows', () => {
       expect(identitySheetStep(s, signedInClean)).toBe('closed');
     }
 
-    // Signing in during Create with rotationUnsaved stays on create to show recovery key view.
+    // Signing in during Create with rotationUnsaved stays on create to show recovery key view;
+    // every other open step closes immediately (no blank Check/Login/Ask/Recover dialog).
     const createdUnsaved: IdentitySheetEvent = {
       is: 'AuthChanged',
       auth: { is: 'Idle' },
@@ -120,7 +121,10 @@ describe('IdentitySheet bus state machine and UI flows', () => {
     };
     expect(identitySheetStep('create', createdUnsaved)).toBe('create');
     expect(identitySheetStep('closed', createdUnsaved)).toBe('closed');
-    expect(identitySheetStep('login', createdUnsaved)).toBe('login');
+    expect(identitySheetStep('ask', createdUnsaved)).toBe('closed');
+    expect(identitySheetStep('login', createdUnsaved)).toBe('closed');
+    expect(identitySheetStep('check', createdUnsaved)).toBe('closed');
+    expect(identitySheetStep('recover', createdUnsaved)).toBe('closed');
 
     // Idle while signed out leaves current step untouched.
     const idleSignedOut: IdentitySheetEvent = {
@@ -367,5 +371,40 @@ describe('IdentitySheet bus state machine and UI flows', () => {
     expect(identitySheetSource.getSnapshot()).toBe('ask');
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByText('Welcome to ZuTalk')).toBeTruthy();
+  });
+
+  it('creating_and_recovering_disable_back_and_dismiss_cancels_auth', () => {
+    const baseState: State = { ...EMPTY, me: null, auth: { is: 'Creating' } };
+    const { bus, sent, emit } = makeTestBus(baseState);
+    stopBus = startBus(bus);
+
+    render(<Shell />);
+
+    // Creating: Back button must be disabled, and clicking Close (×) must dispatch CancelSignIn.
+    act(() => {
+      openIdentitySheet('create');
+    });
+    const createBack = screen.getByRole('button', { name: 'Back' }) as HTMLButtonElement;
+    expect(createBack.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(sent).toContainEqual({ do: 'CancelSignIn' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Recovering: Back button must be disabled, and pressing Close (×) must dispatch CancelSignIn.
+    sent.length = 0;
+    act(() => {
+      emit({
+        kind: 'State',
+        is: { ...EMPTY, me: null, auth: { is: 'Recovering' } },
+      });
+      openIdentitySheet('recover');
+    });
+    const recoverBack = screen.getByRole('button', { name: 'Back' }) as HTMLButtonElement;
+    expect(recoverBack.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(sent).toContainEqual({ do: 'CancelSignIn' });
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

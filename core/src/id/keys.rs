@@ -213,9 +213,10 @@ fn keep(seed: &[u8; 32], did: String) -> Result<Me, End> {
     Ok(Me { did, key: Arc::new(SecretKey::from_seed(seed)) })
 }
 
-/// Saves a newly created identity's rotation key until the person confirms they backed it up.
-pub(crate) fn save_unsaved_rotation(secret: &[u8; 32]) -> Result<(), End> {
-    set(UNSAVED, Some(secret.as_slice()))
+/// Saves a newly created identity's rotation key scoped to `did` until backed up.
+pub(crate) fn save_unsaved_rotation(did: &str, secret: &[u8; 32]) -> Result<(), End> {
+    set(UNSAVED, Some(secret.as_slice()))?;
+    set(ROTATION_DID, Some(did.as_bytes()))
 }
 
 /// The device's own identity if one was already made on this device, without creating a new seed.
@@ -300,6 +301,8 @@ impl Who {
 /// The rotation key of an identity made here, kept until the person says they saved it
 /// elsewhere. did.md asks for that before going on; the owner chose to remind them later.
 const UNSAVED: &str = "rotation.unsaved";
+/// The DID that owns the stored rotation key so it never leaks to another signed-in account.
+const ROTATION_DID: &str = "rotation.did";
 
 /// How long the directory has to take a new DID. Origin to be traced.
 pub(crate) const CREATE_WAIT_MS: u64 = 30_000;
@@ -328,7 +331,16 @@ pub async fn create(http: &Client, directory: &str) -> Result<Me, End> {
         _ => return Err(End::Fatal("id.directory")), // it refused the operation
     }
     set(UNSAVED, Some(secret.as_slice()))?;
+    set(ROTATION_DID, Some(did.as_bytes()))?;
     keep(&seed, did)
+}
+
+/// Whether the stored rotation key belongs to `did`. If `ROTATION_DID` is absent (legacy data or
+/// tests seeding `rotation.unsaved` directly), returns `true` for backward compatibility.
+fn rotation_matches(did: &str) -> Result<bool, End> {
+    let Some(owner) = get(ROTATION_DID)? else { return Ok(true) };
+    let owner = String::from_utf8(owner.to_vec()).map_err(|_| End::Fatal("keys.store"))?;
+    Ok(owner == did)
 }
 
 /// The rotation key of the identity made here, written to be saved, whether or not the person
@@ -345,9 +357,22 @@ pub fn rotation() -> Result<Option<Zeroizing<String>>, End> {
     Ok(Some(rotation.multikey()))
 }
 
+/// The rotation key of `did` if this device created it; `None` if owned by another DID or absent.
+pub fn rotation_for(did: &str) -> Result<Option<Zeroizing<String>>, End> {
+    if !rotation_matches(did)? {
+        return Ok(None);
+    }
+    rotation()
+}
+
 /// Whether the person is still to be reminded to save the rotation key made here.
 pub fn unsaved() -> bool {
     get(UNSAVED).is_ok_and(|key| key.is_some())
+}
+
+/// Whether `did` is still to be reminded to save the rotation key made here.
+pub fn unsaved_for(did: &str) -> bool {
+    get(UNSAVED).is_ok_and(|key| key.is_some()) && rotation_matches(did).unwrap_or(false)
 }
 
 /// The person saved the rotation key made here: it is kept still, and they are not reminded.
@@ -357,6 +382,14 @@ pub fn saved() -> Result<(), End> {
         set(UNSAVED, None)?;
     }
     Ok(())
+}
+
+/// Marks `did`'s rotation key as saved, leaving keys owned by another DID untouched.
+pub fn saved_for(did: &str) -> Result<(), End> {
+    if !rotation_matches(did)? {
+        return Ok(());
+    }
+    saved()
 }
 
 /// The access token of a community invite the 0.8 app left at `path`, as

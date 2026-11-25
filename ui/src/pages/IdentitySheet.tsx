@@ -100,7 +100,7 @@ export function IdentitySheetView({
   }, [step]);
 
   const dismiss = () => {
-    if (state.auth.is === 'Scanning' || state.auth.is === 'Confirm') {
+    if (state.auth.is !== 'Idle') {
       onCancelScan();
     }
     onClose();
@@ -111,7 +111,7 @@ export function IdentitySheetView({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        if (state.auth.is === 'Scanning' || state.auth.is === 'Confirm') {
+        if (state.auth.is !== 'Idle') {
           onCancelScan();
         }
         onClose();
@@ -332,7 +332,7 @@ export function IdentitySheetView({
             )}
 
             <div className="dialog-a">
-              <Button variant="ghost" onClick={() => onStep('ask')}>
+              <Button variant="ghost" disabled={creating} onClick={() => onStep('ask')}>
                 {t('identity.back')}
               </Button>
               <Button type="submit" disabled={creating || handleValidation === 'invalid'}>
@@ -446,7 +446,7 @@ export function IdentitySheetView({
             />
 
             <div className="dialog-a">
-              <Button variant="ghost" onClick={() => onStep('ask')}>
+              <Button variant="ghost" disabled={recovering} onClick={() => onStep('ask')}>
                 {t('identity.back')}
               </Button>
               <Button

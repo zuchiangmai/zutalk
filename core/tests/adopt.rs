@@ -5,12 +5,13 @@
 mod hub;
 
 use hub::{App, ME, NOWHERE, STORE, config_on, local_did, local_shelf, store, tape};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zu::{Pack, SecretKey};
 use zutalk_core::app::hub::Config;
@@ -64,6 +65,34 @@ fn adopt_plan_table() {
 
     // Marker for a different local DID does not block a brand-new local DID.
     assert_eq!(adopt::plan(Some(&marker_a), "did:key:z6Mkother", person_b, true), AdoptPlan::Adopt);
+}
+
+#[test]
+fn can_discard_table() {
+    let local = "did:key:z6Mklocalsample";
+    let person_a = "did:zu:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let person_b = "did:zu:bbbbbbbbbbbbbbbbbbbbbbbb";
+    let marker_a =
+        Adopted { local: local.into(), to: person_a.into(), at: 1000, recordings: 1, terms: 0 };
+    let marker_other_local = Adopted {
+        local: "did:key:z6Mkother".into(),
+        to: person_a.into(),
+        at: 1000,
+        recordings: 1,
+        terms: 0,
+    };
+
+    // Idempotent cleanup when no local recordings or terms remain on disk.
+    assert!(adopt::can_discard(None, local, person_a, false));
+    assert!(adopt::can_discard(Some(&marker_a), local, person_a, false));
+    assert!(adopt::can_discard(Some(&marker_a), local, person_b, false));
+    assert!(adopt::can_discard(Some(&marker_other_local), local, person_a, false));
+
+    // When local data exists, only the person bound to this exact local DID may discard it.
+    assert!(!adopt::can_discard(None, local, person_a, true));
+    assert!(adopt::can_discard(Some(&marker_a), local, person_a, true));
+    assert!(!adopt::can_discard(Some(&marker_a), local, person_b, true));
+    assert!(!adopt::can_discard(Some(&marker_other_local), local, person_a, true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -382,4 +411,216 @@ async fn in_progress_local_recording_finishes_under_local_then_adopts_on_seal() 
     assert!(!dumped.contains("did:key:"), "did:key leaked in logs");
     assert!(!dumped.contains("did:zu:"), "did:zu leaked in logs");
     assert_eq!(app.seen.refused(), 0);
+}
+
+async fn mock_soniox_with_words(words: &[&str]) -> MockServer {
+    let server = MockServer::start().await;
+    let reply = |body: Value| ResponseTemplate::new(200).set_body_json(body);
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(reply(json!({ "id": "file-adopt-1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/transcriptions"))
+        .respond_with(reply(json!({ "id": "tr-adopt-1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/transcriptions/tr-adopt-1"))
+        .respond_with(reply(json!({ "status": "completed" })))
+        .mount(&server)
+        .await;
+    let tokens: Vec<Value> = words
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            json!({
+                "text": text,
+                "start_ms": i * 200,
+                "end_ms": i * 200 + 180,
+                "language": "en",
+                "speaker": 1
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/v1/transcriptions/tr-adopt-1/transcript"))
+        .respond_with(reply(json!({ "id": "tr-adopt-1", "tokens": tokens })))
+        .mount(&server)
+        .await;
+    for kind in ["files", "transcriptions"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/{kind}")))
+            .respond_with(reply(json!({ kind: [], "next_page_cursor": null })))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("DELETE"))
+        .and(path_regex("^/v1/"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_progress_local_recording_adopted_on_seal_refines_into_person_shelf() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let directory = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)).mount(&directory).await;
+    let soniox = mock_soniox_with_words(&[" Refined", " adopted", " transcript", "."]).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = App::with(Config {
+        directory: directory.uri(),
+        soniox: format!("{}/v1", soniox.uri()),
+        ..config_on(dir.path(), NOWHERE)
+    });
+    app.until(|_| true).await;
+
+    // Start recording while signed out (local did:key, own Soniox key configured).
+    app.send(Command::Start);
+    let rec_id = app.session(|s| s.is_some()).await.expect("session").id;
+    let local_me = keys::local_kept().unwrap().expect("local identity exists");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Sign in mid-recording as Person A.
+    app.send(Command::CreateIdentity { handle: None });
+    let signed = app.until(|s| s.me.is_some()).await;
+    let person_did = signed.me.clone().expect("person did");
+    assert!(person_did.starts_with("did:zu:"));
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    // Recording seals under local did:key, adopts into Person A, and refines directly onto
+    // Person A's shelf (take == 1, draft == false). Wait for SQLite library sync so both
+    // `recordings` and `take_lines` reflect take 1 atomically before reading `Query::Transcript`.
+    app.wait_library(|rows| rows.iter().any(|r| r.id == rec_id && !r.draft)).await;
+    let view = app
+        .wait_recording(&rec_id, |v| v.is_some_and(|r| r.take == 1 && !r.row.draft))
+        .await
+        .expect("refined recording view");
+    assert_eq!(view.take, 1);
+    assert!(!view.row.draft);
+
+    let chunk = app.transcript(&rec_id, None, 0).await;
+    let joined: String =
+        chunk.lines.iter().map(|(_, s)| s.line.text.as_str()).collect::<Vec<_>>().join(" ");
+    assert!(
+        joined.contains("Refined adopted transcript"),
+        "expected refined transcript on Person A's shelf, got: {joined:?}"
+    );
+
+    // Local did:key shelf must retain the original sealed draft (take == 0, signed by local_did)
+    // and never be overwritten by Person A's refinement.
+    let local_dir = dir.path().join("records").join(local_me.did.replace(':', "-"));
+    let local_about_pack = local_dir.join(&rec_id).join("about.jsonl");
+    let held_local = Pack::read(&local_about_pack).expect("local about pack");
+    assert_eq!(held_local.records.len(), 2, "only start + sealed draft on local shelf");
+    for record in &held_local.records {
+        assert_eq!(record.path.by, local_me.did);
+    }
+    let local_read = local_shelf(dir.path()).about(&rec_id).unwrap().expect("local about");
+    assert_eq!(local_read.about.take, 0, "local shelf recording must stay at take == 0");
+
+    // Person A's shelf holds the refined record signed by person_did.
+    let person_about_pack = dir
+        .path()
+        .join("records")
+        .join(person_did.replace(':', "-"))
+        .join(&rec_id)
+        .join("about.jsonl");
+    let held_person = Pack::read(&person_about_pack).expect("person about pack");
+    for record in &held_person.records {
+        assert_eq!(record.path.by, person_did);
+    }
+
+    assert!(
+        app.seen
+            .of("identity.adopt")
+            .iter()
+            .any(|l| l.u64("recordings") == Some(1) && l.text("code") == Some("ok"))
+    );
+    assert!(
+        app.seen
+            .of("refine.state")
+            .iter()
+            .any(|l| l.text("to") == Some("Refined") && l.u64("take") == Some(1))
+    );
+    let dumped = format!("{:?}", app.seen.all());
+    assert!(!dumped.contains("Refined adopted transcript"), "transcript leaked in logs");
+    assert!(!dumped.contains("did:key:"), "did:key leaked in logs");
+    assert!(!dumped.contains("did:zu:"), "did:zu leaked in logs");
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn second_person_cannot_discard_first_persons_local_backup() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = wall_ms() as i64;
+    let rec_id = "19a00000003cafebabe";
+    let local = local_shelf(dir.path());
+    let about = About {
+        started: now,
+        length_ms: 2_000,
+        title: "First Person Local Backup".into(),
+        spoken: vec!["en".into()],
+        take: 1,
+        ..About::default()
+    };
+    local.put(rec_id, RECORDING, &[(rec_id.into(), Some(about))], now).unwrap();
+    tape(dir.path(), rec_id, 1);
+
+    // Boot unsigned so the local index exists on disk too.
+    let app_local = App::start(dir.path());
+    assert_eq!(app_local.wait_library(|r| r.len() == 1).await[0].id, rec_id);
+    drop(app_local);
+
+    let local_dir_name = local_did().replace(':', "-");
+    let local_records = dir.path().join("records").join(&local_dir_name);
+    let local_index = dir.path().join("index").join(format!("{local_dir_name}.sqlite3"));
+    assert!(local_records.is_dir());
+    assert!(local_index.is_file());
+
+    // Person A signs in -> adopts rec_id and keeps the local backup.
+    let kept_a = [&[5u8; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept_a)).unwrap();
+    let mut app_a = App::start(dir.path());
+    let state_a = app_a.until(|s| s.me.as_deref() == Some(ME)).await;
+    assert_eq!(state_a.local_shelf, LocalShelf { recordings: 1, adopted: true });
+    app_a.send(Command::SignOut);
+    app_a.until(|s| s.me.is_none()).await;
+    drop(app_a);
+
+    // Person B signs in -> adopted.json belongs to Person A, so adopted == false.
+    let person_b = "did:zu:bbbbbbbbbbbbbbbbbbbbbbbb";
+    let kept_b = [&[9u8; 32][..], person_b.as_bytes()].concat();
+    keys::set("identity", Some(&kept_b)).unwrap();
+    let mut app_b = App::start(dir.path());
+    let state_b = app_b.until(|s| s.me.as_deref() == Some(person_b)).await;
+    assert_eq!(state_b.local_shelf, LocalShelf { recordings: 1, adopted: false });
+    assert!(app_b.library().await.is_empty());
+
+    // Person B attempting Command::DiscardLocal must be refused with adopt.failed and leave
+    // Person A's local backup and index completely untouched.
+    app_b.send(Command::DiscardLocal);
+    app_b.notice("adopt.failed").await;
+
+    assert!(
+        app_b
+            .seen
+            .of("identity.discard_local")
+            .iter()
+            .any(|l| l.text("code") == Some("adopt.failed"))
+    );
+    assert!(local_records.is_dir(), "local shelf directory must remain intact");
+    assert!(local_index.is_file(), "local sqlite index must remain intact");
+    assert_eq!(local_shelf(dir.path()).list().unwrap().len(), 1);
+    assert_eq!(app_b.seen.refused(), 0);
 }

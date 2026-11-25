@@ -72,6 +72,20 @@ pub fn plan(
     AdoptPlan::Adopt
 }
 
+/// Whether `person_did` may discard `local_did`'s backup given `marker` and whether any local
+/// recordings or glossary terms still exist on disk.
+pub fn can_discard(
+    marker: Option<&Adopted>,
+    local_did: &str,
+    person_did: &str,
+    has_local_data: bool,
+) -> bool {
+    if !has_local_data {
+        return true;
+    }
+    marker.is_some_and(|m| m.local == local_did && m.to == person_did)
+}
+
 /// Reads `<data>/adopted.json` if present.
 pub fn read_marker(data: &Path) -> Result<Option<Adopted>, &'static str> {
     match fs::read(data.join("adopted.json")) {

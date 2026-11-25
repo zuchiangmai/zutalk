@@ -793,10 +793,17 @@ async fn identity_secrets_dids_and_handles_never_reach_logs_or_diagnose() {
 
     app.send(&scope, Command::Start);
     let rec_id = app.session(|s| s.is_some()).await.expect("live session").id;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let tape_dir = data_dir.path().join("tape").join(&rec_id);
+    for _ in 0..100 {
+        if zutalk_core::capture::tape::kept(&tape_dir) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     app.send(&scope, Command::Stop);
     app.session(|s| s.is_none()).await;
-    app.wait_recording(&rec_id, |v| v.is_some()).await;
+    app.wait_recording(&rec_id, |v| v.is_some_and(|r| r.row.length_ms > 0)).await;
 
     app.send(
         &scope,
@@ -988,4 +995,171 @@ async fn identity_secrets_dids_and_handles_never_reach_logs_or_diagnose() {
     }
     assert!(!has_event("stats.full"), "stats.full must never trigger (Stats table stayed bounded)");
     assert_eq!(zutalk_log::refused(), refused_before, "zutalk_log::refused() must not increase");
+}
+
+#[test]
+fn command_debug_redacts_recovery_and_own_keys() {
+    let recover_secret = "zSecretRecoveryKeyProbe99";
+    let recover_cmd = Command::RecoverIdentity {
+        did: "did:zu:ewvi7nxzyoun6zhxrhs64oiz".into(),
+        key: recover_secret.into(),
+    };
+    let recover_dbg = format!("{recover_cmd:?}");
+    assert!(
+        !recover_dbg.contains(recover_secret),
+        "Command::RecoverIdentity Debug leaked recovery key: {recover_dbg}"
+    );
+    assert!(recover_dbg.contains("RecoverIdentity"));
+    assert!(recover_dbg.contains("did:zu:ewvi7nxzyoun6zhxrhs64oiz"));
+    assert!(recover_dbg.contains('…'));
+
+    let api_secret = "sk-secret-own-key-probe-99";
+    let own_some = Command::OwnKey { service: "soniox".into(), key: Some(api_secret.into()) };
+    let own_some_dbg = format!("{own_some:?}");
+    assert!(
+        !own_some_dbg.contains(api_secret),
+        "Command::OwnKey Debug leaked API key: {own_some_dbg}"
+    );
+    assert!(own_some_dbg.contains("OwnKey"));
+    assert!(own_some_dbg.contains("soniox"));
+    assert!(own_some_dbg.contains('…'));
+
+    let own_none = Command::OwnKey { service: "openrouter".into(), key: None };
+    let own_none_dbg = format!("{own_none:?}");
+    assert!(own_none_dbg.contains("OwnKey"));
+    assert!(own_none_dbg.contains("openrouter"));
+    assert!(own_none_dbg.contains("None"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_flow_refuses_overlapping_commands_while_creating_and_allows_cancel() {
+    let _store = STORE.lock().await;
+    store(false);
+    let directory = MockServer::start().await;
+    // Delay POST long enough so CreateIdentity stays in AuthFlow::Creating.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+        .mount(&directory)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app =
+        App::with(Config { directory: directory.uri(), ..config_on(dir.path(), NOWHERE) });
+    app.until(|_| true).await;
+
+    app.send(Command::CreateIdentity { handle: None });
+    app.until(|s| s.auth == AuthFlow::Creating).await;
+
+    // Overlapping SignIn / CreateIdentity / RecoverIdentity while Creating must be refused with
+    // "busy" without cancelling or deadlocking AuthFlow::Creating.
+    app.send(Command::SignIn);
+    app.notice("busy").await;
+    assert_eq!(app.outlet.state.now().1.auth, AuthFlow::Creating);
+
+    app.send(Command::CreateIdentity { handle: None });
+    app.notice("busy").await;
+    assert_eq!(app.outlet.state.now().1.auth, AuthFlow::Creating);
+
+    app.send(Command::RecoverIdentity {
+        did: "did:zu:ewvi7nxzyoun6zhxrhs64oiz".into(),
+        key: "zFakeRecoveryKey".into(),
+    });
+    app.notice("busy").await;
+    assert_eq!(app.outlet.state.now().1.auth, AuthFlow::Creating);
+
+    assert!(
+        app.seen
+            .of("command.done")
+            .iter()
+            .any(|l| l.text("kind") == Some("SignIn") && l.text("code") == Some("busy"))
+    );
+
+    // Explicit CancelSignIn cancels the in-flight creation and restores Idle so a new SignIn works.
+    app.send(Command::CancelSignIn);
+    app.until(|s| s.auth == AuthFlow::Idle).await;
+
+    app.send(Command::SignIn);
+    app.until(|s| matches!(s.auth, AuthFlow::Scanning { .. })).await;
+    app.send(Command::CancelSignIn);
+    app.until(|s| s.auth == AuthFlow::Idle).await;
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsaved_rotation_key_is_scoped_to_creating_did_and_never_leaks_across_accounts() {
+    let _store = STORE.lock().await;
+    store(false);
+    let plc = Arc::new(MemoryPlc::default());
+    let directory = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(PlcResponder(plc.clone())).mount(&directory).await;
+    Mock::given(method("GET")).respond_with(PlcResponder(plc.clone())).mount(&directory).await;
+
+    // Seed account B in the stand-in directory.
+    let key_b = SecretKey::from_seed(&[71u8; 32]);
+    let rot_b = did::Rotation::from_bytes(&[72u8; 32]).unwrap();
+    let (did_b, op_b) =
+        did::create_with_aka(&rot_b, &key_b.public(), &["zu://bravo.zuzalu.ink".into()]).unwrap();
+    plc.push_op(&did_b, serde_json::from_str(&op_b).unwrap());
+
+    let copied = Arc::new(Mutex::new(String::new()));
+    let copied_cb = copied.clone();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = Config { directory: directory.uri(), ..config_on(dir.path(), NOWHERE) };
+    cfg.clip = Arc::new(move |text| {
+        *copied_cb.lock().unwrap() = text.to_owned();
+        true
+    });
+
+    let mut app = App::with(cfg);
+    app.until(|_| true).await;
+
+    // 1. Create account A -> rotation_unsaved is true and CopyRotation copies A's recovery key.
+    app.send(Command::CreateIdentity { handle: Some("alpha".into()) });
+    let state_a = app.until(|s| s.me.is_some()).await;
+    let did_a = state_a.me.clone().expect("account A DID");
+    assert!(state_a.rotation_unsaved);
+    app.send(Command::CopyRotation);
+    app.notice("copied").await;
+    let rot_a = copied.lock().unwrap().clone();
+    assert!(rot_a.starts_with('z'));
+
+    // 2. Sign out without saving -> signed-out state must show rotation_unsaved == false and
+    //    CopyRotation must refuse with rotation.none.
+    app.send(Command::SignOut);
+    let signed_out = app.until(|s| s.me.is_none()).await;
+    assert!(!signed_out.rotation_unsaved);
+    copied.lock().unwrap().clear();
+    app.send(Command::CopyRotation);
+    app.notice("rotation.none").await;
+    assert!(copied.lock().unwrap().is_empty(), "signed-out CopyRotation must not copy A's key");
+
+    // 3. Sign in as account B -> rotation_unsaved must be false and CopyRotation must refuse with
+    //    rotation.none (never leaking account A's recovery key to account B).
+    let rot_b_key = rot_b.multikey().to_string();
+    app.send(Command::RecoverIdentity { did: did_b.clone(), key: rot_b_key.clone() });
+    let state_b = app.until(|s| s.me.as_deref() == Some(did_b.as_str())).await;
+    assert!(!state_b.rotation_unsaved);
+    app.send(Command::CopyRotation);
+    app.notice("rotation.none").await;
+    assert!(copied.lock().unwrap().is_empty(), "account B must never receive account A's key");
+
+    // RotationSaved by B must not wipe A's unsaved reminder.
+    app.send(Command::RotationSaved);
+    app.send(Command::SignOut);
+    app.until(|s| s.me.is_none()).await;
+
+    // 4. Sign back in as account A -> A's unsaved reminder is still scoped to A.
+    app.send(Command::RecoverIdentity { did: did_a.clone(), key: rot_a.clone() });
+    let state_a_again = app.until(|s| s.me.as_deref() == Some(did_a.as_str())).await;
+    assert!(state_a_again.rotation_unsaved);
+    app.send(Command::CopyRotation);
+    app.notice("copied").await;
+    assert_eq!(copied.lock().unwrap().as_str(), rot_a.as_str());
+
+    let dumped = format!("{:?}", app.seen.all());
+    assert!(!dumped.contains(&rot_a), "account A rotation key leaked in logs");
+    assert!(!dumped.contains(&rot_b_key), "account B rotation key leaked in logs");
+    assert!(!dumped.contains(&did_a), "account A DID leaked in logs");
+    assert!(!dumped.contains(&did_b), "account B DID leaked in logs");
+    assert_eq!(app.seen.refused(), 0);
 }

@@ -102,8 +102,8 @@ pub(crate) enum Msg {
     Ended(String),
     Wrote(String),
     RefineReady { id: String, from: RefineStatus },
-    SignInPending { did: String, handle: Option<String>, code: Option<String> },
-    SignInFailed(&'static str),
+    SignInPending { auth_gen: u64, did: String, handle: Option<String>, code: Option<String> },
+    SignInFailed { auth_gen: u64, code: &'static str },
     Signed(Result<SignedOut, &'static str>),
     QuotaUpdated { left: u64, quota: Quota, notify: bool },
     QuotaFailed(&'static str),
@@ -137,7 +137,7 @@ impl Msg {
             Msg::Wrote(_) => "Wrote",
             Msg::RefineReady { .. } => "RefineReady",
             Msg::SignInPending { .. } => "SignInPending",
-            Msg::SignInFailed(_) => "SignInFailed",
+            Msg::SignInFailed { .. } => "SignInFailed",
             Msg::Signed(_) => "Signed",
             Msg::QuotaUpdated { .. } => "QuotaUpdated",
             Msg::QuotaFailed(_) => "QuotaFailed",
@@ -201,6 +201,7 @@ pub(crate) struct Hub {
     refresh_synced: u64,
     need_retain: bool,
     need_rooms: bool,
+    auth_gen: u64,
 }
 
 impl Hub {
@@ -259,7 +260,18 @@ impl Hub {
             refresh_synced: 0,
             need_retain: false,
             need_rooms: false,
+            auth_gen: 0,
         }
+    }
+
+    fn next_auth_gen(&self) -> u64 {
+        let next = self.auth_gen.wrapping_add(1);
+        if next == 0 { 1 } else { next }
+    }
+
+    fn bump_auth_gen(&mut self) -> u64 {
+        self.auth_gen = self.next_auth_gen();
+        self.auth_gen
     }
 
     pub(crate) async fn run(mut self, mut mail: Rx<Msg>) {
@@ -427,12 +439,20 @@ impl Hub {
                 self.refining.insert(id.clone());
                 self.work.write_manual(id, from);
             }
-            Msg::SignInPending { did, handle, code } => {
-                self.set_auth(AuthEvent::Received { did, handle, code }, "received");
+            Msg::SignInPending { auth_gen, did, handle, code } => {
+                if auth_gen != self.auth_gen {
+                    let _ = (did, handle, code); // dropped: stale auth attempt superseded by newer sign-in or cancel
+                } else {
+                    self.set_auth(AuthEvent::Received { did, handle, code }, "received");
+                }
             }
-            Msg::SignInFailed(c) => {
-                self.set_auth(AuthEvent::Failed, c);
-                return Err(c);
+            Msg::SignInFailed { auth_gen, code } => {
+                if auth_gen != self.auth_gen {
+                    let _ = code; // dropped: stale auth attempt superseded by newer sign-in or cancel
+                } else {
+                    self.set_auth(AuthEvent::Failed, code);
+                    return Err(code);
+                }
             }
             Msg::Signed(out) => self.apply_signed(out?),
             Msg::QuotaUpdated { left, quota, notify } => {
@@ -587,16 +607,22 @@ impl Hub {
                 self.work.unshare(room, recording)?;
             }
             Command::SignIn => {
-                let (url, expires_at) = self.work.sign_in()?;
+                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                    return Err("busy");
+                }
+                let next_gen = self.next_auth_gen();
+                let (url, expires_at) = self.work.sign_in(next_gen)?;
+                self.auth_gen = next_gen;
                 self.set_auth(AuthEvent::BeginScan { url, expires_at }, "sign_in");
             }
             Command::ConfirmSignIn => {
                 if !matches!(self.state.auth, AuthFlow::Confirm { .. }) {
                     return Err("id.no_pending");
                 }
-                self.work.confirm_sign_in(self.state.setup.keep, self.busy_ids())?;
+                self.work.confirm_sign_in(self.auth_gen, self.state.setup.keep, self.busy_ids())?;
             }
             Command::CancelSignIn => {
+                self.bump_auth_gen();
                 self.work.cancel_sign_in();
                 self.set_auth(AuthEvent::Cancelled, "id.cancelled");
             }
@@ -604,18 +630,26 @@ impl Hub {
                 if self.state.me.is_some() {
                     return Err("id.signed_in");
                 }
+                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                    return Err("busy");
+                }
                 let normalized = match handle {
                     Some(raw) => identity::normalize_handle(&raw)?,
                     None => None,
                 };
-                self.work.create_identity(normalized);
+                let auth_gen = self.bump_auth_gen();
+                self.work.create_identity(normalized, auth_gen);
                 self.set_auth(AuthEvent::BeginCreate, "create");
             }
             Command::RecoverIdentity { did, key } => {
                 if self.state.me.is_some() {
                     return Err("id.signed_in");
                 }
-                self.work.recover_identity(did, key);
+                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                    return Err("busy");
+                }
+                let auth_gen = self.bump_auth_gen();
+                self.work.recover_identity(did, key, auth_gen);
                 self.set_auth(AuthEvent::BeginRecover, "recover");
             }
             Command::RefreshQuota => self.work.refresh_quota()?,
@@ -626,6 +660,7 @@ impl Hub {
                 self.work.discard_local()?;
             }
             Command::SignOut => {
+                self.bump_auth_gen();
                 self.set_auth(AuthEvent::Cancelled, "sign_out");
                 self.state.handle = None;
                 self.state.quota = None;

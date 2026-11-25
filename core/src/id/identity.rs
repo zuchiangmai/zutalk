@@ -233,7 +233,7 @@ pub async fn create_identity(
         status if status.is_server_error() => return Err(End::Retry("server")),
         _ => return Err(End::Fatal("id.directory")),
     }
-    keys::save_unsaved_rotation(&secret)?;
+    keys::save_unsaved_rotation(&did_str, &secret)?;
     let me = keys::keep_me(&seed, did_str)?;
     Ok((me, normalized))
 }

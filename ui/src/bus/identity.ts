@@ -74,11 +74,9 @@ export function identitySheetStep(
 
   // event.is === 'AuthChanged'
   if (event.auth.is === 'Confirm') return 'check';
-  if (event.signedIn && !event.rotationUnsaved) {
+  if (event.signedIn) {
+    if (event.rotationUnsaved && current === 'create') return 'create';
     if (current !== 'closed') return 'closed';
-  }
-  if (event.signedIn && event.rotationUnsaved && current === 'create') {
-    return 'create';
   }
   return current;
 }
