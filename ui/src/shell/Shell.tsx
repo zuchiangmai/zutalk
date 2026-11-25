@@ -9,6 +9,7 @@ import {
   overlaySource,
   resolvedThemeSource,
   routeSource,
+  say,
   seen,
   send,
   sessionSource,
@@ -21,9 +22,11 @@ import {
   waterSource,
 } from '../bus';
 import { HomePage } from '../pages/HomePage';
+import { HostPage } from '../pages/HostPage';
 import { IdentitySheet } from '../pages/IdentitySheet';
 import { LibraryPage } from '../pages/LibraryPage';
 import { LivePage } from '../pages/LivePage';
+import { OutboundPage } from '../pages/OutboundPage';
 import { ReaderPage } from '../pages/ReaderPage';
 import { ResultPage } from '../pages/ResultPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -108,21 +111,36 @@ export function Shell() {
       />
 
       <main className="main">
-        {route.page !== 'live' && (
+        {route.page !== 'live' && route.page !== 'host' && route.page !== 'outbound' && (
           <TopBar
             host={state?.host ?? { is: 'Idle' }}
+            session={session}
             update={state?.update ?? null}
             recording={session !== null}
             onUpdate={() => void send({ do: 'Update' })}
+            onStopOutbound={() => void send({ do: 'StopOutbound' })}
+            onCancelHost={() => void send({ do: 'HostCancel' })}
+            onCopyHostLink={(link) => {
+              if (globalThis.navigator?.clipboard?.writeText) {
+                void globalThis.navigator.clipboard.writeText(link).then(
+                  () => say('link'),
+                  () => say('clip'),
+                );
+              } else {
+                say('link');
+              }
+            }}
           />
         )}
 
         {route.page === 'home' ? (
           <HomePage />
+        ) : route.page === 'host' ? (
+          <HostPage />
         ) : route.page === 'live' ? (
           <LivePage />
         ) : route.page === 'result' ? (
-          <ResultPage id={route.id} />
+          <ResultPage id={route.id} hostEvent={route.hostEvent} />
         ) : route.page === 'reader' ? (
           <ReaderPage
             id={route.id}
@@ -133,6 +151,8 @@ export function Shell() {
           />
         ) : route.page === 'library' ? (
           <LibraryPage initialMonth={route.month ?? null} />
+        ) : route.page === 'outbound' ? (
+          <OutboundPage />
         ) : (
           <SettingsPage />
         )}

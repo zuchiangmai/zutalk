@@ -9,6 +9,7 @@ import {
   type ThemePref,
   clock,
   diagnose,
+  go,
   langName,
   langSource,
   openIdentitySheet,
@@ -24,6 +25,7 @@ import {
   useQuery,
   useSource,
 } from '../bus';
+import { Icon } from '../ds/icons';
 import { Button, InlineConfirm, Pill, Seg, Tag, type SegOption } from '../ds/primitives';
 import { keyFromView } from '../ds/stateView';
 
@@ -79,6 +81,7 @@ export type SettingsViewProps = {
   onDiagnose: () => void;
   onToggleOverlay: () => void;
   onUpdate: () => void;
+  onOpenOutbound?: () => void;
 };
 
 /** Pure presentational Settings page (Settings.dc.html + P4 identity, daily quota, and local adoption). */
@@ -102,6 +105,7 @@ export function SettingsView({
   onDiagnose,
   onToggleOverlay,
   onUpdate,
+  onOpenOutbound,
 }: SettingsViewProps) {
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
   const [termSaid, setTermSaid] = useState('');
@@ -406,6 +410,20 @@ export function SettingsView({
         ))}
       </section>
 
+      {/* Outbound overview */}
+      {onOpenOutbound && (
+        <section className="group">
+          <h2 className="h">{t('outbound.title')}</h2>
+          <div className="line">
+            <span className="grow k">{t('settings.outbound_tip')}</span>
+            <Pill onClick={onOpenOutbound}>
+              {t('outbound.title')}
+              <Icon name="chevron-right" size="s" />
+            </Pill>
+          </div>
+        </section>
+      )}
+
       {/* Diagnostics & Runtime Health Overlay */}
       <section className="group">
         <h2 className="h">{t('settings.diagnostics')}</h2>
@@ -473,6 +491,7 @@ export function SettingsPage() {
       onDiagnose={() => void diagnose()}
       onToggleOverlay={() => setOverlay(!overlayOpen)}
       onUpdate={() => void send({ do: 'Update' })}
+      onOpenOutbound={() => go({ page: 'outbound' })}
     />
   );
 }

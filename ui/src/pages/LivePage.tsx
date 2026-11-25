@@ -9,6 +9,7 @@ import {
   frameSource,
   go,
   levelSource,
+  say,
   send,
   sessionSource,
   stateSource,
@@ -19,8 +20,10 @@ import {
 } from '../bus';
 import { Icon } from '../ds/icons';
 import { Button, Pill } from '../ds/primitives';
+import { QrCode } from '../ds/QrCode';
 import { sessionStatusView } from '../ds/stateView';
 import { TopBar } from '../shell/TopBar';
+import { shortenAudienceLink } from './HostPage';
 import { LiveCaptions } from './LiveCaptions';
 
 /** Stopwatch display interval in ms so live clock seconds tick steadily without jitter (P3.md §3.4). */
@@ -84,6 +87,8 @@ export type LiveViewProps = {
   onAddNote: (at_ms: number, text: string) => void;
   onRemoveNote: (key: string) => void;
   onUpdate: () => void;
+  onStopOutbound?: () => void;
+  onCopyHostLink?: (link: string) => void;
 };
 
 /** Pure props Live recording view with multi-column captions, real Level meter, M hotkey, and LiveNotes rail. */
@@ -105,10 +110,15 @@ export function LiveView({
   onAddNote,
   onRemoveNote,
   onUpdate,
+  onStopOutbound,
+  onCopyHostLink,
 }: LiveViewProps) {
   const [notesOpen, setNotesOpen] = useState(initialNotesOpen);
   const [draft, setDraft] = useState('');
   const [lockedAnchor, setLockedAnchor] = useState<LiveAnchor | null>(null);
+  const [qrOpen, setQrOpen] = useState(false);
+
+  const hostLink = host.is === 'Live' && host.outbound ? host.link : null;
 
   const paused = session.status.is === 'Paused';
   const statusView = sessionStatusView(session.status);
@@ -159,7 +169,16 @@ export function LiveView({
 
   return (
     <div className={`main${paused ? ' paused' : ''}`} style={{ flex: 1 }}>
-      <TopBar host={host} update={update} recording onUpdate={onUpdate}>
+      <TopBar
+        host={host}
+        session={session}
+        update={update}
+        recording
+        onUpdate={onUpdate}
+        onStopOutbound={onStopOutbound}
+        onCopyHostLink={onCopyHostLink}
+        onShowHostQr={hostLink ? () => setQrOpen(true) : undefined}
+      >
         <Pill
           quiet={!notesOpen}
           active={notesOpen}
@@ -289,6 +308,40 @@ export function LiveView({
           </aside>
         )}
       </div>
+
+      {qrOpen && hostLink && (
+        <div
+          className="scrim center"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setQrOpen(false);
+          }}
+        >
+          <div className="dialog" role="dialog" aria-modal="true" aria-label={t('qr')}>
+            <button
+              type="button"
+              className="icon-btn dialog-x"
+              aria-label={t('close')}
+              onClick={() => setQrOpen(false)}
+            >
+              <Icon name="x" />
+            </button>
+            <h2 className="dialog-t">{t('host.audience_captions')}</h2>
+            {session.event_title && <p className="dialog-d">{session.event_title}</p>}
+            <div className="qr-dialog-body">
+              <QrCode value={hostLink} label={t('qr')} size={240} />
+              <span className="mono k">{shortenAudienceLink(hostLink)}</span>
+            </div>
+            <div className="dialog-a">
+              {onCopyHostLink && (
+                <Button variant="ghost" onClick={() => onCopyHostLink(hostLink)}>
+                  {t('link.copy')}
+                </Button>
+              )}
+              <Button onClick={() => setQrOpen(false)}>{t('close')}</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -334,8 +387,9 @@ export function LivePage() {
       onPause={() => void send({ do: 'Pause' })}
       onResume={() => void send({ do: 'Resume' })}
       onStop={(id) => {
+        const hostEvent = state?.host.is === 'Live' ? (state.host.event ?? undefined) : undefined;
         void send({ do: 'Stop' });
-        go({ page: 'result', id });
+        go(hostEvent ? { page: 'result', id, hostEvent } : { page: 'result', id });
       }}
       onReconnect={() => void send({ do: 'Reconnect' })}
       onToggleCaptions={() => void send({ do: 'Captions', show: !(state?.captions ?? false) })}
@@ -346,6 +400,17 @@ export function LivePage() {
         void send({ do: 'Note', id: session.id, op: { op: 'Remove', key } })
       }
       onUpdate={() => void send({ do: 'Update' })}
+      onStopOutbound={() => void send({ do: 'StopOutbound' })}
+      onCopyHostLink={(link) => {
+        if (globalThis.navigator?.clipboard?.writeText) {
+          void globalThis.navigator.clipboard.writeText(link).then(
+            () => say('link'),
+            () => say('clip'),
+          );
+        } else {
+          say('link');
+        }
+      }}
     />
   );
 }

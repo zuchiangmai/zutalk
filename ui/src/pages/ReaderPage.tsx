@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { Note } from '$proto/Note';
 import type { RecordingView } from '$proto/RecordingView';
 import type { Said } from '$proto/Said';
@@ -25,6 +25,7 @@ import {
 import { Icon } from '../ds/icons';
 import { Button, InlineConfirm, Pill, Seg, Tag, type SegOption } from '../ds/primitives';
 import { refineStatusView } from '../ds/stateView';
+import { FileArchiveCard } from './FileArchiveCard';
 import { REFINE_STEPS, refineStepIndex } from './ResultPage';
 import { TranscriptList } from './TranscriptList';
 
@@ -67,6 +68,7 @@ export type ReaderViewProps = {
   onDestroyAudio: () => void;
   onRemove: () => void;
   onLoadedLinesChange?: (lines: [string, Said][]) => void;
+  archiveSlot?: ReactNode;
 };
 
 /** Pure presentational Reader page with virtualized chunked transcript, Compare, and Notes (Reader.dc.html + Refine.dc.html). */
@@ -92,6 +94,7 @@ export function ReaderView({
   onDestroyAudio,
   onRemove,
   onLoadedLinesChange,
+  archiveSlot,
 }: ReaderViewProps) {
   const { row } = recording;
   const [tab, setTab] = useState<'transcript' | 'notes'>(initialTab);
@@ -288,6 +291,8 @@ export function ReaderView({
         {row.audio && <Tag title={t('audio.tip')}>{t('audio')}</Tag>}
         {row.filed && <Tag tone="out">{t('code.city.filed')}</Tag>}
       </div>
+
+      {!isRecordingThis && archiveSlot}
 
       {refineView.kind === 'refining' && (
         <div className="acts" role="status">
@@ -644,6 +649,7 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
       onLoadedLinesChange={(lines) => {
         loadedLinesRef.current = lines;
       }}
+      archiveSlot={<FileArchiveCard recording={recording} defaultOpen={false} />}
     />
   );
 }

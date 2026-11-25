@@ -485,6 +485,18 @@
   color: var(--on-out-strong);
   font-weight: 500;
 }
+.band .sep {
+  width: 1px;
+  height: 16px;
+  background: color-mix(in srgb, var(--on-out) 35%, transparent);
+}
+.band .pill {
+  border-color: color-mix(in srgb, var(--on-out) 50%, transparent);
+  color: var(--on-out-strong);
+}
+.band .pill:hover {
+  background: var(--out-chip);
+}
 .band::after {
   content: '';
   position: absolute;
@@ -1763,4 +1775,144 @@ mark.find {
   gap: 14px;
   padding: 24px 32px 96px;
   text-align: center;
+}
+
+/* ---- hosting sheet, hold-to-file, grace ring, outbound ---- */
+.sheet {
+  width: 100%;
+  max-width: 560px;
+  padding: 4px 20px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--raise);
+  box-shadow: var(--shadow-sm);
+  animation: zt-unfold 0.42s var(--e-out) both;
+}
+.sheet-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.sheet-row:last-child {
+  border-bottom: 0;
+}
+.host-qr-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  animation: zt-unfold 0.42s var(--e-out) both;
+}
+.host-link-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 180px;
+}
+.host-city-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.file-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+  animation: zt-unfold 0.42s var(--e-out) both;
+}
+.file-grid {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 14px 16px;
+  align-items: center;
+}
+.file-status-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin-top: 12px;
+  animation: zt-unfold 0.42s var(--e-out) both;
+}
+.hold {
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.hold .fill {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--on-accent) 30%, transparent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.2s var(--e-out);
+}
+.hold.holding .fill {
+  transform: scaleX(1);
+  transition: transform 1.4s linear;
+}
+.hold .lbl {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ring {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  transform: rotate(-90deg);
+}
+.ring circle {
+  fill: none;
+  stroke-width: 2.5;
+}
+.ring .bg {
+  stroke: color-mix(in srgb, currentColor 25%, transparent);
+}
+.ring .fg {
+  stroke: currentColor;
+  stroke-dasharray: 56.5;
+  animation: zt-grace 8s linear forwards;
+}
+@keyframes zt-grace {
+  to {
+    stroke-dashoffset: 56.5;
+  }
+}
+.outbound-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  margin: 0 -10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.outbound-row:hover {
+  background: var(--soft);
+}
+.qr-dialog-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
 }

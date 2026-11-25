@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import type { HostEvent } from '$proto/HostEvent';
 import type { RecordingView } from '$proto/RecordingView';
 import type { Said } from '$proto/Said';
 import type { Writing } from '$proto/Writing';
@@ -22,6 +23,7 @@ import {
 import { Icon } from '../ds/icons';
 import { Button, Card, Pill, Tag } from '../ds/primitives';
 import { refineStatusView } from '../ds/stateView';
+import { FileArchiveCard } from './FileArchiveCard';
 import { TranscriptList } from './TranscriptList';
 
 /** Ordered pipeline stages of post-recording refinement (`core/src/record/`). */
@@ -56,6 +58,7 @@ export type ResultViewProps = {
   onEditSpeaker: (label: string, name: string) => void;
   onAddNote: (at_ms: number, text: string, anchor: string | null) => void;
   onLoadedLinesChange?: (lines: [string, Said][]) => void;
+  archiveSlot?: ReactNode;
 };
 
 /** Pure presentational post-recording Result & Refine page (Result.dc.html + Refine.dc.html). */
@@ -73,6 +76,7 @@ export function ResultView({
   onEditSpeaker,
   onAddNote,
   onLoadedLinesChange,
+  archiveSlot,
 }: ResultViewProps) {
   const { row } = recording;
   const [titleDraft, setTitleDraft] = useState(row.title);
@@ -253,6 +257,8 @@ export function ResultView({
         </div>
       </Card>
 
+      {archiveSlot}
+
       <TranscriptList
         id={row.id}
         take={recording.take}
@@ -270,7 +276,7 @@ export function ResultView({
 }
 
 /** Bus-connected post-recording Result page. */
-export function ResultPage({ id }: { id: string }) {
+export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEvent }) {
   const state = useSource(stateSource);
   const progress = useSource(progressSource);
   useSource(langSource);
@@ -349,6 +355,13 @@ export function ResultPage({ id }: { id: string }) {
       onLoadedLinesChange={(lines) => {
         loadedLinesRef.current = lines;
       }}
+      archiveSlot={
+        <FileArchiveCard
+          recording={recording}
+          hostEvent={hostEvent ?? null}
+          defaultOpen={Boolean(hostEvent)}
+        />
+      }
     />
   );
 }

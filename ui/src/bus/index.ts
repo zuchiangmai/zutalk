@@ -25,6 +25,7 @@ export const tauri: Bus = {
 
 export * from './act';
 export * from './channel';
+export * from './filing';
 export * from './identity';
 export * from './query';
 export * from './reveal';

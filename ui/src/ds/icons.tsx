@@ -8,11 +8,16 @@ export type IconName =
   | 'mic'
   | 'mic-off'
   | 'chevron-down'
+  | 'chevron-left'
   | 'chevron-right'
   | 'x'
   | 'upload'
   | 'download'
   | 'broadcast'
+  | 'users'
+  | 'eye-off'
+  | 'qrcode'
+  | 'maximize'
   | 'notes'
   | 'captions'
   | 'more'
@@ -65,6 +70,7 @@ const PATHS: Record<IconName, ReactNode> = {
     <path d="M3 3l18 18M9 5a3 3 0 0 1 6 1v5M9 9v2a3 3 0 0 0 5 2.2M5 11a7 7 0 0 0 11.5 5.4M19 11a7 7 0 0 1-.5 2.6M12 18v3" />
   ),
   'chevron-down': <path d="m6 9 6 6 6-6" />,
+  'chevron-left': <path d="m15 6-6 6 6 6" />,
   'chevron-right': <path d="m9 6 6 6-6 6" />,
   x: <path d="M18 6 6 18M6 6l12 12" />,
   upload: <path d="M12 20V9M7 14l5-5 5 5M5 4h14" />,
@@ -75,6 +81,24 @@ const PATHS: Record<IconName, ReactNode> = {
       <path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2" />
     </>
   ),
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3" />
+      <path d="M3 20a6 6 0 0 1 12 0M16 5a3 3 0 0 1 0 6M21 20a6 6 0 0 0-4-5.6" />
+    </>
+  ),
+  'eye-off': (
+    <path d="M3 3l18 18M10.6 6.2A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a15 15 0 0 1-2.4 3M6.5 7.5A15 15 0 0 0 3 12s4 6 9 6a9.6 9.6 0 0 0 3-.5" />
+  ),
+  qrcode: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <path d="M14 14h3v3h-3zM20 14v3h-3M14 20h7" />
+    </>
+  ),
+  maximize: <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />,
   notes: <path d="M4 20h4L19 9l-4-4L4 16v4M14 6l4 4" />,
   captions: (
     <>

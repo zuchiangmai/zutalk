@@ -126,12 +126,15 @@ export function Sidebar({
               className={`row${route.page === 'live' ? ' on' : ''}`}
               onClick={() => onGo({ page: 'live' })}
             >
-              <span className="row-t">{t('nav.live')}</span>
+              <span className="row-t">{session.event_title || t('nav.live')}</span>
               <span className="row-m">
                 <span className={`dot${session.status.is === 'Paused' ? '' : ' live'}`} />
                 <span className="num">{clock(liveElapsedMs)}</span>
                 {spokenLanguages.length > 0 && (
                   <span>{spokenLanguages.map((l) => langName(l, l)).join(' · ')}</span>
+                )}
+                {session.outbound && (
+                  <Icon name="arrow-up-right" size="s" label={t('outbound.sidebar_live')} />
                 )}
               </span>
             </button>

@@ -7,6 +7,7 @@ import type { State } from '$proto/State';
 import {
   go,
   langName,
+  openIdentitySheet,
   pick,
   progressSource,
   send,
@@ -37,6 +38,7 @@ export type HomeViewProps = {
   onStart: () => void;
   onSetup: (setup: Setup) => void;
   onImport: () => void;
+  onHost?: () => void;
   onGoLive: () => void;
   onOpenSettings: () => void;
 };
@@ -49,6 +51,7 @@ export function HomeView({
   onStart,
   onSetup,
   onImport,
+  onHost,
   onGoLive,
   onOpenSettings,
 }: HomeViewProps) {
@@ -221,6 +224,12 @@ export function HomeView({
           <Icon name="upload" size="s" />
           {t('import')}
         </Pill>
+        {onHost && (
+          <Pill quiet disabled={recording} onClick={onHost}>
+            <Icon name="broadcast" size="s" />
+            {t('host.entry')}
+          </Pill>
+        )}
       </div>
 
       {(moveOld || unmoved.length > 0) && (
@@ -281,6 +290,13 @@ export function HomePage() {
         void pick().then((path) => {
           if (path) void send({ do: 'Import', path });
         });
+      }}
+      onHost={() => {
+        if (!state.me) {
+          openIdentitySheet('ask');
+        } else {
+          go({ page: 'host' });
+        }
       }}
       onGoLive={() => go({ page: 'live' })}
       onOpenSettings={() => go({ page: 'settings' })}

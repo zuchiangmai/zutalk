@@ -249,7 +249,7 @@ export function mockBus(recording = false): Bus {
       language: null,
       keep: 30,
       caption: structuredClone(DEFAULT_CAPTION_PREFS),
-      city: null,
+      city: 'demo.city.local',
     },
     devices: [
       { id: 'mbp', name: 'MacBook Pro Microphone', default: true },

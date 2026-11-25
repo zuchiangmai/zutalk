@@ -1,6 +1,7 @@
 import type { Command } from '$proto/Command';
 import type { Event } from '$proto/Event';
 import type { Frame } from '$proto/Frame';
+import type { HostEvent } from '$proto/HostEvent';
 import type { Level } from '$proto/Level';
 import type { Progress } from '$proto/Progress';
 import type { Query } from '$proto/Query';
@@ -12,7 +13,7 @@ import type { Tally } from '$proto/Tally';
 import type { Water } from '$proto/Water';
 import { dispatchIdentityEvent, resetIdentitySheet } from './identity';
 import { queryCache } from './query';
-import { navigate, resetRoute } from './route';
+import { navigate, resetRoute, setLeaveHostArmHook } from './route';
 import { createCell, type Source } from './source';
 import { emptyVitals, frame as stepVitalsFrame, report as reportVitals } from './vitals';
 import { setLang, system } from './words';
@@ -139,10 +140,20 @@ export function toggleOverlay(): void {
 }
 
 let activeBus: Bus | null = null;
+let lastLiveHostEvent: HostEvent | null = null;
 const seenSeq: Partial<Record<Signal['of'], number>> = {};
 const pendingSignals: Partial<Record<Signal['of'], Signal>> = {};
 let flushRaf = 0;
 let vitalsRaf = 0;
+
+setLeaveHostArmHook(() => {
+  const current = stateCell.getSnapshot();
+  if (current && current.host.is !== 'Idle' && activeBus) {
+    void activeBus.send({ do: 'HostCancel' }).catch(() => {
+      // dropped: best-effort cleanup when leaving the pre-session Host screen
+    });
+  }
+});
 
 export function getBus(): Bus | null {
   return activeBus;
@@ -157,9 +168,18 @@ function applySignal(signal: Signal): void {
       const prev = sessionCell.getSnapshot();
       sessionCell.set(signal.is);
       if (!prev && signal.is) {
+        const host = stateCell.getSnapshot()?.host;
+        lastLiveHostEvent =
+          host && (host.is === 'Live' || host.is === 'Armed' || host.is === 'Arming')
+            ? host.event
+            : null;
         navigate({ is: 'SessionStarted' });
       } else if (prev && !signal.is) {
-        navigate({ is: 'SessionStopped', id: prev.id });
+        const host = stateCell.getSnapshot()?.host;
+        const hostEvent =
+          (host && host.is === 'Live' ? host.event : null) ?? lastLiveHostEvent ?? undefined;
+        lastLiveHostEvent = null;
+        navigate({ is: 'SessionStopped', id: prev.id, hostEvent });
       }
       break;
     }
@@ -207,6 +227,9 @@ function scheduleSignalFlush(): void {
 export function take(event: Event): void {
   if (event.kind === 'State') {
     stateCell.set(event.is);
+    if (event.is.host.is === 'Live' && event.is.host.event) {
+      lastLiveHostEvent = event.is.host.event;
+    }
     setLang(event.is.setup.language ?? system);
     dispatchIdentityEvent({
       is: 'AuthChanged',
@@ -325,6 +348,7 @@ export function resetChannel(): void {
   vitalsRaf = 0;
   for (const k of Object.keys(seenSeq) as Signal['of'][]) delete seenSeq[k];
   for (const k of Object.keys(pendingSignals) as Signal['of'][]) delete pendingSignals[k];
+  lastLiveHostEvent = null;
   stateCell.set(null);
   frameCell.set(null);
   sessionCell.set(null);
