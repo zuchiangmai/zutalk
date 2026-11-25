@@ -148,3 +148,165 @@ fn looking_for_an_update_says_what_it_found() {
     assert_eq!((events[2].level, events[2].text("code")), (Level::Warn, Some("update")));
     assert_eq!(seen.refused(), 0);
 }
+
+#[test]
+fn release_versions_and_manifests_are_aligned() {
+    let root = root();
+    let workspace_toml = fs::read_to_string(root.join("Cargo.toml")).expect("root Cargo.toml");
+    let workspace_version = workspace_toml
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("version = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+                .map(str::to_owned)
+        })
+        .expect("workspace.package.version");
+    assert_eq!(workspace_version, VERSION, "workspace version must match app CARGO_PKG_VERSION");
+    let semver_parts: Vec<&str> = workspace_version.split('.').collect();
+    assert_eq!(semver_parts.len(), 3, "version must be major.minor.patch");
+    assert!(
+        semver_parts.iter().all(|part| part.parse::<u32>().is_ok()),
+        "version components must be numeric: {workspace_version}"
+    );
+
+    for member in ["zu", "log", "core", "server", "app"] {
+        let toml = fs::read_to_string(root.join(member).join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("read {member}/Cargo.toml: {e}"));
+        assert!(
+            toml.lines().any(|l| l.trim() == "version.workspace = true"),
+            "{member}/Cargo.toml must inherit workspace version"
+        );
+    }
+
+    let expected_zu_dep = format!("zu = {{ version = \"{workspace_version}\", path = \"../zu\" }}");
+    for crate_name in ["core", "server"] {
+        let toml = fs::read_to_string(root.join(crate_name).join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("read {crate_name}/Cargo.toml: {e}"));
+        assert!(
+            toml.lines().any(|l| l.trim() == expected_zu_dep),
+            "{crate_name}/Cargo.toml must pin zu dependency to {workspace_version}"
+        );
+    }
+
+    let ui_pkg: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("ui/package.json")).expect("ui/package.json"),
+    )
+    .expect("ui/package.json JSON");
+    assert_eq!(
+        ui_pkg.get("version").and_then(Value::as_str),
+        Some(workspace_version.as_str()),
+        "ui/package.json version must match workspace version"
+    );
+
+    let cfg = config();
+    if let Some(tauri_ver) = cfg.get("version").and_then(Value::as_str) {
+        assert_eq!(tauri_ver, workspace_version, "tauri.conf.json version mismatch");
+    }
+    let icons = cfg["bundle"]["icon"].as_array().expect("bundle.icon array");
+    assert!(!icons.is_empty(), "bundle.icon must not be empty");
+    for icon in icons {
+        let rel = icon.as_str().expect("icon path string");
+        let full = root.join("app").join(rel);
+        assert!(full.is_file(), "configured bundle icon missing: {}", full.display());
+    }
+    let build_num = cfg["bundle"]["macOS"]["bundleVersion"]
+        .as_str()
+        .and_then(|v| v.parse::<u32>().ok())
+        .expect("macOS bundleVersion");
+    assert!(build_num > 66, "bundleVersion must exceed 0.8.6 build 66, got {build_num}");
+
+    let patch = fs::read_to_string(root.join("docs/migrate-0.8.patch"))
+        .expect("docs/migrate-0.8.patch exists");
+    assert!(patch.contains("handover.rs"), "patch missing handover.rs");
+    assert!(patch.contains("LibraryHandover.swift"), "patch missing LibraryHandover.swift");
+    assert!(patch.contains("channel = \"zu\""), "patch missing zu channel");
+}
+
+#[test]
+fn shell_capabilities_and_csp_keep_updater_and_clipboard_off_the_page() {
+    let root = root();
+    let cap: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("app/capabilities/default.json"))
+            .expect("app/capabilities/default.json"),
+    )
+    .expect("capabilities JSON");
+    let windows: Vec<&str> = cap["windows"]
+        .as_array()
+        .expect("windows array")
+        .iter()
+        .map(|w| w.as_str().expect("window label"))
+        .collect();
+    assert_eq!(windows, vec!["main", "captions"]);
+
+    let permissions: Vec<&str> = cap["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .map(|p| p.as_str().expect("permission string"))
+        .collect();
+    for forbidden in ["updater", "clipboard", "shell", "fs", "http"] {
+        assert!(
+            !permissions.iter().any(|p| p.to_ascii_lowercase().contains(forbidden)),
+            "capability permissions must not expose `{forbidden}` to the page: {permissions:?}"
+        );
+    }
+
+    let cfg = config();
+    let csp = cfg["app"]["security"]["csp"].as_str().expect("app.security.csp");
+    assert!(csp.contains("default-src 'self'"), "CSP must anchor default-src 'self': {csp}");
+    for forbidden in ["http://", "https://", "unsafe-eval"] {
+        assert!(!csp.contains(forbidden), "CSP must not contain `{forbidden}`: {csp}");
+    }
+}
+
+#[test]
+fn runtime_sources_contain_no_placeholder_secrets_or_personal_emails() {
+    fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        if dir.is_file() {
+            out.push(dir.to_path_buf());
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_sources(&path, out);
+            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "py")) {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = root();
+    let mut files = Vec::new();
+    for target in ["app/src", "core/src", "server/src", "zu/src", "log/src", "scripts/updates.py"] {
+        collect_sources(&root.join(target), &mut files);
+    }
+    assert!(!files.is_empty(), "expected runtime source files");
+
+    let forbidden = [
+        "-----BEGIN",
+        "sk-or-v1-",
+        "sk-proj-",
+        "@gmail.com",
+        "@icloud.com",
+        "@proton.me",
+        "@outlook.com",
+        "REPLACE_ME",
+        "CHANGEME",
+        "YOUR_API_KEY",
+    ];
+    for file in files {
+        let text =
+            fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        for needle in forbidden {
+            assert!(
+                !text.contains(needle),
+                "runtime source {} must not contain `{needle}`",
+                file.display()
+            );
+        }
+    }
+}

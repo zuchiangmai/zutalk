@@ -140,3 +140,5 @@ handover/
 - `ZuTalkApp.swift`：启动时调用。
 
 这份补丁**没有编译过**：负责人要求这台机器上不随意启动构建，旧仓库的 `vt-ffi` 依赖六百多个 crate。发 0.8.6 之前要在旧仓库里跑 `cargo check -p vt-ffi`、重新生成 UniFFI 绑定、Xcode 构建，再用一份真数据目录的副本在 `CFFIXED_USER_HOME` 下跑一次，核对 `handover/` 的内容。
+
+具体的 `zulangue` 0.8.6 交接构建命令与 Sparkle `zu` 频道双项 `appcast.xml` 发布步骤见 [`docs/RELEASE.md`](RELEASE.md) §4。
