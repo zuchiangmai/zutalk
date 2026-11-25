@@ -17,7 +17,8 @@ record: rt capture live id
 knowledge: rt live record
 ai: rt capture live id record knowledge
 out: rt capture live id record ai
-app: rt capture live id record knowledge ai out
+view: rt capture live record knowledge out
+app: rt capture live id record knowledge ai out view
 '
 
 # Debt: uses that point up and are not paid yet. One row each: the file under core/src, the path
@@ -25,8 +26,6 @@ app: rt capture live id record knowledge ai out
 # grows is new code breaking the rule; one that falls (or a row no longer true) must be lowered
 # or removed here.
 debt='
-record/retain.rs crate::app::proto 1 P2
-record/migrate.rs crate::app::proto 1 P2
 out/city.rs crate::app::proto 1 P5
 out/room.rs crate::app::proto 1 P5
 '

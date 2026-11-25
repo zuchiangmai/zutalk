@@ -7,7 +7,6 @@
 //! id here is the same every time. So a move cut short is done again from the start, and one
 //! that finished, even if the recording was removed since, is never done twice.
 
-use crate::app::proto::Writing;
 use crate::capture::audio::Resampler;
 use crate::capture::clock::{BLOCK, Clock, Gap, RATE};
 use crate::capture::tape;
@@ -109,6 +108,15 @@ struct Owner {
     to: String,
 }
 
+/// One progress report while moving recordings from ZuTalk 0.8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    pub id: String,
+    pub step: &'static str,
+    pub done: u32,
+    pub of: u32,
+}
+
 /// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not
 /// here yet, telling `progress` of each. Returns those it could not move, each by its title
 /// there and a code. `Err`: none could be.
@@ -117,7 +125,7 @@ pub fn run(
     shelf: &Shelf,
     me: &str,
     now: impl Fn() -> i64,
-    mut progress: impl FnMut(Writing),
+    mut progress: impl FnMut(Progress),
 ) -> Result<Vec<(String, String)>, &'static str> {
     let handover = old.join("handover");
     let index = match fs::read(handover.join("index.json")) {
@@ -155,7 +163,7 @@ pub fn run(
         if shelf.known(&id).map_err(|_| "shelf")? {
             continue;
         }
-        progress(Writing { id: id.clone(), step: "moving".into(), done: done as u32, of });
+        progress(Progress { id: id.clone(), step: "moving", done: done as u32, of });
         if let Err(code) = shelve((old, data), shelf, &handed, &id, &now) {
             // Its sound stays where 0.8 has it; a tape of it here would belong to nothing.
             // One left behind is cleared by the next attempt, before anything else.

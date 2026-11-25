@@ -6,7 +6,7 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, NoteOp, Open, Room, Row, Setup, Sound, State, Writing};
+use crate::app::proto::{Change, From, NoteOp, Open, Room, Row, Setup, Sound, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -1165,7 +1165,9 @@ impl Work {
             let started = std::time::Instant::now();
             let outcome = tree
                 .blocking("job.move", move || {
-                    let progress = |writing| {
+                    let progress = |p: migrate::Progress| {
+                        let writing =
+                            Writing { id: p.id, step: p.step.into(), done: p.done, of: p.of };
                         let _ = progress.offer(Msg::Moving(writing)); // dropped: the next one replaces it
                     };
                     migrate::run((&old, &data), &shelf, &me, now, progress)
@@ -1335,9 +1337,18 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Job::DestroyAudio { id, under_way } => {
             let shelf = snapshot(identity).shelf?;
             let tapes = config.tapes();
-            let library: Vec<Row> =
-                shelf.list().map_err(fail)?.iter().map(|r| row(r, &tapes)).collect();
-            retain::destroy(&tapes, &library, under_way.as_deref(), &id)?;
+            let entries: Vec<retain::Entry> = shelf
+                .list()
+                .map_err(fail)?
+                .iter()
+                .map(|r| retain::Entry {
+                    id: r.id.clone(),
+                    started: r.about.started,
+                    draft: r.about.take == 0,
+                    audio: tape::kept(&tapes.join(&r.id)),
+                })
+                .collect();
+            retain::destroy(&tapes, &entries, under_way.as_deref(), &id)?;
             Ok(DeskOut::Changed)
         }
         Job::Export { id, exporter, languages, to } => {
@@ -1760,10 +1771,19 @@ fn run_refresh(
     let mut library: Vec<Row> =
         shelf.list().map_err(fail)?.iter().map(|r| row(r, &tapes)).collect();
     if let Some(keep) = retain {
-        let mut tmp = State { library, ..State::default() };
-        tmp.setup.keep = keep;
-        retain::sweep(&tapes, &mut tmp, now())?;
-        library = tmp.library;
+        let mut entries: Vec<retain::Entry> = library
+            .iter()
+            .map(|r| retain::Entry {
+                id: r.id.clone(),
+                started: r.started,
+                draft: r.draft,
+                audio: r.audio,
+            })
+            .collect();
+        let _ = retain::sweep(&tapes, keep, &mut entries, now())?; // dropped: P2-05 uses destroyed ids to sync index
+        for (row, entry) in library.iter_mut().zip(entries) {
+            row.audio = entry.audio;
+        }
     }
     let read = opened.as_deref().map(|id| shelf.read(id)).transpose().map_err(fail)?;
     let mut open_rec = read.flatten().map(|recording| open(recording, &tapes));

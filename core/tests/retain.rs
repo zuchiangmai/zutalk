@@ -8,7 +8,7 @@ use zutalk_core::app::proto::{Command, Row, Setup, State};
 use zutalk_core::capture::clock::{BLOCK, Block, wall_ms};
 use zutalk_core::capture::tape::{self as tapes, Pass, Writer};
 use zutalk_core::live::lines::Line;
-use zutalk_core::record::retain::goes;
+use zutalk_core::record::retain::{self, Entry, goes};
 use zutalk_core::record::shelf::{About, LINE, RECORDING, Said};
 
 const DAY: i64 = 86_400_000;
@@ -37,6 +37,32 @@ fn audio_stays_until_the_record_is_written_then_as_long_as_the_person_chose() {
     // Whatever the clock says, nothing overflows.
     assert!(goes(Some(u32::MAX), true, i64::MIN, i64::MAX));
     assert!(!goes(Some(u32::MAX), true, i64::MAX, i64::MIN));
+}
+
+#[test]
+fn sweep_destroys_only_due_written_entries_and_returns_their_ids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tapes_root = dir.path();
+    let key = [7; 32];
+    let write_tape = |id: &str| {
+        let mut w = Writer::create(&tapes_root.join(id), &key).expect("tape");
+        w.append(&Block { t_ms: 0, pcm: vec![100; BLOCK] }).expect("block");
+    };
+    for id in ["due", "fresh", "draft_old"] {
+        write_tape(id);
+    }
+    let mut entries = vec![
+        Entry { id: "due".into(), started: NOW - 10 * DAY, draft: false, audio: true },
+        Entry { id: "fresh".into(), started: NOW - 2 * DAY, draft: false, audio: true },
+        Entry { id: "draft_old".into(), started: NOW - 20 * DAY, draft: true, audio: true },
+        Entry { id: "no_audio".into(), started: NOW - 20 * DAY, draft: false, audio: false },
+    ];
+    let destroyed = retain::sweep(tapes_root, Some(7), &mut entries, NOW).expect("sweep ok");
+    assert_eq!(destroyed, vec!["due".to_string()]);
+    assert!(!entries[0].audio && !tapes::kept(&tapes_root.join("due")));
+    assert!(entries[1].audio && tapes::kept(&tapes_root.join("fresh")));
+    assert!(entries[2].audio && tapes::kept(&tapes_root.join("draft_old")));
+    assert!(!entries[3].audio);
 }
 
 #[test]

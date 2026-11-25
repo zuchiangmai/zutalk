@@ -8,10 +8,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Once};
 use zu::{Pack, SecretKey};
-use zutalk_core::app::proto::Writing;
 use zutalk_core::capture::tape::{self, Pass};
 use zutalk_core::id::keys;
-use zutalk_core::record::migrate::{self, Handed};
+use zutalk_core::record::migrate::{self, Handed, Progress};
 use zutalk_core::record::shelf::{About, LINE, RECORDING, Shelf};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
@@ -47,7 +46,7 @@ type Said = Result<Vec<(String, String)>, &'static str>;
 /// A way the 0.8 folder can be wrong, the recording it hurts, its title, and the code said.
 type Case = (&'static str, fn(&Path), (&'static str, &'static str, &'static str));
 
-fn run(old: &Path, data: &Path, me: &str) -> (Said, Vec<Writing>) {
+fn run(old: &Path, data: &Path, me: &str) -> (Said, Vec<Progress>) {
     let mut told = Vec::new();
     let moved = migrate::run((old, data), &shelf(data, me), me, || NOW, |w| told.push(w));
     (moved, told)

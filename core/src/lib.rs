@@ -12,3 +12,4 @@ pub mod live;
 pub mod out;
 pub mod record;
 pub mod rt;
+pub mod view;
