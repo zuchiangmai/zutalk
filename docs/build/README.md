@@ -31,9 +31,9 @@
 | `dropped.sh` | 所有 `let _ =`、行首 `_ =`、`drop(…send/join/spawn…)`、`.ok();` 必须同行写 `// dropped: <why>` |
 | `hub.sh` | `core/src/app/hub.rs` 零磁盘/网络 IO、零阻塞生成，且 `.await` 仅出现在邮箱收信一处 |
 | `shell.sh` | `app/src` 全部 `#[tauri::command]` 为 `async fn`，无 `Mutex`/`RwLock`、无阻塞主线程查询、无 `block_on` |
-| `pending.sh` | 仓库中不许残留 `ignore = "P1-` 的挂起测试（指向 `P2` 及以后各期的允许保留） |
+| `pending.sh` | 仓库中不许残留 `ignore = "P1-` 或 `ignore = "P2` 的挂起测试（指向 `P3` 及以后各期与真机手工测试允许保留） |
 
-**欠账表（`debt`）与「以后」表（`later`）的规矩**：`layers.sh`、`bounded.sh`、`spawn.sh` 里若记录尚未重写的既有例外（`debt`）或留给后续阶段的服务器项（`later`），每行写明文件路径、精确处数与还账阶段。脚本数出的实际处数必须**正好等于**表里的数字——多了报错（防新代码犯规），少了也报错（催把表改小或删行）。因此欠账只能减不能加；截至 P1 收尾，`bounded.sh` 与 `spawn.sh` 中 `core/src`、`app/src` 的欠账均为零。
+**欠账表（`debt`）与「以后」表（`later`）的规矩**：`layers.sh`、`bounded.sh`、`spawn.sh` 里若记录尚未重写的既有例外（`debt`）或留给后续阶段的服务器项（`later`），每行写明文件路径、精确处数与还账阶段。脚本数出的实际处数必须**正好等于**表里的数字——多了报错（防新代码犯规），少了也报错（催把表改小或删行）。因此欠账只能减不能加；截至 P2 收尾，`bounded.sh` 与 `spawn.sh` 中 `core/src`、`app/src` 的欠账均为零，`layers.sh` 的 P2 欠账（`record/retain.rs`、`record/migrate.rs`）已清零，仅余 P5 两项（`out/city.rs`、`out/room.rs`）。
 
 ## 文件
 

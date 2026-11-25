@@ -1525,9 +1525,9 @@ async fn every_command_leaves_its_kind_its_answer_and_nothing_it_carried() {
         assert!(!rendered.contains(secret_query), "query leaked into log: {line:?}");
     }
     let tally = app.core.stats().tally();
-    assert_eq!(tally.counts.iter().find(|r| r.name == "commands.done").map(|r| r.n), Some(4));
+    assert_eq!(tally.counts.iter().find(|r| r.name == "commands.done").map(|r| r.n), Some(3));
     assert!(
-        tally.spreads.iter().find(|r| r.name == "hub.turn_us").is_some_and(|r| r.n >= 4),
+        tally.spreads.iter().find(|r| r.name == "hub.turn_us").is_some_and(|r| r.n >= 3),
         "{:?}",
         tally.spreads
     );

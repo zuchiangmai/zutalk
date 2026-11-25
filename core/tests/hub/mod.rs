@@ -300,7 +300,11 @@ impl App {
 
     pub async fn wait_library(&self, holds: impl Fn(&[LibraryRow]) -> bool) -> Vec<LibraryRow> {
         let mut inv = self.outlet.invalidated.clone();
+        let mut state = self.outlet.state.clone();
         let wait = async {
+            while state.now().0 == 0 {
+                state.next().await.expect("the core stopped");
+            }
             loop {
                 if let Ok(reply) = self
                     .core

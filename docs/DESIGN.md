@@ -22,6 +22,8 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 出口  一条录音或现场字幕 → room：在本机封好 → 我们服务器上的房间（只有密文）→ 拿到链接的人用观看页打开
 交城  一条录音 → city（后台一次一件）：本人签名、写明给哪座城的记录 → 城的 Zu 主机；音频经 tape::Pass::City 分段作文件
 搬入  0.8 交接的正文 → migrate（后台一次一件）：签成本人的记录，音频解开后重新封进 tape → shelf
+查询  shelf 事实 → desk 单写同步 → 本机 SQLite + FTS5 投影索引 → L3 ViewEngine（只读 WAL、并发限 8、同槽可取消）→ 界面按块分页拉取
+      （事实变化时仅发轻量的 Invalidate { view, key, version }，State 保持有上限的小状态）
 ```
 
 ## 3. 概念，各只有一个家
@@ -43,7 +45,9 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 词表 | 本人要听对、写对的人名和词：怎么说，各语言怎么写。一个词一条记录 | `glossary`、`shelf` |
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
 | 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
-| 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：小状态（`State`，P2 瘦身成 `Shell`）变了整份发；信号（`Frame`、`Session`、`Level`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs` |
+| 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：有上限的小状态（`State`，13 个定界字段，不含资料库/正文/搜索/词表/日历）变了整份发；信号（`Frame`、`Session`、`Level`、`Progress`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；失效环（`Invalidations`）保留最近 64 条合并后的 `Invalidate`；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs`、`view/query.rs` |
+| 视图与投影索引 | 会随录音和资料增长的数据（按月统计、分页列表、全文检索、单场详情、64 行分块正文与两版对比、词表、日历、对外记录）全部由 `ViewEngine::query`（L3 `Tree::blocking` 并发限 8、同槽取消）按需拉取；本机 SQLite + FTS5 `trigram`（加 1–2 字短词回退）是可丢弃重建的投影加速器 | `view/index.rs`、`view/transcript.rs`、`view/query.rs` |
+| 笔记与多版本精修 | 带时间与行锚点的多条 `talk/note`（向后兼容旧单串笔记，空文本即标记）；`talk/line` 支持读取任意旧 `take` 与版本列表；精修生命周期由 `RefineStatus` 状态机与 `Journal.failed` 持久化表达，支持 `Command::Refine` 手动触发、重试与再精修 | `record/notes.rs`、`record/takes.rs`、`ai/write.rs` |
 | 寄存器 | `Register<T>` / `Reading<T>`：最新值加单调序号的 `watch` 薄包装，非阻塞、多写多读，晚来的读者立刻拿到最新一份 | `rt/signal.rs` |
 | 水位线与判断 | 各部件只原子写进度位置（`Gauge`）；录音看守 1 Hz 采样得 `Water`，纯函数 `judge` 对照预算表 `BUDGETS` 得出 `Live` / `Slow` / `Stalled` / `Dead` 与动作，`due` 保证同一停滞只行动与留现场一次 | `rt/water.rs`、`app/recording.rs` |
 | 端口（声音、连接、带子） | `Hear`、`Dial`、`Reels`（外加 `Drafts`、`Devices`、`Clip`、`Install`）：挂在 `Config` 上的薄端口，生产接真实设备/网络/磁盘，测试换暂停时钟下的确定替身 | `capture/audio.rs`、`live/wire.rs`、`capture/tape.rs`、`app/core.rs` |
@@ -56,7 +60,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 ## 4. 模块
 
-文件的路径相对于 `core/src`（`log`、`shell`、`ui`、`server` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`id`、`live`、`record`、`knowledge`、`ai`、`out`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1）。
+文件的路径相对于 `core/src`（`log`、`shell`、`ui`、`server` 除外）。`core/src` 下的目录是 `PLAN.md` §5.1 的层：`rt`、`capture`、`id`、`live`、`record`、`knowledge`、`ai`、`out`、`view`、`app`；每一层的模块文件（`rt.rs`、`capture.rs`……）开头写着这一层的预算和不许做的事；每一层只用它下面的层，表在 `scripts/build/rules/layers.sh` 里（`docs/build/phases/P1.md` §3.1、`docs/build/phases/P2.md` §3.1）。
 
 | 模块 | 文件 | 做什么 |
 |---|---|---|
@@ -65,12 +69,13 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `capture` | `capture.rs`、`capture/audio.rs`、`capture/audio/file.rs`、`capture/clock.rs`、`capture/tape.rs` | 麦克风/电脑声音（cpal）与音频文件；重采样、混音、补静音、具名线程与重开；采集时钟与 `wall_clock_policy`；加密分钟块 `tape`、静音补洞、崩溃截尾与销毁 |
 | `id` | `id.rs`、`id/keys.rs` | 身份（本机 `did:key` 与登录 `did:zu`，状态机 `Who`）、秘密文件与钥匙库、各服务钥匙来源（`From`）与 `Chain`、派生密钥、对服务器的签名请求、旧版邀请认领 |
 | `live` | `live.rs`、`live/wire.rs`、`live/lane.rs`、`live/frame.rs`、`live/lines.rs`、`live/lang.rs` | 实时连接端口 `Dial`、每栏一条 `lane`（重连、换钥匙、取钥匙时限、跳直播沿）、增量组帧器 `Composer` 与 8 KB `fit`、断句规则、各语言档案与逐字显现单位 |
-| `record` | `record.rs`、`record/shelf.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录列表、读、改、删与撤销、搜索、`Writer` 与草稿空缺 `DraftGap`）；音频保留与销毁清扫；0.8 交接搬运 |
+| `record` | `record.rs`、`record/shelf.rs`、`record/notes.rs`、`record/takes.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录读写、改、删与撤销、`Writer`、O(1) 草稿写手 `DraftWriter` 与 `DraftGap`）；带时间/锚点的多条笔记 `notes`；多版本读取与精修状态机 `takes`；音频保留与清扫 `retain`；0.8 交接搬运 `migrate` |
 | `knowledge` | `knowledge.rs`、`knowledge/glossary.rs` | 词表（读写、给现场各流的 `terms`/`translation_terms` 与整场转写的 `Plan.terms`；P6 升级为 `topic.rs`） |
-| `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed` |
+| `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed`、精修失败状态持久化 |
 | `out` | `out.rs`、`out/export.rs`、`out/room.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；房间密文封帧与写槽；交城日历、签名上传与分段音频 |
-| `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口；零 IO 状态机 `hub`（含 `Boot`）；与界面协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`、并发搜索/导出、串行后台与自检包 `work` |
-| `shell` | `app/src/lib.rs`、`app/src/main.rs`、`app/src/pump.rs`、`app/src/beat.rs`、`app/src/windows.rs`、`app/src/updates.rs` | 无锁全 async 的 Tauri 外壳：独占推送状态机 `Fan`、非阻塞主线程心跳 `Beat` 与帧间隔记账、不查询主线程的字幕窗显隐、无锁更新检查与安装任务 |
+| `view` | `view.rs`、`view/index.rs`、`view/transcript.rs`、`view/query.rs` | L3 可丢弃本机投影层：SQLite WAL + FTS5 `trigram` 索引与自动重建/对账/增量同步、64 行正文分块与纯函数对比、并发限 8 可取消 `ViewEngine` 与有界 `Invalidations` 环 |
+| `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口（含 `Core::query`）；零 IO 状态机 `hub`（含 `Boot`）；瘦身后的协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`（单写 SQLite 同步）、导出、串行后台精修/交城/搬运与自检包 `work` |
+| `shell` | `app/src/lib.rs`、`app/src/main.rs`、`app/src/pump.rs`、`app/src/beat.rs`、`app/src/windows.rs`、`app/src/updates.rs` | 无锁全 async 的 Tauri 外壳：异步 `query` 命令、独占推送状态机 `Fan`（含 `Progress` 与 `Invalidate` 转发/溢出降级）、非阻塞主线程心跳 `Beat`、不查询主线程的字幕窗显隐、无锁更新任务 |
 | `ui` | `ui/src`（含 `ui/src/lib/vitals.ts`） | 主窗口、字幕窗、观看页；rAF 帧间隔采样与每秒 `drawn` 回报 |
 | `server` | `server/src/lib.rs`、`server/src/main.rs`、`server/src/ledger.rs`、`server/src/relay.rs`、`server/src/room.rs` | 授予、取钥与认领账本、登录中继、密文房间与结构化请求日志 |
 
@@ -78,7 +83,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 ### 5.1 现场草稿逐行落盘
 
-`shelf::Writer` 是往一个 pack 里加记录的唯一写法：它记得每条路径现在指向哪些记录，所以加一条不用把 pack 重读一遍。`Shelf::put` 就是开一个 `Writer`、写、同步。录音开始时枢纽为这条录音的 `lines.jsonl` 开一个 `Writer`，第一条流每说完一行，就在 `<id>.0.<n>` 加一条记录；漏掉的一段也是一行（文字是 `…`，标为不完整）。录到一半崩溃，已经说完的行都在磁盘上（进程崩溃不丢；断电只保证到上一次同步）。拿不到整场转写的人，记录就停在这份草稿上。测试：`the_live_draft_is_kept_line_by_line_and_reads_back_as_take_0`，以及枢纽测试里录音进行中就能读到草稿的那一段。
+`shelf::Writer` 是往一个 pack 里加并覆写记录的写法：它记得每条路径现在指向哪些记录，所以加一条不用把 pack 重读一遍。`Shelf::put` 就是开一个 `Writer`、写、同步。现场草稿行键（`<id>.0.<n>`）严格唯一永不覆写，P2 起录音开始时枢纽改用 `Shelf::open_draft` 返回的 `DraftWriter`（固定 48 字节、`O(1)` 内存，不保留逐行 `heads` 表），第一条流每说完一行就追加一条记录；漏掉的一段也是一行（文字是 `…`，标为不完整）。录到一半崩溃，已经说完的行都在磁盘上（进程崩溃不丢；断电只保证到上一次同步）。拿不到整场转写的人，记录就停在这份草稿上。测试：`the_live_draft_is_kept_line_by_line_and_reads_back_as_take_0`、`i3_rebuild_queries_and_draft_stay_within_bounds`，以及枢纽测试里录音进行中就能读到草稿的那一段。
 
 ### 5.2 导入与导出
 
@@ -221,8 +226,8 @@ P1 已将 `PLAN.md` §4 与 `docs/build/phases/P1.md` §3 落地：现场路径�
 ### 5.14 显式与可观测
 
 - **日志**：写到 `<数据目录>/logs/zutalk.jsonl`（服务器为 `<ZUTALK_DATA>/logs/zutalk-server.jsonl`），每行平铺 JSON（`t_ms`、`seq`、`level`、`component`、`event` 加事件字段），按 8 MB 轮换、留 5 个；发事件的人走 4096 行有界队列，从不等磁盘。
-- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节与自检包。全部 66 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`pending.sh` 共 9 个规则脚本在门禁里守着。
-- **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
+- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节（含笔记、搜索词与精修）与自检包。全部 72 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`pending.sh` 共 9 个规则脚本在门禁里守着。
+- **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`；索引重建看 `index.open` 与 `index.sync`；查询变慢看 `query.slow` 与 `query.done`；精修失败看 `refine.state` 与 `write.skipped`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
 
 ### 5.15 不登录也能录
 
@@ -232,6 +237,29 @@ P1 已将 `PLAN.md` §4 与 `docs/build/phases/P1.md` §3 落地：现场路径�
 - **要登录的命令是一张表**：`Command::needs_person`（P1 为 `Share`、`Unshare`、`File`）在 hub 分派前拦下并回 `sign_in.first`，什么都不写；录音、导入、改标题、搜索、导出、词表、销毁音频、开字幕窗均不需登录，且没登录不向我们的服务器发任何请求。
 - **没有钥匙是一种录法，不是故障**：各服务钥匙来源收口在 `id/keys.rs::From`（`Nowhere` / `Own` / `Granted`）；开录前由 `lane::captions` 决定是否开流，无钥匙时不开 lane、状态为 `AudioOnly { why: "captions.no_key" }`、全程安静只录音；散场后由 `write::owed` 判为 `Waits("keys.none")`，草稿静候（发 `write.skipped`），设置里填入自有钥匙后自动清点补写。
 - **P1 到 P4 之间的过渡**：登录后把本机书架领回本人 DID 留在 P4（`DECISIONS.md` 第 11 条）。在此之前，登录看到本人 DID 的书架、登出回到本机书架，两边互不挪动、什么都不丢；一场录音由开始时的身份签到底。
+
+### 5.16 数据层、投影索引与视图查询（P2）
+
+P2 将 `PLAN.md` §2（事实/视图/小状态/信号）与 `docs/build/phases/P2.md` 全部落地，并还清 `layers.sh` 的两处 P2 欠账（`record/retain.rs`、`record/migrate.rs` 脱离 `app::proto`）：
+
+- **事实扩展（`record/notes.rs`、`record/takes.rs`、`record/shelf.rs`、`ai/write.rs`）**：
+  - `talk/note` 键格式为 `<id>.<at_ms:010>.<rand:08x>`，正文 `{ at, text, anchor? }`，支持边录边记（录音中不拦）、空文本作锚定标记（`DECISIONS.md` 第 2 条），并对旧单串笔记（键 `<id>`）向后兼容；新增 `Command::Note`（`Add` / `Edit` / `Remove`）。
+  - `takes::list` 与 `takes::read` 可读出 `lines.jsonl` 里的任意历史 `take`（例如 `take 0` 现场稿与 `take 1` 精修稿）；`RefineStatus`（`Draft` / `Refining` / `Refined` / `Failed`）经纯函数 `refine_step` 转换并发 `refine.state`，失败代码写入 `tape/<id>/write.json`（`Journal.failed`，含额度钥匙被异步转写拒绝时的 `keys.async_refused`）；新增 `Command::Refine { id }` 手动触发、重试与再精修。
+  - 现场草稿改用 `DraftWriter`（`Shelf::open_draft`，结构体 48 字节、不留逐行 `heads` 映射），写 10,000 行内存恒为 `O(1)`。
+- **可丢弃的本机 SQLite + FTS5 投影索引（`view/index.rs`）**：
+  - 核心仅增一项依赖 `rusqlite = { version = "0.37", features = ["bundled"] }`（静态内嵌 SQLite + FTS5 `trigram`，无系统版本差异）。
+  - 索引文件落在 `<data>/index/<did>.sqlite3`（WAL 模式、`INDEX_BUSY_TIMEOUT_MS = 200`、`INDEX_SCHEMA_VERSION = 1`），由 `desk` 独占单写（通过有序 `IndexSync` 作业加 oneshot 提交回执保证落盘后可见），由 `ViewEngine` 以 `SQLITE_OPEN_READ_ONLY` 并发只读。
+  - 打开前经 `IndexHealth` / `open_plan` 探测：缺失、损坏、版本变化或换身份均自动删库并逐条流式重建（`O(1)` 内存，发 `index.open`）；健康库启动时按 `(size, mtime_ns)` 快速对账。
+  - 搜索支持标题、当前版正文、译文与笔记，全部经 `lang::profile::key` 归一化（NFKC、小写、泰文 SARA AM 统一）；≥ 3 字符走 FTS5 `trigram`，1–2 字符自动回退归一化子串扫描。
+- **分块正文与纯函数对比（`view/transcript.rs`）**：
+  - `Transcript` 固定 `TRANSCRIPT_CHUNK_LINES = 64` 行一块（带 `total_lines` / `total_chunks`）；`Compare` 按时间区间重叠（`[t0, t1]`）对齐两版并跑有界字符级 LCS（`DIFF_LCS_MAX_BYTES = 1_024`），产出满足文本重建的 `DiffOp`。
+- **L3 查询引擎、小状态瘦身与外壳转发（`view/query.rs`、`app/core.rs`、`app/proto.rs`、`app/src/pump.rs`）**：
+  - `State` 瘦身为 13 个定界字段，彻底移除 `library`、`open`、`hits`、`terms`、`city`、`writing`、`filing`、`moving` 与旧命令 `Open`/`Close`/`Search`。
+  - 新增 `Outlet.progress`（`Progress { refine, filing, moving }`，≤ 3 槽）与 `Outlet.invalidated`（`Invalidations` 合并环，上限 `KEEP_INVALIDATIONS_EVENTS = 64`）。
+  - `Core::query` 与 Tauri `#[tauri::command] async fn query` 走 `ViewEngine::query`（`Tree::blocking` 并发限 `QUERY_CONCURRENT_MAX_JOBS = 8`，同 `QuerySlot` 新查询取消并 `InterruptHandle::interrupt()` 打断旧查询，超 `QUERY_BUDGET_MS = 100` 发 `query.slow`）。
+  - `app/src/pump.rs` 转发 `Signal::Progress`（订阅时重放当前值）与 `Event::Invalidate`（仅当合并环满 64 条且版本号断层时才降级为 7 个 `ViewKind` 的粗粒度全量失效）。
+
+测试：`core/tests/notes.rs`、`core/tests/takes.rs`、`core/tests/view.rs`、`core/tests/view_scale.rs`（1,000 条录音全查询 ≤ 8 ms、10 小时 6,400 行分块与对比 ≤ 13 ms、I2 并发查询不卡字幕、I3 重建与 `Tally = 390 B` 边界、I8 单块代价与时长无关）、`core/tests/liveness.rs::i8_what_one_change_sends_does_not_grow_with_the_library`（5 条 vs 100 条 `State` 字节数比 `1.00`）。
 
 ## 6. 各模块的大小（上限已取消）
 
@@ -325,5 +353,5 @@ Zu 内核另计：1,550 / 1,550（为造 `did:zu` 从 1,500 调高，负责人�
 9. 0.8 那边的补丁没有编译，也没有对真数据跑过；Sparkle 频道挡住越过交接的更新，没有在真机上验。新版这边只用合成的交接验过，175 条的真库没有跑过。
 10. 真的城没有收过：交城只对本机端口上的替身跑过（§5.11）。
 11. 真机 1 小时实录没有跑过（出口 E9，待负责人按 `docs/build/reports/P1-26-close.md` 清单在 macOS / Windows / Linux 上执行）。
-12. I2 的大数据规模（10 万行搜索、175 条真库搬运）没有量过：P1 只证明了互不相干，规模留到 P2（1,000 条录音索引）和 P7（175 条真数据副本）量。
+12. 175 条真库搬运（P7）尚未在真数据副本上跑过；I2 与大数据规模的 1,000 条录音索引查询与 10 小时（6,400 行 × 2 版）分块/对比已在 P2 `core/tests/view_scale.rs` 中实测通过（全部 ≤ 13 ms，并发查询下直播零 `Stalled`）。
 13. 本机身份（`did:key`）签出的记录没有交给任何真的 Zu 主机试过：照规范它们会拒绝，仓库里只对本机服务器替身测过。

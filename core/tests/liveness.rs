@@ -1265,12 +1265,17 @@ async fn i2_background_work_runs_beside_a_recording() {
     assert_eq!(len_ms as u64, mic_blocks * u64::from(BLOCK_MS), "tape length mismatch");
 
     let done = bench.seen().of("job.done");
-    for kind in ["search", "move", "write"] {
+    for kind in ["move", "write"] {
         assert!(
             done.iter().any(|l| l.text("kind") == Some(kind) && l.text("code") == Some("ok")),
             "expected job.done({kind}, ok) in {done:?}"
         );
     }
+    let queries = bench.seen().of("query.done");
+    assert!(
+        queries.iter().any(|l| l.text("view") == Some("search") && l.text("code") == Some("ok")),
+        "expected query.done(search, ok) in {queries:?}"
+    );
     assert!(
         !bench.seen().of("judge.verdict").iter().any(|l| l.text("to") == Some("Stalled")),
         "no stage should be judged Stalled during healthy background work"
@@ -2786,7 +2791,7 @@ async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
     bench.setup(&["en", "zh"], &["en", "zh"]).await;
     let rec_id = bench.start_recording().await;
 
-    // 20 varied commands & queries spread across 5 virtual minutes of recording.
+    // 20 varied commands (plus concurrent L3 queries) spread across 5 virtual minutes of recording.
     for i in 0..20usize {
         tokio::time::sleep(Duration::from_millis(15_000)).await;
         match i % 5 {
@@ -2796,9 +2801,18 @@ async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
             }),
             1 => {
                 let _ = bench.query(Query::Search { query: "findme".into(), limit: 50 }).await;
+                bench.send(Command::Note {
+                    id: existing.into(),
+                    op: NoteOp::Add {
+                        at_ms: i as u32 * 1_000,
+                        text: format!("Note {i}"),
+                        anchor: None,
+                    },
+                });
             }
             2 => {
                 let _ = bench.query(Query::Recording { id: existing.into() }).await;
+                bench.send(Command::Captions { show: i % 2 == 0 });
             }
             3 => bench.send(Command::Captions { show: i % 2 == 0 }),
             _ => bench

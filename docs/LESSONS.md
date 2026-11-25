@@ -75,3 +75,11 @@
 - **寄存器只留最新值，测试不能等一闪而过的中间状态。** `Register<T>` 是 `watch` 的最新值语义，连续两次写入之间读者可能跳过前一次；断言状态跃迁或事件轨迹应查结构化日志或稳定终态，而非赌能拦到寄存器里的瞬态值。
 - **测试要看见核心在别的线程上发的事件，任务就得从树上起。** `tracing` 的线程局部接收者默认不跨 `spawn` / `spawn_blocking` / 线程；全仓统一走 `Tree::spawn` / `Tree::keep` / `Tree::blocking` / `rt::supervise::thread` 自动带走 `zutalk_log::carry` / `carrier`，才让并发测试各看各的日志、互不串台。
 - **事件的字段由类型管着，一句话根本编不进日志。** 用 `Plain` trait 把事件字段收紧为数、布尔、`&'static str` 和显式 `Id(..)` 后，对话内容、标题、搜索词或秘密连编译都过不去；同时在调用点写 `zutalk:<代码>` 记号，既隔离第三方库日志，又让测试 crate 自己发的事件也能被捕获。
+
+## P2 里学到的（2026-11）
+
+- **FTS5 `trigram` 原生只索引 ≥ 3 字符，中文 1–2 字必须显式回退，且索引和查询要共用同一归一化函数。** SQLite `trigram` 对「押金」这类 2 字词不会建三元组；对 1–2 字符在 `search_docs.norm_text` 上做 `instr` 子串扫描（1,000 条录音实测 7.37 ms）既不引外部分词库又不漏结果。同时索引与查询统一走 `lang::profile::key`（NFKC + 小写 + 泰文 SARA AM 规整），才保证泰文异写和全半角大小写一致命中。
+- **单写多读 WAL 配合 `InterruptHandle` 取消与 `IndexSync` 提交回执，才既不挡查询又不读到旧库。** 写入全归 `desk` 一把连接，并发查询在 `ViewEngine` 信号量（上限 8）内开只读连接并登记 `InterruptHandle`，新查询同槽立即打断旧 SQL；而后台任务（精修、录音收尾、交城、搬运）写完事实后必须经 `IndexSync` 带 oneshot 回执等 SQLite 事务提交再发 `Invalidate`，否则界面收到失效立刻查库会读到未提交的旧快照。
+- **现场草稿行键永不覆写，不该用通用 `Writer` 留一辈子 `heads` 映射。** 通用 `shelf::Writer` 为支持同路径覆写会保留每条路径的 `heads`，10 小时草稿会白占数千项；拆出专用的只追加 `DraftWriter`（结构体仅 48 字节、`O(1)` 内存），写 10,000 行不涨内存，且落盘格式与 `Writer` 完全一致。
+- **合并型失效环的溢出判定不能只看版本号差值，必须看环是否真被挤满。** `Invalidations::push` 按 `(view, key)` 合并旧条目，合并本身会让 `items[0].version` 跳号；外壳 `PumpState` 只有在 `items.len() >= 64` 且 `invalidated_at + 1 < first.version` 时才判定发生了溢出并降级为 7 类粗粒度失效，避免正常合并误触发全量重刷。
+- **固定上限的统计表是一种硬预算。** `Stats` 有固定行数上限（计数 40、高水位 4、分布 12、队列 16）和 8 KB 序列化上限；P2 新增 4 个计数和 2 个分布时同步移除了淘汰的 `search.stale`，并把 `stats.full == 0` 与 `Tally <= 8192 B` 写进规模压测断言，防止指标悄悄超标失明。

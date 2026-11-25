@@ -30,7 +30,7 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 
 | 字段 | 意思 |
 |---|---|
-| `rec` | 录音的 id（开始时间十六进制加八位随机十六进制）。只有 `recording.*`、`session.status`、`stall.snapshot` 带；其他事件靠时间归属（同一时刻至多一场录音） |
+| `rec` | 录音的 id（开始时间十六进制加八位随机十六进制）。只有 `recording.*`、`session.status`、`refine.state`、`stall.snapshot` 带；其他事件靠时间归属（同一时刻至多一场录音） |
 | `lane` | 第几条 lane（0 起；无 lane 的水位格为 `-1`） |
 | `stage` | 水位表的哪一格（`Capture` / `Tape` / `Draft` / `Sent` / `Heard` / `Final` / `Frame` / `Shell` / `Screen`） |
 | `part`、`task`、`tree`、`thread`、`queue`、`window` | 源码里写死的部件、任务、树、线程、队列名，或窗口标签 |
@@ -209,3 +209,6 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | **录音自己结束了** | 先搜 `recording.end`（级别 `error`）和紧挨其前的 `recording.phase` | 看 `recording.end` 的 `code`：`audio.stalled` 向上追 `judge.verdict(Capture)` 和 `capture.source.*`；`asleep` 追 `capture.end`；`tape` 追 `queue.full(queue = "tape")` 与 `keep.lost`、`part.state(part = "tape")`；若停在收尾卡住，看最后一条 `recording.phase` 的 `to`（停在哪一步 `Closing.*`） |
 | **界面卡了** | 先搜 `shell.main_thread.stalled`、`ui.frame.gap`、`judge.verdict`（`Shell` / `Screen`） | 有 `shell.main_thread.stalled` 说明外壳主线程被系统或回调堵住，等 `shell.main_thread.back` 看持续多久；有 `ui.frame.gap` 说明前端渲染掉帧（看 `window`、`gap_ms`、`n`）；`Shell` 停滞则追 `shell.join`、`shell.sink.gone`、`part.state(part = "shell.pump")` |
 | **命令没反应** | 先搜 `command.refused`、`command.done`、`hub.turn.slow`、`job.start`、`job.done` | 有 `command.refused(busy)` 看 `queue.full(hub.mail)`；有 `command.done` 且 `code != "ok"`（如 `starting`、`sign_in.first`、`busy`）直接读 `code`；`command.done(ok)` 后没结果，对照同 `kind` 的 `job.start` 有没有配对的 `job.done`，没有则说明卡在阻塞活或网络里（看自检包 `tasks.json` 或快照里的 `task.running`） |
+| **索引损坏或重建** | 先搜 `index.open`、`index.sync`、`stat.count(name = "index.rebuilds")` | 看 `index.open` 的 `mode` 与 `why`：`missing` / `version` / `owner` 属正常重建，`corrupt` 表示原 SQLite 库损坏并已从 `Shelf` 自动流式重建（看 `rows` 与 `ms`）；若平时写后列表不更新，搜 `index.sync` 看 `op` 与 `code != "ok"` 或对账 `job.done(kind = "index.sync")` |
+| **慢查询或被取消** | 先搜 `query.slow`、`query.done`、`view.invalidate`（开 `debug`） | 有 `query.slow` 直接看是哪种 `view` 超了 100 ms 预算以及 `ms`；再对照 `query.done` 的 `code`（`cancelled` 表示同槽被更新的查询打断，属正常；`starting` 表示启动尚未就绪；`index` 表示读 SQLite 失败）与 `rows`，并看 `stat.spread(name = "query.ms")` 的 p50/p99 |
+| **精修失败或停在草稿** | 先搜 `refine.state`、`write.skipped`、`job.start` / `job.done`（`kind = "write"`）、`job.again` | 看 `refine.state` 的 `from -> to` 与 `why`：到 `Failed` 且 `why = "keys.async_refused"` 说明额度钥匙被异步转写拒绝，需填自有钥匙后重发 `Command::Refine`；无 `refine.state` 而有 `write.skipped(why = "keys.none")` 说明当前无钥匙、草稿在静候；频繁 `job.again(kind = "write")` 表示远端可重试故障正在退避 |
