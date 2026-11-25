@@ -1,0 +1,6 @@
+阶段：P4（身份、按服务每日额度与本机记录领回）
+状态：通过
+基线：c158d5d81eea2b103f7562cf8ffe7b2d1194494c
+收尾提交：927dfcf03929f74df10e450dea3dc6902587ccb3
+审查记录：docs/build/reviews/P4-r1.md、docs/build/reviews/P4-r2.md（结论：通过）
+全量门禁：RUSTC_WRAPPER="" scripts/build/check.sh — check: all green（10/10 规则全绿，Rust 738 passed / 0 failed / 6 ignored，UI 13 files / 98 passed，零新增外部依赖）
