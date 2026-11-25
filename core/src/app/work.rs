@@ -1254,13 +1254,21 @@ impl Work {
                     let gone = host::write(&ours, &room_id, None, Write::Gone).await;
                     if gone.is_ok() || matches!(gone, Err(End::Fatal("room.gone"))) {
                         let clear_data = data.clone();
-                        let res =
-                            tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await;
+                        let clear_id = room_id.clone();
+                        let res = tree
+                            .blocking("host.lock", move || {
+                                host::clear_lock_if(&clear_data, &clear_id)
+                            })
+                            .await;
                         let _ = res; // dropped: best-effort lock cleanup after cancel
                     }
                 } else {
                     let clear_data = data.clone();
-                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: best-effort lock cleanup after failed make
+                    let clear_id = room_id.clone();
+                    let res = tree
+                        .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
+                        .await;
+                    let _ = res; // dropped: best-effort lock cleanup after failed make
                 }
                 info!("job.done", kind = "host.make", job = seq, code = "cancelled", ms = ms);
                 clear_active_if_gen(&host_live, host_gen);
@@ -1294,7 +1302,11 @@ impl Work {
                 Err(end) => {
                     let c = code(end);
                     let clear_data = data.clone();
-                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: best-effort lock cleanup after failed make
+                    let clear_id = room_id.clone();
+                    let res = tree
+                        .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
+                        .await;
+                    let _ = res; // dropped: best-effort lock cleanup after failed make
                     warn!("job.done", kind = "host.make", job = seq, code = c, ms = ms);
                     jobs_failed.add(1);
                     clear_active_if_gen(&host_live, host_gen);
@@ -1318,8 +1330,9 @@ impl Work {
     }
 
     /// Cancels `host.slot`, sends `gone` using the room's original `Ours` snapshot, and clears
-    /// `host.lock` once confirmed. Returns `true` if a room teardown task was started.
-    pub(crate) fn host_stop_room(&self) -> bool {
+    /// `host.lock` if it still names this room once confirmed. Returns `true` if a room teardown
+    /// task was started.
+    pub(crate) fn host_stop_room(&self, stop_gen: u64) -> bool {
         let active = self.host_live.lock().unwrap_or_else(PoisonError::into_inner).take();
         let Some(active) = active else {
             return false;
@@ -1346,7 +1359,11 @@ impl Work {
             match gone {
                 Ok(_) | Err(End::Fatal("room.gone")) => {
                     let clear_data = data.clone();
-                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: lock cleanup after confirmed gone
+                    let clear_id = active.room_id.clone();
+                    let res = tree
+                        .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
+                        .await;
+                    let _ = res; // dropped: lock cleanup after confirmed gone
                     info!("job.done", kind = "host.gone", job = seq, code = "ok", ms = ms);
                     jobs_done.add(1);
                 }
@@ -1357,7 +1374,7 @@ impl Work {
                 }
             }
             finish_host_op(&host_ops, &host_live, &host_busy);
-            let _ = results.send(Msg::HostStopped).await; // dropped: the hub has ended
+            let _ = results.send(Msg::HostStopped { host_gen: stop_gen }).await; // dropped: the hub has ended
         });
         true
     }
@@ -2956,14 +2973,22 @@ fn spawn_host_recover(
         match outcome {
             Ok(_) => {
                 let clear_data = data.clone();
-                let _ = run_tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: lock cleared after crash recovery
+                let clear_id = room_id.clone();
+                let res = run_tree
+                    .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
+                    .await;
+                let _ = res; // dropped: lock cleared after crash recovery
                 info!("host.recover", code = "ok");
                 info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
                 jobs_done.add(1);
             }
             Err(End::Fatal("room.gone")) => {
                 let clear_data = data.clone();
-                let _ = run_tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: room already gone on server
+                let clear_id = room_id.clone();
+                let res = run_tree
+                    .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
+                    .await;
+                let _ = res; // dropped: room already gone on server
                 info!("host.recover", code = "gone");
                 info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
                 jobs_done.add(1);

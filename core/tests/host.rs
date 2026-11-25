@@ -13,14 +13,18 @@ use hub::{App, ME, STORE, config_on as config, store};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use wiremock::matchers::{any, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
-use zu::{Cid, Codec, Held, PublicKey, Query as ZuQuery, Record, SecretKey, Value as ZuValue};
+use zu::{Cid, Codec, Doc, Held, PublicKey, Query as ZuQuery, Record, SecretKey, Value as ZuValue};
 use zutalk_core::app::hub::{Config as CoreConfig, Core, Outlet};
 use zutalk_core::app::proto::{
     CaptionBg, CaptionPrefs, CaptionScene, CaptionSize, Command, HostEvent, HostState, Query,
@@ -29,11 +33,14 @@ use zutalk_core::app::proto::{
 use zutalk_core::capture::tape;
 use zutalk_core::id::keys;
 use zutalk_core::out::host::{
-    HOST_LOCK_FILE, HostStepEvent, clear_lock, host_step, is_room_id, link, open, read_lock, seal,
-    write_lock,
+    HOST_LOCK_FILE, HostStepEvent, clear_lock, clear_lock_if, host_step, is_room_id, link, open,
+    read_lock, seal, write_lock,
 };
 use zutalk_core::rt::supervise::End;
-use zutalk_server::ROOM_IDLE_TTL_MS;
+use zutalk_server::{
+    BoxFuture, Config as ServerConfig, Directory, Minted, ROOM_IDLE_TTL_MS, Refusal, Server,
+    Upstream,
+};
 
 const KEY: [u8; 32] = [7; 32];
 
@@ -83,6 +90,7 @@ fn host_state_transition_table() {
     assert_eq!(host_step(&arming, HostStepEvent::RoomFailed), HostState::Idle);
     assert_eq!(host_step(&arming, HostStepEvent::Cancel { wait_gone: true }), HostState::Stopping);
     assert_eq!(host_step(&arming, HostStepEvent::Cancel { wait_gone: false }), HostState::Idle);
+    assert_eq!(host_step(&arming, HostStepEvent::Stopped), arming);
 
     // Armed: viewer count, event swap, captions toggle, start recording
     let armed_2 = host_step(&armed, HostStepEvent::Viewers(2));
@@ -193,6 +201,65 @@ fn host_lock_stores_only_room_id_and_never_the_key() {
     assert!(!dir.path().join(HOST_LOCK_FILE).exists());
     // Second clear is idempotent.
     clear_lock(dir.path());
+}
+
+#[test]
+fn host_state_and_step_debug_redact_room_key() {
+    let id = "a".repeat(32);
+    let live_link = link("https://talk.example", &id, &KEY);
+    let key_frag = BASE64_URL_SAFE_NO_PAD.encode(KEY);
+    assert!(live_link.ends_with(&format!("#{key_frag}")));
+
+    let armed = HostState::Armed {
+        event: Some(sample_event("Stage")),
+        captions: true,
+        link: Some(live_link.clone()),
+        viewers: 2,
+    };
+    let live = HostState::Live {
+        event: Some(sample_event("Stage")),
+        outbound: true,
+        link: Some(live_link.clone()),
+        viewers: 3,
+    };
+    let state = State { host: armed.clone(), ..State::default() };
+    let made = HostStepEvent::RoomMade { link: live_link };
+
+    for rendered in
+        [format!("{armed:?}"), format!("{live:?}"), format!("{state:?}"), format!("{made:?}")]
+    {
+        assert!(!rendered.contains(&key_frag), "Debug leaked room key: {rendered}");
+        assert!(rendered.contains(&format!("https://talk.example/r/{id}#…")), "{rendered}");
+    }
+
+    // Links without `#` must still be redacted to `"…"`.
+    let opaque = HostStepEvent::RoomMade { link: "opaque-secret-token".into() };
+    let opaque_dbg = format!("{opaque:?}");
+    assert!(!opaque_dbg.contains("opaque-secret-token"), "Debug leaked opaque link: {opaque_dbg}");
+    assert!(opaque_dbg.contains("…"), "{opaque_dbg}");
+}
+
+#[test]
+fn host_lock_clear_if_preserves_newer_room_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let id_a = "0123456789abcdef0123456789abcdef";
+    let id_b = "fedcba9876543210fedcba9876543210";
+
+    write_lock(dir.path(), id_a).unwrap();
+    write_lock(dir.path(), id_b).unwrap();
+
+    // Clearing the older room id must leave the newer room's lock intact.
+    clear_lock_if(dir.path(), id_a);
+    assert_eq!(read_lock(dir.path()).as_deref(), Some(id_b));
+
+    // Clearing the matching room id removes the lock file.
+    clear_lock_if(dir.path(), id_b);
+    assert_eq!(read_lock(dir.path()), None);
+    assert!(!dir.path().join(HOST_LOCK_FILE).exists());
+
+    // Calling again when absent is a safe no-op.
+    clear_lock_if(dir.path(), id_b);
+    assert!(!dir.path().join(HOST_LOCK_FILE).exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1011,4 +1078,336 @@ async fn host_city_and_caption_secrets_never_reach_logs_diagnose_lock_or_setting
     }
     assert!(!has_event("stats.full"), "stats.full must never trigger");
     assert_eq!(zutalk_log::refused(), refused_before, "zutalk_log::refused() must not increase");
+}
+
+struct ProxyKeys;
+
+impl Directory for ProxyKeys {
+    fn doc<'a>(&'a self, did: &'a str) -> BoxFuture<'a, Result<Doc, Refusal>> {
+        Box::pin(async move {
+            let n = did.strip_prefix("did:zu:made-up-").and_then(|n| n.parse().ok()).unwrap_or(5);
+            let keys = vec![(SecretKey::from_seed(&[n; 32]).public(), None)];
+            Ok(Doc { did: did.into(), keys, handles: vec![], services: BTreeMap::new() })
+        })
+    }
+}
+
+struct ProxyNowhere;
+
+impl Upstream for ProxyNowhere {
+    fn slice(&self) -> u64 {
+        0
+    }
+    fn per_second(&self) -> u64 {
+        50
+    }
+    fn mint<'a>(&'a self, _: &'a str, _: u64) -> BoxFuture<'a, Result<Minted, Refusal>> {
+        Box::pin(async { Err(Refusal(reqwest::StatusCode::BAD_GATEWAY, "upstream")) })
+    }
+}
+
+/// Deterministic one-shot pause gate for `POST /rooms` requests carrying `"do":"make"`.
+struct MakeGate {
+    armed: AtomicBool,
+    arrived: Notify,
+    release: Notify,
+}
+
+impl MakeGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            armed: AtomicBool::new(false),
+            arrived: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn parse_content_length(headers: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(headers);
+    for line in text.lines() {
+        if let Some((name, val)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+            && let Ok(n) = val.trim().parse::<usize>()
+        {
+            return n;
+        }
+    }
+    0
+}
+
+async fn write_all_stream(stream: &TcpStream, mut data: &[u8]) -> std::io::Result<()> {
+    while !data.is_empty() {
+        stream.writable().await?;
+        match stream.try_write(data) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+async fn read_some_stream(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        stream.readable().await?;
+        match stream.try_read(buf) {
+            Ok(n) => return Ok(n),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn relay_connection(client: TcpStream, backend: SocketAddr, gate: Arc<MakeGate>) {
+    let Ok(upstream) = TcpStream::connect(backend).await else { return };
+    let client = Arc::new(client);
+    let upstream = Arc::new(upstream);
+
+    let c2u_client = Arc::clone(&client);
+    let c2u_up = Arc::clone(&upstream);
+    let c2u = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let mut pending = Vec::new();
+        loop {
+            let Ok(n) = read_some_stream(&c2u_client, &mut buf).await else { break };
+            if n == 0 {
+                break;
+            }
+            if gate.armed.load(Ordering::Acquire)
+                && (pending.is_empty() && buf[..n].starts_with(b"POST /rooms ")
+                    || !pending.is_empty())
+            {
+                pending.extend_from_slice(&buf[..n]);
+                let Some(header_end) = find_bytes(&pending, b"\r\n\r\n") else {
+                    continue;
+                };
+                let body_start = header_end + 4;
+                let content_len = parse_content_length(&pending[..header_end]);
+                if pending.len() < body_start + content_len {
+                    continue;
+                }
+                let is_make = find_bytes(&pending[body_start..], br#""do":"make""#).is_some();
+                if is_make && gate.armed.swap(false, Ordering::AcqRel) {
+                    gate.arrived.notify_one();
+                    gate.release.notified().await;
+                }
+                if write_all_stream(&c2u_up, &pending).await.is_err() {
+                    break;
+                }
+                pending.clear();
+            } else if write_all_stream(&c2u_up, &buf[..n]).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let u2c_up = Arc::clone(&upstream);
+    let u2c_client = Arc::clone(&client);
+    let u2c = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        loop {
+            let Ok(n) = read_some_stream(&u2c_up, &mut buf).await else { break };
+            if n == 0 {
+                break;
+            }
+            if write_all_stream(&u2c_client, &buf[..n]).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let _ = tokio::join!(c2u, u2c);
+}
+
+async fn serve_gated() -> (String, String, Arc<MakeGate>, Arc<Server>, tempfile::TempDir) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_origin = format!("http://{}", proxy_listener.local_addr().unwrap());
+
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+    let backend_origin = format!("http://{backend_addr}");
+
+    let server_cfg = ServerConfig::new(&proxy_origin, dir.path(), vec![]);
+    let server = Server::open(
+        server_cfg,
+        Arc::new(ProxyKeys),
+        [Arc::new(ProxyNowhere), Arc::new(ProxyNowhere)],
+    )
+    .unwrap();
+    let running = server.clone();
+    tokio::spawn(zutalk_server::serve(backend_listener, running));
+
+    let gate = MakeGate::new();
+    let accept_gate = Arc::clone(&gate);
+    tokio::spawn(async move {
+        while let Ok((client, _)) = proxy_listener.accept().await {
+            tokio::spawn(relay_connection(client, backend_addr, Arc::clone(&accept_gate)));
+        }
+    });
+
+    (proxy_origin, backend_origin, gate, server, dir)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rapid_captions_toggle_does_not_orphan_new_room_or_delete_new_lock() {
+    let _store = STORE.lock().await;
+    store(true);
+    let (proxy_origin, backend_origin, gate, server, _srv_dir) = serve_gated().await;
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::with(config(dir.path(), &proxy_origin));
+    app.until(|s| s.me.is_some()).await;
+
+    // 1. Arm room R1.
+    app.send(Command::HostArm { event: None, captions: true });
+    let link1 = match app
+        .until(|s| matches!(s.host, HostState::Armed { captions: true, link: Some(_), .. }))
+        .await
+        .host
+    {
+        HostState::Armed { link: Some(l), .. } => l,
+        other => panic!("unexpected host state: {other:?}"),
+    };
+    let (_, room_id_1, _) = from_link(&link1);
+    assert_eq!(read_lock(dir.path()).as_deref(), Some(room_id_1.as_str()));
+
+    // 2. Pause the next `make` (R2) so R1's `gone` finishes while Hub is Arming R2 and after
+    //    R2 has already written `host.lock = R2`.
+    gate.arm();
+    app.send(Command::HostArm { event: None, captions: false });
+    app.send(Command::HostArm { event: None, captions: true });
+
+    timeout(Duration::from_secs(10), gate.arrived.notified()).await.expect("R2 make reached gate");
+    app.until(|s| matches!(s.host, HostState::Arming { captions: true, .. })).await;
+    let room_id_2 = read_lock(dir.path()).expect("R2 wrote host.lock");
+    assert_ne!(room_id_2, room_id_1);
+
+    // Wait until R1's `net.host_gone` finishes on the server and sends stale `Msg::HostStopped`.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let gone_done = app.seen.of("job.done").iter().any(|l| l.text("kind") == Some("host.gone"));
+        let r1_gone = reqwest::get(format!("{backend_origin}/rooms/{room_id_1}/events"))
+            .await
+            .unwrap()
+            .status()
+            == reqwest::StatusCode::NOT_FOUND;
+        if gone_done && r1_gone {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "R1 teardown did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Give Hub time to process the stale `Msg::HostStopped` and confirm it did not clobber Arming.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        matches!(app.outlet.state.now().1.host, HostState::Arming { captions: true, .. }),
+        "stale HostStopped must not reset Arming to Idle: {:?}",
+        app.outlet.state.now().1.host
+    );
+    assert_eq!(
+        read_lock(dir.path()).as_deref(),
+        Some(room_id_2.as_str()),
+        "R1 teardown must not delete R2's host.lock"
+    );
+
+    // 3. Release R2's `make` -> Hub transitions cleanly to Armed with R2's link.
+    gate.release.notify_one();
+    let link2 = match app
+        .until(|s| {
+            matches!(
+                &s.host,
+                HostState::Armed { captions: true, link: Some(l), .. } if l != &link1
+            )
+        })
+        .await
+        .host
+    {
+        HostState::Armed { link: Some(l), .. } => l,
+        other => panic!("unexpected host state: {other:?}"),
+    };
+    let (_, armed_id_2, _) = from_link(&link2);
+    assert_eq!(armed_id_2, room_id_2);
+    assert_eq!(read_lock(dir.path()).as_deref(), Some(room_id_2.as_str()));
+
+    // 4. R2 works end-to-end with a viewer and tears down cleanly on HostCancel.
+    let mut viewer = Viewer::open(&link2).await;
+    viewer.until(|ev, _| (ev == "slot").then_some(())).await;
+    app.until(|s| s.host.viewers() == 1).await;
+
+    app.send(Command::HostCancel);
+    viewer.until(|ev, _| (ev == "gone").then_some(())).await;
+    app.until(|s| s.host == HostState::Idle).await;
+    assert!(!dir.path().join(HOST_LOCK_FILE).exists());
+    let r2_after =
+        reqwest::get(format!("{backend_origin}/rooms/{room_id_2}/events")).await.unwrap();
+    assert_eq!(r2_after.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(app.seen.refused(), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_recording_while_arming_cancels_in_flight_room_without_leak() {
+    let _store = STORE.lock().await;
+    store(true);
+    let (proxy_origin, backend_origin, gate, server, _srv_dir) = serve_gated().await;
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::with(config(dir.path(), &proxy_origin));
+    app.until(|s| s.me.is_some()).await;
+
+    // 1. Arm hosting while pausing the in-flight `make` request so Hub stays in `Arming`.
+    gate.arm();
+    app.send(Command::HostArm { event: Some(sample_event("ArmRace")), captions: true });
+    timeout(Duration::from_secs(10), gate.arrived.notified()).await.expect("make reached gate");
+    app.until(|s| matches!(s.host, HostState::Arming { captions: true, .. })).await;
+    let room_id = read_lock(dir.path()).expect("host.lock written before make");
+
+    // 2. Start recording while still Arming -> local-only Live session, in-flight make cancelled.
+    app.send(Command::Start);
+    let session =
+        app.session(|s| s.is_some_and(|s| !s.outbound)).await.expect("local-only session started");
+    assert!(!session.outbound);
+    assert_eq!(session.viewers, 0);
+    assert_eq!(session.event_title.as_deref(), Some("ArmRace"));
+    app.until(|s| {
+        matches!(s.host, HostState::Live { outbound: false, link: None, viewers: 0, .. })
+    })
+    .await;
+
+    // 3. Release the in-flight `make` -> cancelled task immediately sends `gone` and clears lock.
+    gate.release.notify_one();
+    let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while dir.path().join(HOST_LOCK_FILE).exists() {
+        assert!(
+            tokio::time::Instant::now() < lock_deadline,
+            "host.lock did not clear after cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let after = reqwest::get(format!("{backend_origin}/rooms/{room_id}/events")).await.unwrap();
+    assert_eq!(after.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(matches!(
+        app.outlet.state.now().1.host,
+        HostState::Live { outbound: false, link: None, viewers: 0, .. }
+    ));
+
+    // 4. Stop local recording cleanly.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+    app.until(|s| s.host == HostState::Idle).await;
+    assert!(!app.core.is_hosting());
+    assert_eq!(app.seen.refused(), 0);
+    server.shutdown().await;
 }

@@ -50,11 +50,12 @@ export type FileArchiveViewProps = {
   progressFile: Writing | null;
   hostEvent?: HostEvent | null;
   defaultOpen?: boolean;
+  refining?: boolean;
   signedIn: boolean;
   defaultCity?: string | null;
   nowMs?: number;
   onLoadCity: (address: string) => void;
-  onConfirmFile: (eventPath: string, audio: boolean) => void;
+  onConfirmFile: (eventPath: string, audio: boolean) => Promise<boolean> | boolean | void;
   onRequireSignIn: () => void;
 };
 
@@ -65,6 +66,7 @@ export function FileArchiveView({
   progressFile,
   hostEvent = null,
   defaultOpen = false,
+  refining = false,
   signedIn,
   defaultCity = null,
   nowMs = Date.now(),
@@ -87,6 +89,11 @@ export function FileArchiveView({
   const [graceRemainingSec, setGraceRemainingSec] = useState<number>(
     Math.ceil(FILE_GRACE_MS / 1_000),
   );
+
+  // Track active recording id so a switch cancels timers and never files the wrong recording.
+  const activeIdRef = useRef(row.id);
+  activeIdRef.current = row.id;
+  const prevRowIdRef = useRef(row.id);
 
   // Keep latest callback and payload in refs so grace timer fires with the exact chosen options.
   const confirmRef = useRef(onConfirmFile);
@@ -121,9 +128,26 @@ export function FileArchiveView({
     return null;
   }, [selectedEventPath, events, calendar, hostEvent, nearestEvent, recording.filed]);
 
+  const canSubmitEvent =
+    calendar !== null &&
+    resolvedEvent !== null &&
+    calendar.events.some((e) => e.path === resolvedEvent.path);
+  const canHold = canSubmitEvent && !refining;
+
   const effectiveAudio = row.audio && includeAudio;
   const payloadRef = useRef({ path: resolvedEvent?.path ?? null, audio: effectiveAudio });
   payloadRef.current = { path: resolvedEvent?.path ?? null, audio: effectiveAudio };
+
+  // Reset all local state whenever the card switches to a different recording id.
+  useEffect(() => {
+    if (prevRowIdRef.current === row.id) return;
+    prevRowIdRef.current = row.id;
+    setPhase(deriveInitialPhase(recording, progressFile, defaultOpen));
+    setIncludeAudio(row.audio);
+    setSelectedEventPath(hostEvent?.event ?? recording.filed?.event ?? null);
+    setGraceRemainingSec(Math.ceil(FILE_GRACE_MS / 1_000));
+    setEditingCity(false);
+  }, [row.id, row.audio, recording, progressFile, defaultOpen, hostEvent]);
 
   // Synchronize external server filing truth into local state machine.
   useEffect(() => {
@@ -149,31 +173,44 @@ export function FileArchiveView({
       setPhase((p) => filePhaseStep(p, { is: 'HoldComplete' }));
     }, HOLD_TO_FILE_MS);
     return () => clearTimeout(id);
-  }, [phase]);
+  }, [phase, row.id]);
 
   // 8 s undoable grace timer — dispatches Command::File ONLY when this timer expires without Undo.
   useEffect(() => {
     if (phase !== 'grace') return;
+    const targetRowId = row.id;
     const totalSec = Math.ceil(FILE_GRACE_MS / 1_000);
     setGraceRemainingSec(totalSec);
     const tickId = setInterval(() => {
       setGraceRemainingSec((prev) => Math.max(1, prev - 1));
     }, GRACE_COUNTDOWN_TICK_MS);
     const expireId = setTimeout(() => {
+      if (activeIdRef.current !== targetRowId) return;
       const { path, audio } = payloadRef.current;
       setPhase((p) => filePhaseStep(p, { is: 'GraceExpire' }));
       if (path) {
-        confirmRef.current(path, audio);
+        void Promise.resolve(confirmRef.current(path, audio)).then(
+          (ok) => {
+            if (ok === false && activeIdRef.current === targetRowId) {
+              setPhase((p) => filePhaseStep(p, { is: 'SubmitRejected' }));
+            }
+          },
+          () => {
+            if (activeIdRef.current === targetRowId) {
+              setPhase((p) => filePhaseStep(p, { is: 'SubmitRejected' }));
+            }
+          },
+        );
       }
     }, FILE_GRACE_MS);
     return () => {
       clearInterval(tickId);
       clearTimeout(expireId);
     };
-  }, [phase]);
+  }, [phase, row.id]);
 
   const startHold = () => {
-    if (!resolvedEvent) return;
+    if (!canHold) return;
     if (!signedIn) {
       onRequireSignIn();
       return;
@@ -429,7 +466,7 @@ export function FileArchiveView({
         <button
           type="button"
           className={`btn lg hold${holding ? ' holding' : ''}`}
-          disabled={!resolvedEvent}
+          disabled={!canHold}
           onPointerDown={startHold}
           onPointerUp={cancelHold}
           onPointerLeave={cancelHold}
@@ -444,6 +481,10 @@ export function FileArchiveView({
         <Pill quiet onClick={() => setPhase((p) => filePhaseStep(p, { is: 'Keep' }))}>
           {t('file.skip')}
         </Pill>
+        {refining && <span className="k">{word('code', 'recording.writing')}</span>}
+        {!refining && !canSubmitEvent && calendar === null && (
+          <span className="k">{word('code', 'city.none')}</span>
+        )}
       </div>
     </Card>
   );
@@ -465,6 +506,22 @@ export function FileArchiveCard({
   const progress = useSource(progressSource);
   useSource(langSource);
   const calendarQuery = useQuery({ view: 'Calendar' });
+  const loadedCityRef = useRef<string | null>(null);
+  const targetCity = (
+    hostEvent?.city ??
+    recording.filed?.city ??
+    state?.setup.city ??
+    ''
+  ).trim();
+
+  useEffect(() => {
+    if (calendarQuery.data || !targetCity || loadedCityRef.current === targetCity) return;
+    loadedCityRef.current = targetCity;
+    void send({ do: 'City', address: targetCity });
+  }, [calendarQuery.data, targetCity]);
+
+  const refining =
+    recording.refine.is === 'Refining' || progress.refine?.id === recording.row.id;
 
   return (
     <FileArchiveView
@@ -473,6 +530,7 @@ export function FileArchiveCard({
       progressFile={progress.file}
       hostEvent={hostEvent}
       defaultOpen={defaultOpen}
+      refining={refining}
       signedIn={Boolean(state?.me)}
       defaultCity={state?.setup.city ?? null}
       onLoadCity={(address) => {
@@ -481,9 +539,7 @@ export function FileArchiveCard({
         }
         void send({ do: 'City', address });
       }}
-      onConfirmFile={(event, audio) => {
-        void send({ do: 'File', id: recording.row.id, event, audio });
-      }}
+      onConfirmFile={(event, audio) => send({ do: 'File', id: recording.row.id, event, audio })}
       onRequireSignIn={() => openIdentitySheet('ask')}
     />
   );

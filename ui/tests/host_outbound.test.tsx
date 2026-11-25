@@ -97,6 +97,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
       { is: 'GraceExpire' },
       { is: 'Keep' },
       { is: 'Reopen' },
+      { is: 'SubmitRejected' },
       { is: 'ServerFiled' },
       { is: 'ServerFailed' },
     ];
@@ -110,6 +111,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'review',
         Keep: 'kept',
         Reopen: 'review',
+        SubmitRejected: 'review',
         ServerFiled: 'filed',
         ServerFailed: 'failed',
       },
@@ -121,6 +123,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'holding',
         Keep: 'kept',
         Reopen: 'holding',
+        SubmitRejected: 'holding',
         ServerFiled: 'filed',
         ServerFailed: 'holding',
       },
@@ -132,6 +135,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'submitting',
         Keep: 'grace',
         Reopen: 'grace',
+        SubmitRejected: 'grace',
         ServerFiled: 'filed',
         ServerFailed: 'grace',
       },
@@ -143,6 +147,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'submitting',
         Keep: 'submitting',
         Reopen: 'submitting',
+        SubmitRejected: 'review',
         ServerFiled: 'filed',
         ServerFailed: 'failed',
       },
@@ -154,6 +159,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'filed',
         Keep: 'filed',
         Reopen: 'filed',
+        SubmitRejected: 'filed',
         ServerFiled: 'filed',
         ServerFailed: 'filed',
       },
@@ -165,6 +171,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'failed',
         Keep: 'kept',
         Reopen: 'review',
+        SubmitRejected: 'failed',
         ServerFiled: 'filed',
         ServerFailed: 'failed',
       },
@@ -176,6 +183,7 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
         GraceExpire: 'kept',
         Keep: 'kept',
         Reopen: 'review',
+        SubmitRejected: 'kept',
         ServerFiled: 'filed',
         ServerFailed: 'kept',
       },
@@ -429,6 +437,190 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
     });
     expect(onConfirmFile).toHaveBeenCalledTimes(1);
     expect(onConfirmFile).toHaveBeenCalledWith(SAMPLE_EVENT.event, true);
+  });
+
+  it('FileArchiveView_resets_and_cancels_grace_when_recording_id_changes', () => {
+    vi.useFakeTimers();
+    const onConfirmFileA = vi.fn(() => Promise.resolve(true));
+    const onConfirmFileB = vi.fn(() => Promise.resolve(true));
+    const recA = makeRecording();
+    const recB = makeRecording({
+      row: {
+        ...makeRecording().row,
+        id: 'rec-host-2',
+        title: 'Different local note',
+      },
+      filed: null,
+    });
+
+    const { rerender } = render(
+      <FileArchiveView
+        recording={recA}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={SAMPLE_EVENT}
+        defaultOpen
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFileA}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+
+    // Hold 1.4 s on recording A -> enters 8 s grace window.
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to file' }));
+    act(() => {
+      vi.advanceTimersByTime(HOLD_TO_FILE_MS);
+    });
+    expect(screen.getByText('Filing in 8s')).toBeTruthy();
+
+    // Advance 3 s into grace, then switch to recording B.
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    rerender(
+      <FileArchiveView
+        recording={recB}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={null}
+        defaultOpen={false}
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFileB}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+
+    // Recording B must reset to its own initial state ('kept') rather than inheriting A's 'grace'.
+    expect(screen.queryByText(/Filing in/)).toBeNull();
+    expect(screen.getByText('Not filed')).toBeTruthy();
+
+    // Advance 10 s -> neither A nor B may ever be filed.
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(onConfirmFileA).not.toHaveBeenCalled();
+    expect(onConfirmFileB).not.toHaveBeenCalled();
+
+    // Also verify switching from a filed recording A to an unfiled recording B resets from 'filed'.
+    const recAFiled = makeRecording({
+      filed: {
+        city: SAMPLE_EVENT.city,
+        did: 'did:zu:citycm',
+        event: SAMPLE_EVENT.event,
+        title: SAMPLE_EVENT.title,
+        audio: true,
+        key: 'f1',
+        state: 'city.filed',
+      },
+    });
+    rerender(
+      <FileArchiveView
+        recording={recAFiled}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={SAMPLE_EVENT}
+        defaultOpen
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFileA}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Filed')).toBeTruthy();
+
+    rerender(
+      <FileArchiveView
+        recording={recB}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={null}
+        defaultOpen
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFileB}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Filed')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Hold to file' })).toBeTruthy();
+  });
+
+  it('FileArchiveView_recovers_to_review_when_confirm_is_rejected', async () => {
+    vi.useFakeTimers();
+    const onConfirmFile = vi.fn(() => Promise.resolve(false));
+
+    const { rerender } = render(
+      <FileArchiveView
+        recording={makeRecording()}
+        calendar={null}
+        progressFile={null}
+        hostEvent={SAMPLE_EVENT}
+        defaultOpen
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFile}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+
+    // Without a loaded calendar, Hold to file must stay disabled even when hostEvent is present.
+    expect(screen.getByRole('button', { name: 'Hold to file' }).hasAttribute('disabled')).toBe(true);
+
+    // While refining, Hold to file must also stay disabled.
+    rerender(
+      <FileArchiveView
+        recording={makeRecording()}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={SAMPLE_EVENT}
+        defaultOpen
+        refining
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFile}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Hold to file' }).hasAttribute('disabled')).toBe(true);
+
+    // Once calendar is loaded and not refining, a rejected confirm recovers back to review.
+    rerender(
+      <FileArchiveView
+        recording={makeRecording()}
+        calendar={SAMPLE_CALENDAR}
+        progressFile={null}
+        hostEvent={SAMPLE_EVENT}
+        defaultOpen
+        refining={false}
+        signedIn
+        nowMs={1_760_000_000_000}
+        onLoadCity={vi.fn()}
+        onConfirmFile={onConfirmFile}
+        onRequireSignIn={vi.fn()}
+      />,
+    );
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to file' }));
+    act(() => {
+      vi.advanceTimersByTime(HOLD_TO_FILE_MS);
+    });
+    expect(screen.getByText('Filing in 8s')).toBeTruthy();
+
+    await act(async () => {
+      vi.advanceTimersByTime(FILE_GRACE_MS);
+      await Promise.resolve();
+    });
+
+    expect(onConfirmFile).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Hold to file' })).toBeTruthy();
   });
 
   it('OutboundView_renders_idle_or_live_and_all_filing_states', () => {

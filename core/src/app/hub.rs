@@ -120,7 +120,7 @@ pub(crate) enum Msg {
     HostReady { host_gen: u64, link: String },
     HostFailed { host_gen: u64, code: &'static str },
     HostViewers { host_gen: u64, viewers: u32 },
-    HostStopped,
+    HostStopped { host_gen: u64 },
     Looked(Result<String, &'static str>),
     City(Result<Calendar, End>),
     FilingReady(String, Filing),
@@ -156,7 +156,7 @@ impl Msg {
             Msg::HostReady { .. } => "HostReady",
             Msg::HostFailed { .. } => "HostFailed",
             Msg::HostViewers { .. } => "HostViewers",
-            Msg::HostStopped => "HostStopped",
+            Msg::HostStopped { .. } => "HostStopped",
             Msg::Looked(_) => "Looked",
             Msg::City(_) => "City",
             Msg::FilingReady(_, _) => "FilingReady",
@@ -567,8 +567,12 @@ impl Hub {
                     }
                 }
             }
-            Msg::HostStopped => {
-                self.set_host(HostStepEvent::Stopped, "stopped");
+            Msg::HostStopped { host_gen } => {
+                if host_gen != self.host_gen {
+                    // dropped: stale room teardown superseded by a newer host session
+                } else {
+                    self.set_host(HostStepEvent::Stopped, "stopped");
+                }
             }
             Msg::Looked(found) => self.state.update = Some(found?),
             Msg::City(Ok(_)) => {}
@@ -687,16 +691,16 @@ impl Hub {
                     self.work.host_make(host_gen)?;
                     self.set_host(HostStepEvent::Arm { event, captions: true }, "arm");
                 } else if had_room && !captions {
-                    self.bump_host_gen();
-                    let _ = self.work.host_stop_room(); // dropped: room teardown runs asynchronously while staying armed without captions
+                    let stop_gen = self.bump_host_gen();
+                    let _ = self.work.host_stop_room(stop_gen); // dropped: room teardown runs asynchronously while staying armed without captions
                     self.set_host(HostStepEvent::Arm { event, captions: false }, "captions.off");
                 } else {
                     self.set_host(HostStepEvent::Arm { event, captions }, "arm");
                 }
             }
             Command::HostCancel => {
-                self.bump_host_gen();
-                let wait_gone = self.work.host_stop_room();
+                let stop_gen = self.bump_host_gen();
+                let wait_gone = self.work.host_stop_room(stop_gen);
                 self.set_host(HostStepEvent::Cancel { wait_gone }, "host.cancelled");
                 if self.recording.is_some() {
                     self.session_reg.change(|cur| {
@@ -710,8 +714,8 @@ impl Hub {
                 if self.state.host.is_outbound()
                     || matches!(self.state.host, HostState::Arming { .. })
                 {
-                    self.bump_host_gen();
-                    let _ = self.work.host_stop_room(); // dropped: room teardown runs asynchronously while recording continues
+                    let stop_gen = self.bump_host_gen();
+                    let _ = self.work.host_stop_room(stop_gen); // dropped: room teardown runs asynchronously while recording continues
                     self.set_host(HostStepEvent::StopOutbound, "host.stopped");
                     if self.recording.is_some() {
                         self.session_reg.change(|cur| {
@@ -778,8 +782,8 @@ impl Hub {
             }
             Command::SignOut => {
                 if self.state.host.is_active() {
-                    self.bump_host_gen();
-                    let wait_gone = self.work.host_stop_room();
+                    let stop_gen = self.bump_host_gen();
+                    let wait_gone = self.work.host_stop_room(stop_gen);
                     self.set_host(HostStepEvent::Cancel { wait_gone }, "sign_out");
                     if self.recording.is_some() {
                         self.session_reg.change(|cur| {
@@ -925,6 +929,10 @@ impl Hub {
             self.next_snap.clone(),
         )?;
         let (outbound, viewers, event_title) = if !file && self.state.host.is_active() {
+            if matches!(self.state.host, HostState::Arming { .. }) {
+                let stop_gen = self.bump_host_gen();
+                let _ = self.work.host_stop_room(stop_gen); // dropped: cancel in-flight room make before starting local-only recording
+            }
             self.set_host(HostStepEvent::RecordingStarted, "start");
             let outbound = self.state.host.is_outbound();
             if outbound {
@@ -965,8 +973,8 @@ impl Hub {
             self.water_reg.change(|current| (*current != Water::default()).then(Water::default));
             self.refining.insert(id);
             if self.state.host.is_active() {
-                self.bump_host_gen();
-                let wait_gone = self.work.host_stop_room();
+                let stop_gen = self.bump_host_gen();
+                let wait_gone = self.work.host_stop_room(stop_gen);
                 self.set_host(HostStepEvent::RecordingStopped { wait_gone }, "stop");
             }
         }

@@ -42,9 +42,22 @@ pub struct HostEvent {
     pub start: Option<i64>,
 }
 
+/// Redacts the `#<key>` fragment of a viewer link in `Debug` output so 32-byte room keys never
+/// appear in assertion messages, error wrappers, or diagnostics (Principle 6).
+struct RedactedLink<'a>(&'a str);
+
+impl std::fmt::Debug for RedactedLink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.split_once('#') {
+            Some((prefix, _)) => std::fmt::Debug::fmt(&format!("{prefix}#…"), f),
+            None => std::fmt::Debug::fmt("…", f),
+        }
+    }
+}
+
 /// Bounded in-memory hosting state machine (`P5.md` §3.3).
 /// At most one hosted session exists at a time; nothing about it persists in records or settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "is")]
 pub enum HostState {
@@ -67,6 +80,32 @@ pub enum HostState {
         viewers: u32,
     },
     Stopping,
+}
+
+impl std::fmt::Debug for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostState::Idle => f.write_str("Idle"),
+            HostState::Arming { event, captions } => {
+                f.debug_struct("Arming").field("event", event).field("captions", captions).finish()
+            }
+            HostState::Armed { event, captions, link, viewers } => f
+                .debug_struct("Armed")
+                .field("event", event)
+                .field("captions", captions)
+                .field("link", &link.as_deref().map(RedactedLink))
+                .field("viewers", viewers)
+                .finish(),
+            HostState::Live { event, outbound, link, viewers } => f
+                .debug_struct("Live")
+                .field("event", event)
+                .field("outbound", outbound)
+                .field("link", &link.as_deref().map(RedactedLink))
+                .field("viewers", viewers)
+                .finish(),
+            HostState::Stopping => f.write_str("Stopping"),
+        }
+    }
 }
 
 impl HostState {
@@ -114,7 +153,7 @@ impl HostState {
 }
 
 /// Pure transition input for [`host_step`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum HostStepEvent {
     Arm { event: Option<HostEvent>, captions: bool },
     RoomMade { link: String },
@@ -125,6 +164,30 @@ pub enum HostStepEvent {
     Cancel { wait_gone: bool },
     RecordingStopped { wait_gone: bool },
     Stopped,
+}
+
+impl std::fmt::Debug for HostStepEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostStepEvent::Arm { event, captions } => {
+                f.debug_struct("Arm").field("event", event).field("captions", captions).finish()
+            }
+            HostStepEvent::RoomMade { link } => {
+                f.debug_struct("RoomMade").field("link", &RedactedLink(link)).finish()
+            }
+            HostStepEvent::RoomFailed => f.write_str("RoomFailed"),
+            HostStepEvent::Viewers(n) => f.debug_tuple("Viewers").field(n).finish(),
+            HostStepEvent::RecordingStarted => f.write_str("RecordingStarted"),
+            HostStepEvent::StopOutbound => f.write_str("StopOutbound"),
+            HostStepEvent::Cancel { wait_gone } => {
+                f.debug_struct("Cancel").field("wait_gone", wait_gone).finish()
+            }
+            HostStepEvent::RecordingStopped { wait_gone } => {
+                f.debug_struct("RecordingStopped").field("wait_gone", wait_gone).finish()
+            }
+            HostStepEvent::Stopped => f.write_str("Stopped"),
+        }
+    }
 }
 
 /// Pure state transition function for [`HostState`] (`P5.md` §3.3).
@@ -167,10 +230,11 @@ pub fn host_step(state: &HostState, event: HostStepEvent) -> HostState {
         (
             HostState::Arming { .. },
             HostStepEvent::Cancel { wait_gone: false }
-            | HostStepEvent::RecordingStopped { wait_gone: false }
-            | HostStepEvent::Stopped,
+            | HostStepEvent::RecordingStopped { wait_gone: false },
         ) => HostState::Idle,
-        (HostState::Arming { .. }, HostStepEvent::Viewers(_)) => state.clone(),
+        (HostState::Arming { .. }, HostStepEvent::Viewers(_) | HostStepEvent::Stopped) => {
+            state.clone()
+        }
 
         (
             HostState::Armed { captions, link, viewers, .. },
@@ -282,6 +346,14 @@ pub fn read_lock(data: &Path) -> Option<String> {
 /// Removes `<data>/host.lock` if present (idempotent).
 pub fn clear_lock(data: &Path) {
     let _ = fs::remove_file(data.join(HOST_LOCK_FILE)); // dropped: missing lock file is already clean
+}
+
+/// Removes `<data>/host.lock` only if it still names `room_id`, preventing a slow teardown or
+/// crash-recovery task from deleting a newer room's lock file.
+pub fn clear_lock_if(data: &Path, room_id: &str) {
+    if read_lock(data).as_deref() == Some(room_id) {
+        clear_lock(data);
+    }
 }
 
 /// Slot-only room mutations accepted by the ephemeral live server (`P5-01`).

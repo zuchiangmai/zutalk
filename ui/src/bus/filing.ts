@@ -27,6 +27,7 @@ export type FilePhaseEvent =
   | { is: 'GraceExpire' }
   | { is: 'Keep' }
   | { is: 'Reopen' }
+  | { is: 'SubmitRejected' }
   | { is: 'ServerFiled' }
   | { is: 'ServerFailed' };
 
@@ -47,6 +48,8 @@ export function filePhaseStep(phase: FilePhase, event: FilePhaseEvent): FilePhas
       return phase === 'review' || phase === 'holding' || phase === 'failed' ? 'kept' : phase;
     case 'Reopen':
       return phase === 'kept' || phase === 'failed' ? 'review' : phase;
+    case 'SubmitRejected':
+      return phase === 'submitting' ? 'review' : phase;
     case 'ServerFiled':
       return 'filed';
     case 'ServerFailed':

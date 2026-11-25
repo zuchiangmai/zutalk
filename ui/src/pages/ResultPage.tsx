@@ -357,6 +357,7 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
       }}
       archiveSlot={
         <FileArchiveCard
+          key={recording.row.id}
           recording={recording}
           hostEvent={hostEvent ?? null}
           defaultOpen={Boolean(hostEvent)}

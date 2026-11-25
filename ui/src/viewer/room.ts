@@ -72,26 +72,40 @@ export function resetRoom(): void {
 export function read(events: string, fragment: string): () => void {
   resetRoom();
   const source = new EventSource(events);
+  let closed = false;
+
   const finish = (code: string, event: ViewerStatusEvent) => {
+    if (closed) return;
+    closed = true;
     roomLiveCell.set([]);
     roomEndCell.set(code);
     roomStatusCell.update((prev) => viewerStatusStep(prev, event));
     say(code);
     source.close();
   };
-  let queue = roomKey(fragment);
-  queue.catch(() => finish('room.bad', { is: 'BadKey' }));
+
+  let queue: Promise<CryptoKey | null> = roomKey(fragment).catch(() => {
+    finish('room.bad', { is: 'BadKey' });
+    return null;
+  });
+
   const frame = <T>(then: (it: T | null) => void) => (m: MessageEvent<string>) => {
-    queue = queue
-      .then(async (key) => {
-        then(m.data === '-' || m.data === '' ? null : await openFrame<T>(key, m.data));
+    if (closed) return;
+    queue = queue.then(async (key) => {
+      if (closed || !key) return null;
+      try {
+        const decoded =
+          m.data === '-' || m.data === '' ? null : await openFrame<T>(key, m.data);
+        if (closed) return null;
+        then(decoded);
         return key;
-      })
-      .catch((err) => {
+      } catch {
         finish('room.bad', { is: 'BadKey' });
-        throw err;
-      });
+        return null;
+      }
+    });
   };
+
   source.addEventListener(
     'slot',
     frame<Column[]>((live) => {
@@ -104,9 +118,10 @@ export function read(events: string, fragment: string): () => void {
   );
   source.addEventListener('gone', () => finish('room.gone', { is: 'Gone' }));
   source.onerror = () => {
-    if (source.readyState !== EventSource.CLOSED) return;
-    fetch(events)
+    if (closed || source.readyState !== EventSource.CLOSED) return;
+    void fetch(events)
       .then(async (r) => {
+        if (closed) return;
         if (r.status === 404) {
           finish('room.gone', { is: 'Gone' });
           return;
@@ -116,6 +131,7 @@ export function read(events: string, fragment: string): () => void {
           return;
         }
         const body = (await r.json().catch(() => ({}))) as { error?: string };
+        if (closed) return;
         if (body.error === 'viewers') {
           finish('room.viewers', { is: 'RoomFull' });
         } else if (body.error === 'room') {
@@ -124,7 +140,14 @@ export function read(events: string, fragment: string): () => void {
           finish('offline', { is: 'Offline' });
         }
       })
-      .catch(() => finish('offline', { is: 'Offline' }));
+      .catch(() => {
+        if (closed) return;
+        finish('offline', { is: 'Offline' });
+      });
   };
-  return () => source.close();
+
+  return () => {
+    closed = true;
+    source.close();
+  };
 }

@@ -649,7 +649,7 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
       onLoadedLinesChange={(lines) => {
         loadedLinesRef.current = lines;
       }}
-      archiveSlot={<FileArchiveCard recording={recording} defaultOpen={false} />}
+      archiveSlot={<FileArchiveCard key={recording.row.id} recording={recording} defaultOpen={false} />}
     />
   );
 }
