@@ -246,6 +246,7 @@ pub enum Command {
     Term { said: String, written: Option<BTreeMap<String, String>> },
     City { address: String },
     File { id: String, event: String, audio: bool },
+    Diagnose,
 }
 
 impl Command {
@@ -280,6 +281,7 @@ impl Command {
             Command::Term { .. } => "Term",
             Command::City { .. } => "City",
             Command::File { .. } => "File",
+            Command::Diagnose => "Diagnose",
         }
     }
 
@@ -311,7 +313,8 @@ impl Command {
             | Command::Captions { .. }
             | Command::DestroyAudio { .. }
             | Command::Term { .. }
-            | Command::City { .. } => false,
+            | Command::City { .. }
+            | Command::Diagnose => false,
         }
     }
 }

@@ -122,10 +122,11 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `lane.open` | info；没成时 warn | lane 每开一次连接（成和不成都发） | `lane` `code`（`ok` 或没成的原因代码） `keys_ms` `dial_ms`（未到拨号步为 0） |
 | `lane.reconnect` | info | 停了的 lane 因 `Command::Reconnect` 被重新起起来 | `lane` |
 | `job.start` | info | desk 或 `Work` 的一件活开始做 | `kind` `job`（递增序号；因行头已占 `seq`，字段名用 `job`） `waited_ms` |
-| `job.done` | info；`code != "ok"` 时 warn | desk 或 `Work` 的一件活做完。一条涉及 IO 的命令分为两段：先是 `command.done`（hub 收下并排活），再是对应的 `job.done`（活做完及其结果码）。`kind` 包含 `boot`、`settings`、`sign`、`signout`、`signin`、`create`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`search`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`sweep`、`write`、`move` | `kind` `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败代码） `ms` |
+| `job.done` | info；`code != "ok"` 时 warn | desk 或 `Work` 的一件活做完。一条涉及 IO 的命令分为两段：先是 `command.done`（hub 收下并排活），再是对应的 `job.done`（活做完及其结果码）。`kind` 包含 `boot`、`settings`、`sign`、`signout`、`signin`、`create`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`search`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`diagnose`、`sweep`、`write`、`move` | `kind` `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败代码） `ms` |
 | `job.again` | warn | 一件后台或重试中的活遇可恢复失败，退避等待后重试 | `kind` `why` `wait_ms` `n` |
 | `hub.boot` | info | hub 的启动与安装状态机 `Boot` 转换 | `from` `to`（`Starting` / `Ready` / `Installing`） `why`（`boot` / `update` / `update.install`） |
 | `boot.step` | info；失败时 warn | 启动的每一步完成（`devices` 另带 `n`，不含设备名） | `step`（`settings` / `identity` / `invites` / `devices`） `code` `ms`（`devices` 另带 `n`） |
+| `diagnose.wrote` | info | desk 写完一份自检包（原子改名并清掉旧包之后） | `files`（包内文件数，含 `logs/`） `bytes`（总字节数） |
 
 ## 怎么读一组快照
 
@@ -136,3 +137,15 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 ```
 
 同一 `snap` 号下依次包含：`stall.snapshot`（触发的那一格、健康、原因、已不动毫秒数）→ 当秒整份水位（每格一行 `water.mark`）→ 当秒整份统计（`stat.count` / `stat.peak` / `stat.spread` / `stat.queue`）→ 根树上正在运行的所有任务与阻塞调用（`task.running`）→ `stall.snapshot.end`（核对总行数 `lines`）。同一格、同一个原因在一场录音里只留一组快照，日志不会被长停滞灌满。
+
+## 自检包里有什么、怎么看
+
+发 `Command::Diagnose` 后，desk 在 `<数据目录>/diagnose/<墙上时钟毫秒>/` 下原子写出一份只含代码、数字与布尔值的文件夹（最多保留最新的 3 份），不含任何记录、音频、钥匙、DID、句柄、设备名或绝对路径：
+
+- `about.json`：版本、系统、架构、日志级别、进程运行毫秒数（`up_ms`）、谁在签（`who`：`nobody` / `local` / `person`）、下一场设置里的代码项（`spoken`、`shown`、`sound`、`captions`）以及各服务钥匙来源（`keys`）。
+- `water.json`：此刻整份水位（每格位置与健康判断）。
+- `stats.json`：此刻整份统计（计数、高水位、延迟分布、每条队列的容量/深度/最深/丢弃）。
+- `tasks.json`：此刻核心根树上正在运行的全部任务和阻塞调用（含持续毫秒数 `for_ms`）。
+- `logs/`：刷新后复制的最近最多 2 个 `*.jsonl` 日志文件（上限 16 MB）。
+
+排查次序：先看 `about.json` 确认版本、身份代码、钥匙来源与语言配置；再看 `water.json` 里哪一格不是 `Live`（并结合 `stats.json` 队列深度和 `tasks.json` 里卡住的阻塞调用）；最后到 `logs/` 里按那一格的 `stage` 搜 `judge.verdict` 和 `stall.snapshot`（再按 `snap` 号拉出整组现场）。

@@ -219,5 +219,7 @@
  "code.keys": "Clé non obtenue à temps",
  "code.starting": "Démarrage en cours",
  "code.update.installing": "Installation de la mise à jour",
+ "code.diagnose": "Impossible d’enregistrer le diagnostic",
+ "code.diagnose.done": "Diagnostic enregistré",
  "reconnect": "Reconnecter"
 }

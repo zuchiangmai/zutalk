@@ -219,5 +219,7 @@
  "code.keys": "No se obtuvo la clave a tiempo",
  "code.starting": "Iniciando",
  "code.update.installing": "Instalando actualización",
+ "code.diagnose": "No se pudo guardar el diagnóstico",
+ "code.diagnose.done": "Diagnóstico guardado",
  "reconnect": "Reconectar"
 }

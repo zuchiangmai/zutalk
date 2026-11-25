@@ -104,6 +104,7 @@ pub(crate) enum Msg {
     SignInFailed(&'static str),
     Signed(Result<SignedOut, &'static str>),
     Copied,
+    Diagnosed,
     RotationSaved,
     InstallFailed(&'static str),
     Refreshed(Result<Refreshed, &'static str>),
@@ -142,6 +143,7 @@ impl Msg {
             Msg::SignInFailed(_) => "SignInFailed",
             Msg::Signed(_) => "Signed",
             Msg::Copied => "Copied",
+            Msg::Diagnosed => "Diagnosed",
             Msg::RotationSaved => "RotationSaved",
             Msg::InstallFailed(_) => "InstallFailed",
             Msg::Refreshed(_) => "Refreshed",
@@ -428,6 +430,7 @@ impl Hub {
             }
             Msg::Signed(out) => self.apply_signed(out?),
             Msg::Copied => self.said.say("copied"),
+            Msg::Diagnosed => self.said.say("diagnose.done"),
             Msg::RotationSaved => self.state.rotation_unsaved = false,
             Msg::InstallFailed(c) => {
                 self.set_boot(BootEvent::InstallFailed, "update.install");
@@ -628,6 +631,12 @@ impl Hub {
                 let calendar = self.state.city.clone().ok_or("city.none")?;
                 self.work.begin_file(id, calendar, event, audio)?;
             }
+            Command::Diagnose => self.work.diagnose(
+                self.state.setup.spoken.clone(),
+                self.state.setup.shown.clone(),
+                self.state.setup.sound,
+                self.state.captions,
+            )?,
         }
         Ok(())
     }

@@ -220,6 +220,7 @@ impl Core {
             said.clone(),
             root.clone(),
             frame_reg.read(),
+            water_reg.read(),
         );
         work.boot();
         let hub = Hub::new(

@@ -219,5 +219,7 @@
  "code.keys": "รับคีย์ไม่ทันเวลา",
  "code.starting": "กำลังเริ่มต้น",
  "code.update.installing": "กำลังติดตั้งอัปเดต",
+ "code.diagnose": "บันทึกข้อมูลวินิจฉัยไม่สำเร็จ",
+ "code.diagnose.done": "บันทึกข้อมูลวินิจฉัยแล้ว",
  "reconnect": "เชื่อมต่อใหม่"
 }

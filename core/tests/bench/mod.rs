@@ -26,7 +26,7 @@ use tape::{CountingTape, GATE_TIMEOUT_MS, GatedTape};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use zutalk_core::app::hub::{Config, Core, Outlet};
-use zutalk_core::app::proto::{Column, Command, Frame, Session, Setup, State, Status};
+use zutalk_core::app::proto::{Column, Command, Device, Frame, Session, Setup, State, Status};
 use zutalk_core::id::keys;
 use zutalk_core::record::shelf::{Draft, Drafts, LINE, Said, Shelf, Writer as ShelfWriter};
 use zutalk_core::rt::stats::{PeakRow, QueueRow, SpreadRow, Tally};
@@ -82,6 +82,8 @@ pub struct BenchOptions {
     pub old: Option<PathBuf>,
     /// Optional pre-seeded data folder (otherwise a fresh tempdir is created).
     pub data: Option<PathBuf>,
+    /// Fake audio input devices returned by `Config.devices`.
+    pub devices: Vec<Device>,
 }
 
 impl BenchOptions {
@@ -99,6 +101,11 @@ impl BenchOptions {
             soniox: None,
             old: None,
             data: None,
+            devices: vec![Device {
+                id: "bench-mic".into(),
+                name: "BenchFakeMicDevice77".into(),
+                default: true,
+            }],
         }
     }
 }
@@ -414,6 +421,7 @@ impl Bench {
             TapeMode::Gated => gated_tape.reels(),
         };
 
+        let devices = opts.devices;
         let config = Config {
             realtime: BENCH_WS.into(),
             soniox: opts.soniox.unwrap_or_else(|| NOWHERE.into()),
@@ -421,6 +429,7 @@ impl Bench {
             directory: NOWHERE.into(),
             old: opts.old,
             hear: mic.hear(),
+            devices: Arc::new(move || devices.clone()),
             dial: service.dial(),
             reels,
             drafts: gated_draft.drafts(),
@@ -722,22 +731,48 @@ impl Bench {
         }
     }
 
-    /// Waits until `code` appears in the received notice list.
-    pub async fn wait_notice(&self, code: &str, limit: Duration) -> Result<(), String> {
+    /// Waits until `code` appears at least `count` times in the received notice list.
+    pub async fn wait_notice_count(
+        &self,
+        code: &str,
+        count: usize,
+        limit: Duration,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + limit;
         loop {
             let notified = self.notify.notified();
-            if self.probe.lock().expect("probe lock").notices.iter().any(|c| c == code) {
+            let got = self
+                .probe
+                .lock()
+                .expect("probe lock")
+                .notices
+                .iter()
+                .filter(|c| c.as_str() == code)
+                .count();
+            if got >= count {
                 return Ok(());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(format!("timed out waiting for notice `{code}`"));
+                return Err(format!("timed out waiting for {count} notices `{code}` (got {got})"));
             }
             if tokio::time::timeout(remaining, notified).await.is_err() {
-                return Err(format!("timed out waiting for notice `{code}`"));
+                let got = self
+                    .probe
+                    .lock()
+                    .expect("probe lock")
+                    .notices
+                    .iter()
+                    .filter(|c| c.as_str() == code)
+                    .count();
+                return Err(format!("timed out waiting for {count} notices `{code}` (got {got})"));
             }
         }
+    }
+
+    /// Waits until `code` appears in the received notice list.
+    pub async fn wait_notice(&self, code: &str, limit: Duration) -> Result<(), String> {
+        self.wait_notice_count(code, 1, limit).await
     }
 
     pub fn frames(&self) -> u64 {
@@ -875,4 +910,81 @@ pub fn check_log_lines(lines: &[String], forbidden: &[String]) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+fn check_json_plain(value: &Value, where_at: &str) -> Result<(), String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        Value::String(text) => {
+            if text == "!" {
+                return Err(format!("{where_at}: refused value (\"!\")"));
+            }
+            if !zutalk_log::is_plain(text) {
+                return Err(format!("{where_at}: failed is_plain: {text:?}"));
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                check_json_plain(item, &format!("{where_at}[{idx}]"))?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                if key == "!" || !zutalk_log::is_plain(key) {
+                    return Err(format!("{where_at}: key failed is_plain: {key:?}"));
+                }
+                check_json_plain(item, &format!("{where_at}.{key}"))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Validates every file inside a diagnose bundle directory (`.json` and `logs/*.jsonl`) with the
+/// same plainness and forbidden-substring rules as `check_log_lines` (`P1-22`).
+pub fn check_bundle_dir(bundle: &Path, forbidden: &[String]) -> Result<usize, String> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(bundle, &mut files)?;
+    files.sort();
+    for path in &files {
+        let name = path.strip_prefix(bundle).unwrap_or(path).display().to_string();
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("{name}: {e}"))?;
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => {
+                let parsed: Value =
+                    serde_json::from_str(&raw).map_err(|e| format!("{name}: invalid JSON: {e}"))?;
+                check_json_plain(&parsed, &name)?;
+                for secret in forbidden {
+                    if !secret.is_empty() && raw.contains(secret.as_str()) {
+                        return Err(format!("{name}: leaked forbidden text `{secret}`"));
+                    }
+                }
+            }
+            Some("jsonl") => {
+                let lines: Vec<String> =
+                    raw.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+                check_log_lines(&lines, forbidden).map_err(|e| format!("{name}: {e}"))?;
+            }
+            other => {
+                return Err(format!(
+                    "{name}: unexpected file extension {other:?} in diagnose bundle"
+                ));
+            }
+        }
+    }
+    Ok(files.len())
 }

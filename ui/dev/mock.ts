@@ -159,6 +159,7 @@ export function mockBus(recording = false): Bus {
       };
       step(0);
     },
+    Diagnose: () => on({ kind: 'Notice', is: 'diagnose.done' }),
   };
   if (recording) handlers.Start({ do: 'Start' });
   return {

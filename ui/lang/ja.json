@@ -219,5 +219,7 @@
  "code.keys": "キーの取得がタイムアウトしました",
  "code.starting": "起動中です",
  "code.update.installing": "アップデートをインストール中です",
+ "code.diagnose": "診断情報を保存できませんでした",
+ "code.diagnose.done": "診断情報を保存しました",
  "reconnect": "再接続"
 }

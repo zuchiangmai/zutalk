@@ -219,5 +219,7 @@
  "code.keys": "키를 제때 가져오지 못했습니다",
  "code.starting": "시작하는 중입니다",
  "code.update.installing": "업데이트를 설치하는 중입니다",
+ "code.diagnose": "진단 정보를 저장하지 못했습니다",
+ "code.diagnose.done": "진단 정보를 저장했습니다",
  "reconnect": "다시 연결"
 }

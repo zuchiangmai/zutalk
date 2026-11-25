@@ -219,5 +219,7 @@
  "code.keys": "Schlüssel nicht rechtzeitig erhalten",
  "code.starting": "Wird gestartet",
  "code.update.installing": "Update wird installiert",
+ "code.diagnose": "Diagnose konnte nicht gespeichert werden",
+ "code.diagnose.done": "Diagnose gespeichert",
  "reconnect": "Neu verbinden"
 }

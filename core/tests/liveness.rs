@@ -9,7 +9,8 @@ use bench::mic::encode_block_index;
 use bench::service::{Delays, FINAL_DELAY_MS, Fault, GUESS_DELAY_MS, SILENCE_PROGRESS_MS, Service};
 use bench::speech::{BLOCK_MS, SPEAKERS, Speech, SpeechSpec};
 use bench::{
-    Bench, BenchOptions, MAX_FRAME_BYTES, STORE, TapeMode, check_log_lines, summarize_latencies,
+    Bench, BenchOptions, MAX_FRAME_BYTES, STORE, TapeMode, check_bundle_dir, check_log_lines,
+    summarize_latencies,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
@@ -20,7 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as WallInstant};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
-use zutalk_core::app::proto::{Change, Command, Status};
+use zutalk_core::app::proto::{Change, Command, Device, Setup, Status};
+use zutalk_core::app::work::{DIAGNOSE_KEPT_DIRS, Facts};
 use zutalk_core::capture::clock::BLOCK;
 use zutalk_core::capture::tape::{self, Pass};
 use zutalk_core::id::keys;
@@ -2684,5 +2686,334 @@ async fn five_minute_recording_with_twenty_commands_measures_hub_turns() {
     let slow = bench.seen().of("hub.turn.slow");
     eprintln!("P1-20 5-min bench: hub.turn_us={spread:?} hub.turn.slow={} ({slow:?})", slow.len());
     assert!(spread.as_ref().is_some_and(|s| s.n >= 20), "expected >= 20 hub turns: {spread:?}");
+    bench.finish();
+}
+
+// ---- 7. P1-22: Command::Diagnose bundle ----
+
+fn diagnose_dirs(data: &std::path::Path) -> Vec<PathBuf> {
+    let base = data.join("diagnose");
+    let Ok(entries) = fs::read_dir(base) else { return Vec::new() };
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    dirs
+}
+
+fn count_files(dir: &std::path::Path) -> usize {
+    let mut n = 0;
+    for entry in fs::read_dir(dir).expect("read bundle dir") {
+        let path = entry.expect("entry").path();
+        if path.is_dir() {
+            n += count_files(&path);
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_diagnosis_says_how_things_are() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(40_000));
+    let mut opts = BenchOptions::new(speech);
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::panic_at(10_000);
+
+    let bench = Bench::start(opts).await;
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let _id = bench.start_recording().await;
+
+    tokio::time::sleep(Duration::from_millis(30_000)).await;
+    bench.send(Command::Diagnose);
+    bench.wait_notice("diagnose.done", Duration::from_secs(10)).await.expect("diagnose.done");
+
+    let entries = diagnose_dirs(bench.data());
+    assert_eq!(entries.len(), 1, "expected exactly one bundle dir, got {entries:?}");
+    let bundle = &entries[0];
+    assert!(
+        !bundle.file_name().unwrap().to_string_lossy().ends_with(".tmp"),
+        "temp dir must be renamed: {bundle:?}"
+    );
+
+    let about_raw = fs::read_to_string(bundle.join("about.json")).expect("read about.json");
+    let about: serde_json::Value = serde_json::from_str(&about_raw).expect("parse about.json");
+    assert_eq!(about["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(about["who"].as_str(), Some("local"));
+    assert_eq!(about["keys"]["soniox"].as_str(), Some("Own"));
+    assert_eq!(about["shown"], serde_json::json!(["en", "zh"]));
+
+    let water_raw = fs::read_to_string(bundle.join("water.json")).expect("read water.json");
+    let water: serde_json::Value = serde_json::from_str(&water_raw).expect("parse water.json");
+    let marks = water["marks"].as_array().expect("water marks array");
+    let capture_mark = marks.iter().find(|m| m["stage"] == "Capture").expect("Capture mark");
+    let capture_at = capture_mark["at"].as_u64().expect("Capture at");
+    assert!(
+        (25_000..=35_000).contains(&capture_at),
+        "expected Capture around 30_000 ms, got {capture_at}"
+    );
+    assert!(marks.iter().any(|m| m["stage"] == "Tape"), "missing Tape mark");
+    let sent0 = marks
+        .iter()
+        .find(|m| m["stage"] == serde_json::json!({ "Sent": 0 }))
+        .expect("Sent(0) mark");
+
+    let stats_raw = fs::read_to_string(bundle.join("stats.json")).expect("read stats.json");
+    let stats: serde_json::Value = serde_json::from_str(&stats_raw).expect("parse stats.json");
+    let queues = stats["queues"].as_array().expect("stats queues");
+    for qname in ["hub.mail", "tape", "draft", "audio", "lane.events", "desk"] {
+        let row = queues.iter().find(|q| q["name"].as_str() == Some(qname)).unwrap_or_else(|| {
+            panic!("missing queue `{qname}` in stats.json: {queues:?}");
+        });
+        assert!(row["capacity"].as_u64().unwrap_or(0) > 0, "queue `{qname}` capacity");
+        assert!(row["depth"].is_u64(), "queue `{qname}` depth");
+        assert!(row["deepest"].is_u64(), "queue `{qname}` deepest");
+    }
+    let counts = stats["counts"].as_array().expect("stats counts");
+    let restarts = counts
+        .iter()
+        .find(|c| c["name"].as_str() == Some("part.restarts"))
+        .and_then(|c| c["n"].as_u64());
+    assert_eq!(restarts, Some(1), "expected part.restarts == 1, counts={counts:?}");
+
+    let tasks_raw = fs::read_to_string(bundle.join("tasks.json")).expect("read tasks.json");
+    let tasks: serde_json::Value = serde_json::from_str(&tasks_raw).expect("parse tasks.json");
+    let task_list = tasks.as_array().expect("tasks array");
+    for tname in ["hub", "stats", "desk", "recording", "lane.0", "frame", "watch"] {
+        assert!(
+            task_list.iter().any(|t| t["task"].as_str() == Some(tname)),
+            "missing task `{tname}` in tasks.json: {task_list:?}"
+        );
+    }
+    assert!(
+        task_list
+            .iter()
+            .any(|t| t["kind"].as_str() == Some("blocking")
+                && t["task"].as_str() == Some("desk.job")),
+        "missing running desk.job blocking call in tasks.json: {task_list:?}"
+    );
+
+    // Observable events: command.done, job.done, diagnose.wrote.
+    let cmd_done: Vec<_> = bench
+        .seen()
+        .of("command.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("Diagnose") && l.text("code") == Some("ok"))
+        .collect();
+    assert_eq!(cmd_done.len(), 1, "expected one command.done for Diagnose");
+
+    let job_done: Vec<_> = bench
+        .seen()
+        .of("job.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("diagnose") && l.text("code") == Some("ok"))
+        .collect();
+    assert_eq!(job_done.len(), 1, "expected one job.done for diagnose");
+
+    let wrote = bench.seen().of("diagnose.wrote");
+    assert_eq!(wrote.len(), 1, "expected one diagnose.wrote event");
+    let actual_files = count_files(bundle) as u64;
+    assert_eq!(wrote[0].u64("files"), Some(actual_files));
+    assert!(wrote[0].u64("bytes").unwrap_or(0) > 0);
+
+    // Emit acceptance evidence when run with --nocapture.
+    eprintln!("P1-22 bundle dir: {}", bundle.file_name().unwrap().to_string_lossy());
+    for entry in fs::read_dir(bundle).expect("list bundle") {
+        let p = entry.expect("entry").path();
+        let meta = fs::metadata(&p).expect("meta");
+        eprintln!("  {} ({} bytes)", p.file_name().unwrap().to_string_lossy(), meta.len());
+    }
+    eprintln!("P1-22 about.json:\n{about_raw}");
+    eprintln!("P1-22 water.json Sent(0):\n{}", serde_json::to_string_pretty(sent0).unwrap());
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_diagnosis_holds_nothing_that_was_said_and_no_secret() {
+    let _store = STORE.lock().await;
+    let data_dir = tempfile::tempdir().expect("data tempdir");
+    let log_dir = data_dir.path().join("logs");
+    let (scope, guard) = zutalk_log::files(&log_dir, "zutalk", Level::Debug, Limits::default())
+        .expect("open file log");
+    let entered = scope.enter();
+
+    let speech = Speech::build(SpeechSpec::standard(125_000));
+    let forbidden_words = speech.forbidden_words();
+    let fake_device_name = "StudioMicDeviceName99";
+    let mut opts = BenchOptions::new(speech);
+    opts.capture_log = false;
+    opts.tape = TapeMode::Gated;
+    opts.fault = Fault::panic_at(20_000);
+    opts.data = Some(data_dir.path().to_path_buf());
+    opts.devices =
+        vec![Device { id: "studio-mic".into(), name: fake_device_name.into(), default: true }];
+
+    let bench = Bench::start(opts).await;
+    let data_path = bench.data().to_string_lossy().into_owned();
+    bench.setup(&["en", "zh"], &["en", "zh"]).await;
+    let rec_id = bench.start_recording().await;
+
+    let secret_title = "SecretTitleZeta99";
+    let secret_query = "QueryNeedleOmega88";
+
+    tokio::time::sleep(Duration::from_millis(60_000)).await;
+    bench.send(Command::Change {
+        id: rec_id.clone(),
+        change: Change::Title { text: secret_title.into() },
+    });
+    bench.send(Command::Search { query: secret_query.into() });
+    tokio::time::sleep(Duration::from_millis(60_000)).await;
+
+    bench.stop_recording().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Let the file log writer thread drain queued lines before Diagnose copies `logs/`.
+    std::thread::sleep(Duration::from_millis(50));
+
+    bench.send(Command::Diagnose);
+    bench.wait_notice("diagnose.done", Duration::from_secs(10)).await.expect("diagnose.done");
+    bench.finish();
+
+    drop(entered);
+    drop(guard);
+
+    let dirs = diagnose_dirs(data_dir.path());
+    assert_eq!(dirs.len(), 1, "expected one diagnose bundle");
+    let bundle = &dirs[0];
+    let copied_logs = bundle.join("logs");
+    assert!(copied_logs.is_dir(), "expected logs/ subdir copied into bundle");
+    let copied_jsonl: Vec<_> = fs::read_dir(&copied_logs)
+        .expect("read bundle logs")
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .collect();
+    assert!(!copied_jsonl.is_empty(), "expected at least one .jsonl file in bundle/logs");
+
+    let mut forbidden = forbidden_words;
+    forbidden.push(secret_title.into());
+    forbidden.push(secret_query.into());
+    for spk in SPEAKERS {
+        forbidden.push(spk.into());
+    }
+    forbidden.push(hub::local_did());
+    forbidden.push("sk-own-test-key".into());
+    forbidden.push(data_path);
+    forbidden.push(fake_device_name.into());
+
+    if let Err(leak) = check_bundle_dir(bundle, &forbidden) {
+        panic!("diagnose bundle privacy check failed: {leak}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_goes_in_the_bundle_is_written_down_field_by_field() {
+    let _store = STORE.lock().await;
+    // Compile-time + serialization check on the exact key set of `Facts` (P1.md §3.13.6).
+    let expected_keys: Vec<&str> = vec![
+        "arch", "captions", "keys", "level", "os", "shown", "sound", "spoken", "up_ms", "version",
+        "who",
+    ];
+    let sample = Facts {
+        version: "0.9.0",
+        os: "macos",
+        arch: "aarch64",
+        level: "info",
+        up_ms: 42,
+        who: "local",
+        spoken: vec!["en".into()],
+        shown: vec!["zh".into()],
+        sound: "mic",
+        captions: false,
+        keys: BTreeMap::new(),
+    };
+    let sample_val = serde_json::to_value(&sample).expect("serialize Facts");
+    let mut sample_keys: Vec<&str> =
+        sample_val.as_object().unwrap().keys().map(String::as_str).collect();
+    sample_keys.sort();
+    assert_eq!(sample_keys, expected_keys);
+
+    // End-to-end: a language string containing spaces is sanitized to "!" in about.json.
+    let speech = Speech::build(SpeechSpec::standard(10_000));
+    let bench = Bench::start(BenchOptions::new(speech)).await;
+    let setup = Setup {
+        spoken: vec!["en".into(), "not a plain language code".into()],
+        shown: vec!["zh".into()],
+        ..Setup::default()
+    };
+    bench.send(Command::Setup { setup: setup.clone() });
+    bench
+        .wait_state(|s| s.setup.spoken == setup.spoken, Duration::from_secs(10))
+        .await
+        .expect("setup applied");
+
+    bench.send(Command::Diagnose);
+    bench.wait_notice("diagnose.done", Duration::from_secs(10)).await.expect("diagnose.done");
+
+    let bundle = &diagnose_dirs(bench.data())[0];
+    let about: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("about.json")).unwrap()).unwrap();
+    let mut actual_keys: Vec<&str> =
+        about.as_object().unwrap().keys().map(String::as_str).collect();
+    actual_keys.sort();
+    assert_eq!(actual_keys, expected_keys);
+    assert_eq!(about["spoken"], serde_json::json!(["en", "!"]));
+
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_newest_three_are_kept() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(10_000));
+    let bench = Bench::start(BenchOptions::new(speech)).await;
+
+    let mut all_seen: Vec<u64> = Vec::new();
+    for i in 1..=5usize {
+        bench.send(Command::Diagnose);
+        bench.wait_notice_count("diagnose.done", i, Duration::from_secs(10)).await.unwrap();
+        let current: Vec<u64> = diagnose_dirs(bench.data())
+            .into_iter()
+            .filter_map(|p| p.file_name()?.to_str()?.parse::<u64>().ok())
+            .collect();
+        let newest = *current.iter().max().expect("at least one bundle");
+        all_seen.push(newest);
+    }
+
+    let kept: Vec<u64> = diagnose_dirs(bench.data())
+        .into_iter()
+        .filter_map(|p| p.file_name()?.to_str()?.parse::<u64>().ok())
+        .collect();
+    assert_eq!(kept.len(), DIAGNOSE_KEPT_DIRS);
+    assert_eq!(kept, all_seen[all_seen.len() - DIAGNOSE_KEPT_DIRS..]);
+    bench.finish();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_diagnosis_that_cannot_be_written_says_so() {
+    let _store = STORE.lock().await;
+    let speech = Speech::build(SpeechSpec::standard(10_000));
+    let bench = Bench::start(BenchOptions::new(speech)).await;
+
+    // Occupy `<data>/diagnose` with a regular file so bundle directory creation fails.
+    fs::write(bench.data().join("diagnose"), b"not a dir").expect("block diagnose path");
+
+    bench.send(Command::Diagnose);
+    bench.wait_notice("diagnose", Duration::from_secs(10)).await.expect("diagnose failure notice");
+
+    let failed: Vec<_> = bench
+        .seen()
+        .of("job.done")
+        .into_iter()
+        .filter(|l| l.text("kind") == Some("diagnose") && l.text("code") == Some("diagnose"))
+        .collect();
+    assert_eq!(failed.len(), 1, "expected one failed diagnose job.done");
+    assert_eq!(failed[0].level, Level::Warn);
+    assert!(
+        bench.seen().of("diagnose.wrote").is_empty(),
+        "diagnose.wrote must not be emitted on failure"
+    );
+
     bench.finish();
 }

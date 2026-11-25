@@ -219,5 +219,7 @@
  "code.keys": "Could not get a key in time",
  "code.starting": "Starting up",
  "code.update.installing": "Installing an update",
+ "code.diagnose": "Could not save diagnostics",
+ "code.diagnose.done": "Diagnostics saved",
  "reconnect": "Reconnect"
 }

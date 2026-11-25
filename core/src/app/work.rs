@@ -6,7 +6,7 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, Open, Room, Row, Setup, State, Writing};
+use crate::app::proto::{Change, From, Open, Room, Row, Setup, Sound, State, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -25,6 +25,8 @@ use crate::rt::queue::{self, Full, Tx};
 use crate::rt::signal::Reading;
 use crate::rt::stats::Counter;
 use crate::rt::supervise::{End, Tree, again};
+use crate::rt::water::Water;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -45,6 +47,29 @@ pub const DESK_QUEUE_JOBS: usize = 64;
 /// Heavy background jobs (whole-recording transcription, city filing, 0.8 migration) run one at a
 /// time so they neither fight each other nor starve live captioning (`PLAN.md` §4.1, `P1.md` §3.8).
 pub const BACKGROUND_AT_ONCE_JOBS: usize = 1;
+/// Diagnose bundles retained under `<data>/diagnose/`: each copies at most 2 log files (16 MB),
+/// so 3 bundles stay under 50 MB (`P1-22-diagnose.md`).
+pub const DIAGNOSE_KEPT_DIRS: usize = 3;
+/// Most recent rotated `*.jsonl` log files copied into one diagnose bundle (`P1.md` §3.13.6).
+pub const DIAGNOSE_LOG_FILES: usize = 2;
+
+/// Safe summary written to `about.json` inside a diagnose bundle (`P1.md` §3.13.6).
+/// Constructed field by field from numbers, booleans, and static or plain-checked codes — never
+/// serialized from `State` or copied from `settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Facts {
+    pub version: &'static str,
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub level: &'static str,
+    pub up_ms: u64,
+    pub who: &'static str,
+    pub spoken: Vec<String>,
+    pub shown: Vec<String>,
+    pub sound: &'static str,
+    pub captions: bool,
+    pub keys: BTreeMap<&'static str, From>,
+}
 
 /// One unit of sequential disk work run by a [`Desk`].
 pub trait DeskJob: Send + 'static {
@@ -239,6 +264,7 @@ enum Job {
     UnsharePrepare { id: String, recording: Option<String> },
     BeginFile { id: String, calendar: Calendar, event: String, audio: bool },
     OwnKey { service: Service, key: Option<String>, busy: Vec<String> },
+    Diagnose { spoken: Vec<String>, shown: Vec<String>, sound: Sound, captions: bool },
 }
 
 impl DeskJob for Job {
@@ -262,6 +288,7 @@ impl DeskJob for Job {
             Job::UnsharePrepare { .. } => "unshare.prepare",
             Job::BeginFile { .. } => "file.begin",
             Job::OwnKey { .. } => "own_key",
+            Job::Diagnose { .. } => "diagnose",
         }
     }
 }
@@ -270,6 +297,7 @@ enum DeskOut {
     Changed,
     Silent,
     Copied,
+    Diagnosed,
     RotationSaved,
     Booted {
         out: BootOut,
@@ -313,6 +341,10 @@ struct DeskEnv {
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
+    root: Tree,
+    water: Reading<Water>,
+    started_at: std::time::Instant,
+    last_diagnose_ms: AtomicU64,
 }
 
 /// Everything the hub hands off: sequential `desk` jobs and separate supervised tasks on the
@@ -339,6 +371,7 @@ pub(crate) struct Work {
 }
 
 impl Work {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: Arc<Config>,
         http: reqwest::Client,
@@ -347,6 +380,7 @@ impl Work {
         said: Voice,
         root: Tree,
         frame: Reading<Frame>,
+        water: Reading<Water>,
     ) -> Self {
         let tree = root.child("work");
         let stats = tree.stats();
@@ -368,6 +402,10 @@ impl Work {
             invite: invite.clone(),
             signing: signing.clone(),
             keep_hint: keep_hint.clone(),
+            root: root.clone(),
+            water,
+            started_at: std::time::Instant::now(),
+            last_diagnose_ms: AtomicU64::new(0),
         });
 
         let deliver_cfg = config.clone();
@@ -416,6 +454,9 @@ impl Work {
                         Ok(DeskOut::Silent) => {}
                         Ok(DeskOut::Copied) => {
                             let _ = results.send(Msg::Copied).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::Diagnosed) => {
+                            let _ = results.send(Msg::Diagnosed).await; // dropped: the hub has ended
                         }
                         Ok(DeskOut::RotationSaved) => {
                             let _ = results.send(Msg::RotationSaved).await; // dropped: the hub has ended
@@ -829,6 +870,16 @@ impl Work {
         busy: Vec<String>,
     ) -> Result<(), &'static str> {
         self.desk.offer(Job::OwnKey { service, key, busy }).map(|_| ())
+    }
+
+    pub(crate) fn diagnose(
+        &self,
+        spoken: Vec<String>,
+        shown: Vec<String>,
+        sound: Sound,
+        captions: bool,
+    ) -> Result<(), &'static str> {
+        self.desk.offer(Job::Diagnose { spoken, shown, sound, captions }).map(|_| ())
     }
 
     /// Starts a live room's slot task or stops the previous one on the `work` subtree.
@@ -1254,6 +1305,150 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             };
             Ok(DeskOut::OwnKey(OwnKeyOut { keys: keys_from, left, survey }))
         }
+        Job::Diagnose { spoken, shown, sound, captions } => {
+            run_diagnose(env, spoken, shown, sound, captions)
+        }
+    }
+}
+
+fn plain_code(text: &str) -> String {
+    if zutalk_log::is_plain(text) { text.to_owned() } else { "!".to_owned() }
+}
+
+fn sound_code(sound: Sound) -> &'static str {
+    match sound {
+        Sound::Mic => "mic",
+        Sound::System => "system",
+        Sound::Both => "both",
+    }
+}
+
+fn run_diagnose(
+    env: &DeskEnv,
+    spoken: Vec<String>,
+    shown: Vec<String>,
+    sound: Sound,
+    captions: bool,
+) -> Result<DeskOut, &'static str> {
+    let (who, keys) = {
+        let id = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
+        let keys: BTreeMap<&'static str, From> =
+            Service::ALL.iter().map(|s| (s.name(), id.keys.from(*s))).collect();
+        (id.who.code(), keys)
+    };
+    let facts = Facts {
+        version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        level: env.config.log.code(),
+        up_ms: env.started_at.elapsed().as_millis() as u64,
+        who,
+        spoken: spoken.iter().map(|s| plain_code(s)).collect(),
+        shown: shown.iter().map(|s| plain_code(s)).collect(),
+        sound: sound_code(sound),
+        captions,
+        keys,
+    };
+    let water = env.water.now().1;
+    let stats = env.root.stats().tally();
+    let tasks = env.root.running();
+
+    let _ = zutalk_log::flush(zutalk_log::LOG_FLUSH_WAIT_MS); // dropped: tests without an installed process log have no writer to flush
+
+    let base = env.config.data.join("diagnose");
+    fs::create_dir_all(&base).map_err(|_| "diagnose")?;
+    let prev = env.last_diagnose_ms.load(Ordering::Relaxed);
+    let stamp = wall_ms().max(prev.saturating_add(1));
+    env.last_diagnose_ms.store(stamp, Ordering::Relaxed);
+
+    let tmp = base.join(format!("{stamp}.tmp"));
+    let dest = base.join(format!("{stamp}"));
+    if tmp.exists() {
+        let _ = fs::remove_dir_all(&tmp); // dropped: stale temp dir from an interrupted diagnose
+    }
+    fs::create_dir(&tmp).map_err(|_| "diagnose")?;
+
+    let write_res: Result<(usize, u64), &'static str> = (|| {
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        let mut put = |name: &str, data: Vec<u8>| -> Result<(), &'static str> {
+            fs::write(tmp.join(name), &data).map_err(|_| "diagnose")?;
+            files += 1;
+            bytes += data.len() as u64;
+            Ok(())
+        };
+        put("about.json", serde_json::to_vec_pretty(&facts).map_err(|_| "diagnose")?)?;
+        put("water.json", serde_json::to_vec_pretty(&*water).map_err(|_| "diagnose")?)?;
+        put("stats.json", serde_json::to_vec_pretty(&stats).map_err(|_| "diagnose")?)?;
+        put("tasks.json", serde_json::to_vec_pretty(&tasks).map_err(|_| "diagnose")?)?;
+
+        let logs_src = env.config.logs();
+        if logs_src.is_dir() {
+            let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+            if let Ok(entries) = fs::read_dir(&logs_src) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    {
+                        let mtime = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        found.push((mtime, path));
+                    }
+                }
+            }
+            found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            found.truncate(DIAGNOSE_LOG_FILES);
+            if !found.is_empty() {
+                let logs_dst = tmp.join("logs");
+                fs::create_dir(&logs_dst).map_err(|_| "diagnose")?;
+                for (_, src) in found {
+                    let Some(name) = src.file_name() else { continue };
+                    let copied = fs::copy(&src, logs_dst.join(name)).map_err(|_| "diagnose")?;
+                    files += 1;
+                    bytes += copied;
+                }
+            }
+        }
+        Ok((files, bytes))
+    })();
+
+    let (files, bytes) = match write_res {
+        Ok(counts) => counts,
+        Err(code) => {
+            let _ = fs::remove_dir_all(&tmp); // dropped: best-effort cleanup of half-written bundle
+            return Err(code);
+        }
+    };
+
+    if fs::rename(&tmp, &dest).is_err() {
+        let _ = fs::remove_dir_all(&tmp); // dropped: best-effort cleanup when atomic rename fails
+        return Err("diagnose");
+    }
+
+    prune_diagnose_dirs(&base);
+    info!("diagnose.wrote", files = files, bytes = bytes);
+    Ok(DeskOut::Diagnosed)
+}
+
+fn prune_diagnose_dirs(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else { return };
+    let mut dirs: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let stamp = entry.file_name().to_str()?.parse::<u64>().ok()?;
+            Some((stamp, path))
+        })
+        .collect();
+    dirs.sort_by_key(|(stamp, _)| *stamp);
+    let excess = dirs.len().saturating_sub(DIAGNOSE_KEPT_DIRS);
+    for (_, old) in dirs.into_iter().take(excess) {
+        let _ = fs::remove_dir_all(&old); // dropped: old bundle will be pruned on the next diagnose
     }
 }
 

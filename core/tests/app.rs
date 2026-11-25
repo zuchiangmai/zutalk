@@ -128,6 +128,7 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Term { said: "ZuTalk".into(), written: None }, false),
         (Command::City { address: "pol.example".into() }, false),
         (Command::File { id: "id".into(), event: "e1".into(), audio: true }, true),
+        (Command::Diagnose, false),
     ];
     for (command, expected) in cases {
         assert_eq!(command.needs_person(), expected, "{command:?}");
@@ -2780,6 +2781,54 @@ async fn a_tape_that_cannot_be_read_fails_the_job_with_a_code() {
     {
         assert!(tokio::time::Instant::now() < deadline, "expected job.done(write, tape)");
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diagnosis_says_who_signs_and_never_which_did() {
+    let _store = STORE.lock().await;
+    hub::signed_in();
+    let dir = tempfile::tempdir().expect("a folder");
+    let mut app = App::start(dir.path());
+    let state = app.until(|s| s.me.is_some()).await;
+    let person_did = state.me.expect("signed-in person DID");
+    let local_did = hub::local_did();
+
+    app.send(Command::Diagnose);
+    app.notice("diagnose.done").await;
+
+    let base = dir.path().join("diagnose");
+    let bundles: Vec<_> =
+        std::fs::read_dir(&base).expect("read diagnose dir").flatten().map(|e| e.path()).collect();
+    assert_eq!(bundles.len(), 1, "expected one diagnose bundle");
+    let bundle = &bundles[0];
+
+    let about: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(bundle.join("about.json")).expect("read about.json"),
+    )
+    .expect("parse about.json");
+    assert_eq!(about["who"].as_str(), Some("person"));
+
+    fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk_files(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk_files(bundle, &mut files);
+    assert!(!files.is_empty());
+    for file in files {
+        let raw = std::fs::read_to_string(&file).expect("read bundle file");
+        assert!(!raw.contains(&person_did), "person DID leaked into {}", file.display());
+        assert!(!raw.contains(&local_did), "local DID leaked into {}", file.display());
+        assert!(!raw.contains("did:zu:"), "did:zu leaked into {}", file.display());
+        assert!(!raw.contains("did:key:"), "did:key leaked into {}", file.display());
     }
     assert_eq!(app.seen.refused(), 0);
 }

@@ -219,5 +219,7 @@
  "code.keys": "取钥匙超时",
  "code.starting": "正在启动",
  "code.update.installing": "正在安装更新",
+ "code.diagnose": "写不出自检包",
+ "code.diagnose.done": "自检包已保存",
  "reconnect": "重连"
 }
