@@ -2853,6 +2853,7 @@ fn run_sign(
     // person's shelf before opening the SQLite index and loading the glossary (`P4.md` §3.4).
     let local_shelf = match (&who, shelf.as_deref()) {
         (Who::Person(person), Some(person_shelf)) => {
+            let _ = topic::ensure_migrated(person_shelf, now()); // dropped: best-effort legacy talk/term migration before adopt
             if let Ok(Some(local_me)) = keys::local_kept() {
                 let local = make_shelf(&local_me);
                 if local.root().is_dir() {

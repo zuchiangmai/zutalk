@@ -8,7 +8,7 @@ use crate::record::notes::{self, Note};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -392,6 +392,12 @@ impl Shelf {
         let last: Vec<&Record> = said.max_by_key(|record| record.at).into_iter().collect();
         let about = says::<About>(&held, &last)?.ok_or(Error::Field("body"))?;
         self.put(id, RECORDING, &[(id.to_string(), Some(about))], now)
+    }
+
+    /// Every key ever written for person-level record type `ty`, removed since or not.
+    pub fn known_kept(&self, ty: &str) -> Result<BTreeSet<String>, Error> {
+        let held = held(self.pack("", ty))?;
+        Ok(held.records.into_iter().filter(|r| r.path.ty == ty).map(|r| r.path.key).collect())
     }
 
     /// Whether recording `id` was ever written here, removed since or not.

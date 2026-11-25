@@ -304,7 +304,7 @@ describe('CommandPalette (⌘K) inside Shell', () => {
         page: 'reader',
         id: 'r2',
         tab: 'notes',
-        lineKey: 'n7',
+        lineKey: undefined,
       });
       expect(screen.queryByRole('dialog')).toBeNull();
 
@@ -313,6 +313,81 @@ describe('CommandPalette (⌘K) inside Shell', () => {
       expect(screen.getByRole('dialog')).toBeTruthy();
       fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
       expect(screen.queryByRole('dialog')).toBeNull();
+    } finally {
+      stop();
+    }
+  });
+
+  it('omits lineKey for Tag search hits (timestamp key) while keeping lineKey for Line hits', async () => {
+    vi.useFakeTimers();
+    const stop = startBus({
+      send: () => Promise.resolve(),
+      query: async (q): Promise<QueryReply> => {
+        if (q.view === 'Search') {
+          return {
+            version: 1,
+            value: {
+              view: 'Search',
+              data: {
+                hits: [
+                  { recording_id: 'r-tag', kind: 'Tag', key: '40000', lang: '', snippet: 'Valdrada' },
+                  { recording_id: 'r-line', kind: 'Line', key: 'k12', lang: 'en', snippet: 'Valdrada line' },
+                ],
+                truncated: false,
+              },
+            },
+          };
+        }
+        if (q.view === 'LibrarySummary') {
+          return { version: 1, value: { view: 'LibrarySummary', data: { total: 2, months: [] } } };
+        }
+        return { version: 1, value: { view: 'LibraryPage', data: { total: 0, rows: [], has_more: false } } };
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    });
+
+    try {
+      render(<Shell />);
+      await act(async () => {
+        fireEvent.keyDown(window, { key: 'k', metaKey: true });
+      });
+
+      const input = screen.getByRole('searchbox', { name: 'Search recordings' });
+      fireEvent.change(input, { target: { value: 'Valdrada' } });
+      await act(async () => {
+        vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS + 10);
+        await Promise.resolve();
+      });
+
+      // Clicking Tag hit with millisecond key '40000' must NOT pass lineKey: '40000'.
+      fireEvent.click(screen.getByRole('option', { name: /Topic.*Valdrada/ }));
+      expect(routeSource.getSnapshot()).toEqual({
+        page: 'reader',
+        id: 'r-tag',
+        tab: 'transcript',
+        lineKey: undefined,
+      });
+
+      // Re-open and click Line hit -> lineKey 'k12' is preserved.
+      await act(async () => {
+        fireEvent.keyDown(window, { key: 'k', metaKey: true });
+      });
+      const input2 = screen.getByRole('searchbox', { name: 'Search recordings' });
+      fireEvent.change(input2, { target: { value: 'Valdrada' } });
+      await act(async () => {
+        vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS + 10);
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByRole('option', { name: /Valdrada line/ }));
+      expect(routeSource.getSnapshot()).toEqual({
+        page: 'reader',
+        id: 'r-line',
+        tab: 'transcript',
+        lineKey: 'k12',
+      });
     } finally {
       stop();
     }

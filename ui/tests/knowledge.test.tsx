@@ -13,10 +13,12 @@ import { HomeView } from '../src/pages/HomePage';
 import {
   KnowledgeView,
   MAX_SELECTED_TOPICS,
+  TOPIC_MAX_BACKGROUND_CHARS,
   TOPIC_MAX_CHARS,
   topicBudgetPercent,
   topicDraftStep,
   topicSizeChars,
+  validateTopicDraft,
 } from '../src/pages/KnowledgePage';
 import { installDomMocks } from './dom';
 
@@ -117,6 +119,24 @@ describe('KnowledgePage pure helpers', () => {
     const removedPair = topicDraftStep(withPair, { is: 'RemovePair', index: 1 });
     expect(removedPair.translation_terms).toHaveLength(1);
   });
+
+  it('validates topic drafts with core-matching error codes (topic.empty and topic.limit)', () => {
+    expect(TOPIC_MAX_BACKGROUND_CHARS).toBe(6_000);
+    expect(validateTopicDraft(ALWAYS_TOPIC)).toBeNull();
+    expect(validateTopicDraft(BOOK_TOPIC)).toBeNull();
+    expect(validateTopicDraft({ ...BOOK_TOPIC, name: '   ' })).toBe('topic.empty');
+    expect(validateTopicDraft({ ...ALWAYS_TOPIC, name: '' })).toBeNull();
+    expect(
+      validateTopicDraft({ ...BOOK_TOPIC, background: 'a'.repeat(TOPIC_MAX_BACKGROUND_CHARS + 1) }),
+    ).toBe('topic.limit');
+    expect(
+      validateTopicDraft({
+        ...BOOK_TOPIC,
+        background: 'b'.repeat(5_000),
+        terms: [{ said: 'c'.repeat(5_001), written: {} }],
+      }),
+    ).toBe('topic.limit');
+  });
 });
 
 describe('KnowledgeView', () => {
@@ -200,6 +220,117 @@ describe('KnowledgeView', () => {
     expect(onRemoveTopic).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete topic' }));
     expect(onRemoveTopic).toHaveBeenCalledWith(BOOK_SUMMARY.id);
+  });
+
+  it('keeps inline add form open on same-topic refetch after blur save and closes it when switching topics', () => {
+    const onSaveTopic = vi.fn<(topic: Topic) => void>();
+
+    const { rerender } = render(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId={BOOK_SUMMARY.id}
+        topic={BOOK_TOPIC}
+        languages={['en', 'zh', 'th']}
+        onBack={vi.fn()}
+        onSelectTopic={vi.fn()}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+
+    // Edit background, blur to trigger async SaveTopic, then immediately click `+` to open Add term.
+    const bgInput = screen.getByRole('textbox', { name: 'Background' });
+    fireEvent.change(bgInput, { target: { value: 'Updated club notes' } });
+    fireEvent.blur(bgInput);
+    expect(onSaveTopic).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add term' }));
+    expect(screen.getByRole('textbox', { name: 'Term' })).toBeTruthy();
+
+    // Backend SaveTopic finishes -> Invalidate(Knowledge) delivers a fresh object with the same topic id.
+    rerender(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId={BOOK_SUMMARY.id}
+        topic={{ ...BOOK_TOPIC, background: 'Updated club notes', updated_at: BOOK_TOPIC.updated_at + 10 }}
+        languages={['en', 'zh', 'th']}
+        onBack={vi.fn()}
+        onSelectTopic={vi.fn()}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('textbox', { name: 'Term' })).toBeTruthy();
+
+    // Switching to another topic id closes the inline add form.
+    rerender(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId="always"
+        topic={ALWAYS_TOPIC}
+        languages={['en', 'zh', 'th']}
+        onBack={vi.fn()}
+        onSelectTopic={vi.fn()}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('textbox', { name: 'Term' })).toBeNull();
+  });
+
+  it('does not retain rejected over-limit edits in draft and restores saved name on empty blur', () => {
+    const onSaveTopic = vi.fn<(topic: Topic) => void>();
+    const nearLimit: Topic = {
+      ...BOOK_TOPIC,
+      background: 'x'.repeat(5_500),
+      facts: [{ key: 'Fill', value: 'y'.repeat(4_400) }],
+      terms: [],
+      translation_terms: [],
+      suggested_terms: [],
+    };
+    expect(topicSizeChars(nearLimit)).toBeLessThanOrEqual(TOPIC_MAX_CHARS);
+
+    render(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId={BOOK_SUMMARY.id}
+        topic={nearLimit}
+        languages={['en', 'zh', 'th']}
+        onBack={vi.fn()}
+        onSelectTopic={vi.fn()}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+
+    // Adding a term that pushes size over 10,000 invokes onSaveTopic (to surface topic.limit)
+    // without leaving the rejected term in optimistic draft pills.
+    fireEvent.click(screen.getByRole('button', { name: 'Add term' }));
+    const termInput = screen.getByRole('textbox', { name: 'Term' });
+    const hugeTerm = 'OverBudgetTerm'.repeat(10);
+    fireEvent.change(termInput, { target: { value: hugeTerm } });
+    fireEvent.submit(termInput.closest('form')!);
+
+    expect(onSaveTopic).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(hugeTerm)).toBeNull();
+
+    // Clearing custom topic name and blurring calls onSaveTopic (to surface topic.empty)
+    // and immediately restores the saved topic name in the input.
+    onSaveTopic.mockClear();
+    const nameInput = screen.getByRole('textbox', { name: 'Topic name' }) as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: '   ' } });
+    fireEvent.blur(nameInput);
+
+    expect(onSaveTopic).toHaveBeenCalledTimes(1);
+    expect(nameInput.value).toBe(nearLimit.name);
   });
 });
 

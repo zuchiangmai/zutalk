@@ -298,6 +298,165 @@ describe('ReaderView titles, tag jump, and remember term', () => {
     fireEvent.submit(termInput.closest('form')!);
     expect(onRememberTerm).toHaveBeenCalledWith('bookclub01', 'Valdrada', {});
   });
+
+  it('keeps pending distant tag jump alive across chunk 0 and highlights target line once chunk 2 loads', async () => {
+    const TOTAL_LINES = 192;
+    const makeLine = (idx: number, t0: number): [string, Said] => [
+      `k${idx}`,
+      {
+        t0,
+        t1: t0 + 4_000,
+        speaker: '1',
+        language: 'en',
+        text: `Segment ${idx}`,
+        translations: {},
+        via: { text: 'stt-async-v6' },
+        incomplete: false,
+      },
+    ];
+    const chunk0Lines = Array.from({ length: 64 }, (_, i) => makeLine(i, i * 1_000));
+    const chunk1Lines = Array.from({ length: 64 }, (_, i) => makeLine(64 + i, 3_000_000 + i * 1_000));
+    // Line k138 lands exactly at 7,200,000 ms (2:00:00).
+    const chunk2Lines = Array.from({ length: 64 }, (_, i) =>
+      makeLine(128 + i, 7_200_000 + (i - 10) * 5_000),
+    );
+
+    let resolveChunk2: ((reply: QueryReply) => void) | null = null;
+    const chunk2Promise = new Promise<QueryReply>((resolve) => {
+      resolveChunk2 = resolve;
+    });
+
+    const bus: Bus = {
+      async send() {},
+      query(q: Query): Promise<QueryReply> {
+        if (q.view === 'Transcript') {
+          if (q.chunk === 2) return chunk2Promise;
+          return Promise.resolve({
+            version: 1,
+            value: {
+              view: 'Transcript',
+              data: {
+                id: q.id,
+                take: q.take ?? 1,
+                chunk: q.chunk,
+                total_lines: TOTAL_LINES,
+                total_chunks: 3,
+                lines: q.chunk === 0 ? chunk0Lines : chunk1Lines,
+              },
+            },
+          });
+        }
+        return Promise.resolve({ version: 1, value: { view: 'Topics', data: SAMPLE_TOPICS } });
+      },
+      listen(on) {
+        on({ kind: 'State', is: EMPTY });
+        return () => {};
+      },
+    };
+    stopBus = startBus(bus);
+
+    const longRec: RecordingView = {
+      ...makeRecording('Ai'),
+      row: {
+        ...makeRecording('Ai').row,
+        id: 'rec-long-multi-chunk',
+        length_ms: 10_000_000,
+        tags: [{ label: 'Deep dive', at_ms: 7_200_000 }],
+      },
+      takes: [{ take: 1, lines: TOTAL_LINES, is_live: false, is_current: true, written_at: 1_760_002_000_000 }],
+    };
+
+    const { container } = render(
+      <ReaderView
+        recording={longRec}
+        progressRefine={null}
+        progressTitle={null}
+        exporters={EMPTY.exporters}
+        isRecordingThis={false}
+        topics={SAMPLE_TOPICS}
+        onPickTitle={vi.fn()}
+        onGenerateTitle={vi.fn()}
+        onRememberTerm={vi.fn()}
+        {...baseHandlers()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('li[data-line-key="k0"]')).toBeTruthy();
+    });
+
+    // Click distant tag at 2:00:00 (7,200,000 ms) while only chunk 0 is loaded.
+    fireEvent.click(screen.getByRole('button', { name: /Deep dive/ }));
+
+    // Wait for chunk 2 request to be issued and verify chunk 0 did NOT falsely steal highlight.
+    await waitFor(() => {
+      expect(resolveChunk2).not.toBeNull();
+    });
+    expect(container.querySelector('li.hit')).toBeNull();
+
+    // Now deliver chunk 2 containing k138 at 7,200,000 ms -> k138 must be highlighted.
+    resolveChunk2!({
+      version: 1,
+      value: {
+        view: 'Transcript',
+        data: {
+          id: longRec.row.id,
+          take: 1,
+          chunk: 2,
+          total_lines: TOTAL_LINES,
+          total_chunks: 3,
+          lines: chunk2Lines,
+        },
+      },
+    });
+
+    await waitFor(() => {
+      const targetRow = container.querySelector('li[data-line-key="k138"]');
+      expect(targetRow).toBeTruthy();
+      expect(targetRow?.classList.contains('hit')).toBe(true);
+    });
+  });
+
+  it('defaults remember-term topic to always when the recording references a deleted topic id', async () => {
+    mountTranscriptBus();
+    const onRememberTerm = vi.fn();
+    const recWithDeletedTopic: RecordingView = {
+      ...makeRecording('Ai'),
+      row: { ...makeRecording('Ai').row, topics: ['deleted_topic_id'] },
+      topics: ['deleted_topic_id'],
+    };
+
+    const { container } = render(
+      <ReaderView
+        recording={recWithDeletedTopic}
+        progressRefine={null}
+        progressTitle={null}
+        exporters={EMPTY.exporters}
+        isRecordingThis={false}
+        topics={SAMPLE_TOPICS}
+        onPickTitle={vi.fn()}
+        onGenerateTitle={vi.fn()}
+        onRememberTerm={onRememberTerm}
+        {...baseHandlers()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('li[data-line-key="k1"]')).toBeTruthy();
+    });
+
+    const rememberButtons = screen.getAllByRole('button', { name: 'Add to knowledge base' });
+    fireEvent.click(rememberButtons[0]);
+
+    const topicSelect = screen.getByRole('combobox', { name: 'Save to topic' }) as HTMLSelectElement;
+    expect(topicSelect.value).toBe('always');
+
+    const termInput = screen.getByRole('textbox', { name: 'Term' }) as HTMLInputElement;
+    fireEvent.change(termInput, { target: { value: 'Valdrada' } });
+    fireEvent.submit(termInput.closest('form')!);
+
+    expect(onRememberTerm).toHaveBeenCalledWith('always', 'Valdrada', {});
+  });
 });
 
 describe('ResultView tags and titling progress', () => {

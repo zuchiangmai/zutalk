@@ -12,6 +12,9 @@ export const ALWAYS_TOPIC_ID = 'always';
 /** Matches core/src/knowledge/topic.rs::TOPIC_MAX_CHARS and Knowledge.dc.html (`x / 10,000`). */
 export const TOPIC_MAX_CHARS = 10_000;
 
+/** Matches core/src/knowledge/topic.rs::TOPIC_MAX_BACKGROUND_CHARS. */
+export const TOPIC_MAX_BACKGROUND_CHARS = 6_000;
+
 /** Matches core/src/knowledge/topic.rs::MAX_SELECTED_TOPICS so State.setup.topics stays O(1). */
 export const MAX_SELECTED_TOPICS = 8;
 
@@ -40,6 +43,14 @@ export function topicSizeChars(topic: Topic): number {
 export function topicBudgetPercent(sizeChars: number): number {
   if (sizeChars <= 0) return 0;
   return Math.min(100, Math.max(0, Math.round((sizeChars / TOPIC_MAX_CHARS) * 100)));
+}
+
+/** Pure validation mirroring core/src/knowledge/topic.rs::normalize error codes. */
+export function validateTopicDraft(topic: Topic): 'topic.empty' | 'topic.limit' | null {
+  if (!topic.pinned && !topic.name.trim()) return 'topic.empty';
+  if (charLen(topic.background.trim()) > TOPIC_MAX_BACKGROUND_CHARS) return 'topic.limit';
+  if (topicSizeChars(topic) > TOPIC_MAX_CHARS) return 'topic.limit';
+  return null;
 }
 
 export type KnowledgeDraftAction =
@@ -190,29 +201,47 @@ export function KnowledgeView({
   const [pairSource, setPairSource] = useState('');
   const [pairTarget, setPairTarget] = useState('');
 
+  const topicId = topic?.id ?? null;
+
+  // Reset inline add forms ONLY when switching topics so an async blur save refetching the
+  // same topic does not close a freshly opened inline add form.
   useEffect(() => {
-    setDraft(topic);
     setAddingFact(false);
     setAddingTerm(false);
     setAddingPair(false);
+  }, [topicId]);
+
+  useEffect(() => {
+    setDraft(topic);
   }, [topic]);
 
   const applyAndSave = (action: KnowledgeDraftAction) => {
-    if (!draft) return;
+    if (!draft || !topic || draft.id !== topic.id || draft.id !== selectedId) return;
     const next = topicDraftStep(draft, action);
+    if (validateTopicDraft(next) !== null) {
+      // Surface the stable core error code without keeping rejected optimistic edits in draft.
+      onSaveTopic(next);
+      return;
+    }
     setDraft(next);
     onSaveTopic(next);
   };
 
   const commitDraftText = () => {
-    if (!draft || !topic) return;
+    if (!draft || !topic || draft.id !== topic.id || draft.id !== selectedId) return;
     if (
-      draft.name !== topic.name ||
-      draft.domain !== topic.domain ||
-      draft.background !== topic.background
+      draft.name === topic.name &&
+      draft.domain === topic.domain &&
+      draft.background === topic.background
     ) {
-      onSaveTopic(draft);
+      return;
     }
+    if (validateTopicDraft(draft) !== null) {
+      onSaveTopic(draft);
+      setDraft(topic);
+      return;
+    }
+    onSaveTopic(draft);
   };
 
   const sizeChars = draft ? topicSizeChars(draft) : 0;

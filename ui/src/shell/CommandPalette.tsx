@@ -178,7 +178,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           page: 'reader',
           id: hit.recording_id,
           tab: hit.kind === 'Note' ? 'notes' : 'transcript',
-          lineKey: hit.key,
+          lineKey: hit.kind === 'Line' || hit.kind === 'Translation' ? hit.key : undefined,
         });
         onClose();
       }}

@@ -4,7 +4,7 @@
 
 mod hub;
 
-use hub::{App, ME, NOWHERE, STORE, config_on, local_did, local_shelf, store, tape};
+use hub::{App, ME, NOWHERE, STORE, config_on, local_did, local_shelf, shelf, store, tape};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -755,4 +755,215 @@ async fn adopt_resigns_local_topics_and_merges_always_without_losing_person_term
     assert_eq!(sum_b.plan, AdoptPlan::OtherPerson);
     assert_eq!(sum_b.topics, 0);
     assert!(topic::get(&person_b, &local_custom.id).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_preserves_person_legacy_terms_when_local_has_always_topic() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = wall_ms() as i64;
+
+    // Person shelf pre-dates topics: only legacy `talk/term` exists (no `topics.jsonl`).
+    let person = shelf(dir.path());
+    glossary::put(
+        &person,
+        "PersonLegacyTerm",
+        Some(BTreeMap::from([("zh".into(), "本人旧词".into())])),
+        now,
+    )
+    .expect("seed person legacy term");
+    assert!(!person.pack_path("", zutalk_core::record::shelf::TOPIC).exists());
+
+    // Local device shelf already has an `"always"` topic in `topics.jsonl`.
+    let local = local_shelf(dir.path());
+    topic::save(
+        &local,
+        Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            terms: vec![Term {
+                said: "LocalAlwaysTerm".into(),
+                written: BTreeMap::from([("zh".into(), "本机新词".into())]),
+            }],
+            ..Topic::default()
+        },
+        now + 1,
+    )
+    .expect("seed local always topic");
+
+    // Sign in as ME through full `run_sign`: person's legacy terms must migrate BEFORE `adopt::run`,
+    // so both `PersonLegacyTerm` and `LocalAlwaysTerm` survive in `"always"`.
+    let kept = [&[5u8; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept)).unwrap();
+    let mut app = App::start(dir.path());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+
+    let reply =
+        app.core.query(Query::Topic { id: ALWAYS_TOPIC_ID.into() }).await.expect("topic query");
+    let QueryValue::Topic(Some(always)) = reply.value else {
+        panic!("expected always topic, got {:?}", reply.value);
+    };
+    assert!(
+        always.terms.iter().any(|t| {
+            t.said == "PersonLegacyTerm"
+                && t.written.get("zh").map(String::as_str) == Some("本人旧词")
+        }),
+        "person legacy term was shadowed by local always topic: {:?}",
+        always.terms
+    );
+    assert!(
+        always.terms.iter().any(|t| {
+            t.said == "LocalAlwaysTerm"
+                && t.written.get("zh").map(String::as_str) == Some("本机新词")
+        }),
+        "local always term missing after adopt: {:?}",
+        always.terms
+    );
+
+    let gloss_reply = app.core.query(Query::Glossary).await.expect("glossary query");
+    let QueryValue::Glossary(terms) = gloss_reply.value else {
+        panic!("expected glossary, got {:?}", gloss_reply.value);
+    };
+    assert!(terms.iter().any(|t| t.said == "PersonLegacyTerm"));
+    assert!(terms.iter().any(|t| t.said == "LocalAlwaysTerm"));
+
+    assert!(
+        app.seen
+            .of("topic.saved")
+            .iter()
+            .any(|l| l.text("op") == Some("migrate") && l.text("code") == Some("ok")),
+        "expected topic.saved(op=migrate) event"
+    );
+    assert!(
+        app.seen.of("identity.adopt").iter().any(|l| l.text("code") == Some("ok")),
+        "expected identity.adopt event"
+    );
+    let dumped = format!("{:?}", app.seen.all());
+    assert!(!dumped.contains("PersonLegacyTerm"), "term text leaked in logs");
+    assert!(!dumped.contains("LocalAlwaysTerm"), "term text leaked in logs");
+    assert!(!dumped.contains("did:key:"), "did:key leaked in logs");
+    assert!(!dumped.contains("did:zu:"), "did:zu leaked in logs");
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_merges_local_legacy_terms_into_person_existing_always_topic() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = wall_ms() as i64;
+
+    // Person shelf already has `"always"` in `topics.jsonl`.
+    let person = shelf(dir.path());
+    topic::save(
+        &person,
+        Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            terms: vec![Term {
+                said: "PersonTopicTerm".into(),
+                written: BTreeMap::from([("zh".into(), "本人主题词".into())]),
+            }],
+            ..Topic::default()
+        },
+        now,
+    )
+    .expect("seed person always");
+
+    // Local shelf only has pre-upgrade legacy `talk/term` (no `topics.jsonl`).
+    let local = local_shelf(dir.path());
+    glossary::put(
+        &local,
+        "LocalLegacyTerm",
+        Some(BTreeMap::from([("zh".into(), "本机旧词".into())])),
+        now + 1,
+    )
+    .expect("seed local legacy term");
+    assert!(!local.pack_path("", zutalk_core::record::shelf::TOPIC).exists());
+
+    // Direct `adopt::run` must merge local legacy terms into person's existing `"always"` topic.
+    let sum = adopt::run(dir.path(), &local, &person, &[], now + 10).expect("adopt legacy terms");
+    assert_eq!(sum.plan, AdoptPlan::Adopt);
+    assert_eq!(sum.terms, 1);
+    assert_eq!(sum.topics, 1);
+
+    let topics = topic::list(&person).expect("list person topics");
+    let always = topics.iter().find(|t| t.id == ALWAYS_TOPIC_ID).expect("always topic");
+    assert!(always.terms.iter().any(|t| t.said == "PersonTopicTerm"));
+    assert!(
+        always.terms.iter().any(|t| {
+            t.said == "LocalLegacyTerm"
+                && t.written.get("zh").map(String::as_str) == Some("本机旧词")
+        }),
+        "local legacy term must merge into person always topic: {:?}",
+        always.terms
+    );
+
+    // Re-running adopt is idempotent.
+    let again = adopt::run(dir.path(), &local, &person, &[], now + 20).expect("idempotent adopt");
+    assert_eq!(again.terms, 0);
+    assert_eq!(again.topics, 0);
+
+    // Full app boot exposes both terms through `Query::Glossary`.
+    let kept = [&[5u8; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept)).unwrap();
+    let mut app = App::start(dir.path());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+
+    let gloss_reply = app.core.query(Query::Glossary).await.expect("glossary query");
+    let QueryValue::Glossary(terms) = gloss_reply.value else {
+        panic!("expected glossary, got {:?}", gloss_reply.value);
+    };
+    assert!(terms.iter().any(|t| t.said == "PersonTopicTerm"));
+    assert!(terms.iter().any(|t| t.said == "LocalLegacyTerm"));
+    assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_never_resurrects_custom_topic_removed_by_person() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = 1_765_100_000_000i64;
+
+    let local = local_shelf(dir.path());
+    let t1 = topic::save(
+        &local,
+        Topic { name: "Transient Club".into(), domain: "Notes".into(), ..Topic::default() },
+        now,
+    )
+    .expect("save local T1");
+
+    let key_a = Arc::new(SecretKey::from_seed(&[31u8; 32]));
+    let did_a = "did:zu:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let person_a =
+        Shelf::new(dir.path().join("records").join(did_a.replace(':', "-")), did_a, key_a);
+
+    // First sign-in adopts T1.
+    let first = adopt::run(dir.path(), &local, &person_a, &[], now + 10).expect("first adopt");
+    assert_eq!(first.topics, 1);
+    assert!(topic::get(&person_a, &t1.id).unwrap().is_some());
+
+    // Person removes T1 (writing a `None` tombstone to person's `topics.jsonl`).
+    topic::remove(&person_a, &t1.id, now + 20).expect("remove T1 on person shelf");
+    assert!(topic::get(&person_a, &t1.id).unwrap().is_none());
+
+    // Local device later adds a brand-new custom topic T2 while still retaining T1 backup.
+    let t2 = topic::save(
+        &local,
+        Topic { name: "Fresh Seminar".into(), domain: "Design".into(), ..Topic::default() },
+        now + 25,
+    )
+    .expect("save local T2");
+
+    // Subsequent sign-in must NOT resurrect deleted T1, while still adopting brand-new T2.
+    let second = adopt::run(dir.path(), &local, &person_a, &[], now + 30).expect("second adopt");
+    assert_eq!(second.topics, 1, "only brand-new T2 should be adopted");
+    assert!(
+        topic::get(&person_a, &t1.id).unwrap().is_none(),
+        "custom topic removed by person must never resurrect on re-sign-in"
+    );
+    let adopted_t2 = topic::get(&person_a, &t2.id).unwrap().expect("T2 should be adopted");
+    assert_eq!(adopted_t2.name, "Fresh Seminar");
 }

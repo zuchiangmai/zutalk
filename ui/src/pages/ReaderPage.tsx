@@ -32,6 +32,9 @@ import { FileArchiveCard } from './FileArchiveCard';
 import { REFINE_STEPS, refineStepIndex } from './ResultPage';
 import { TranscriptList } from './TranscriptList';
 
+/** Max timestamp distance (ms) to accept an already-loaded line for a tag jump before fetching the target chunk. */
+const TAG_JUMP_TOLERANCE_MS = 30_000;
+
 function isKeyError(code?: string): boolean {
   if (!code) return false;
   return code.startsWith('keys.') || code === 'key' || code === 'quota';
@@ -135,7 +138,7 @@ export function ReaderView({
   const [titleDraft, setTitleDraft] = useState(row.title);
   const [titleMenuOpen, setTitleMenuOpen] = useState(false);
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const [pendingTagAtMs, setPendingTagAtMs] = useState<number | null>(null);
+  const pendingTagAtMsRef = useRef<number | null>(null);
   const [activeLangs, setActiveLangs] = useState<string[]>(recording.shown);
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -158,7 +161,7 @@ export function ReaderView({
   useEffect(() => {
     setTitleMenuOpen(false);
     setActiveTag(null);
-    setPendingTagAtMs(null);
+    pendingTagAtMsRef.current = null;
   }, [row.id]);
 
   useEffect(() => {
@@ -263,21 +266,28 @@ export function ReaderView({
     (lines: [string, Said][]) => {
       loadedLinesRef.current = lines;
       onLoadedLinesChange?.(lines);
-      if (pendingTagAtMs !== null && lines.length > 0) {
-        const idx = findLineIndexForTime(lines, pendingTagAtMs);
-        if (idx !== null) {
+      const targetAtMs = pendingTagAtMsRef.current;
+      if (targetAtMs !== null && lines.length > 0) {
+        const idx = findLineIndexForTime(lines, targetAtMs);
+        const totalTakeLines =
+          recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? lines.length;
+        if (
+          idx !== null &&
+          (Math.abs(lines[idx][1].t0 - targetAtMs) <= TAG_JUMP_TOLERANCE_MS ||
+            lines.length >= totalTakeLines)
+        ) {
           setFocusLineKey(lines[idx][0]);
-          setPendingTagAtMs(null);
+          pendingTagAtMsRef.current = null;
         }
       }
     },
-    [onLoadedLinesChange, pendingTagAtMs],
+    [onLoadedLinesChange, recording.takes, selectedTake],
   );
 
   const handleTagClick = (tag: ContentTag) => {
     if (activeTag === tag.label) {
       setActiveTag(null);
-      setPendingTagAtMs(null);
+      pendingTagAtMsRef.current = null;
       setFocusLineKey(null);
       setScrollToIndex(null);
       return;
@@ -290,22 +300,26 @@ export function ReaderView({
     if (idx !== null) {
       const [lineKey, said] = loaded[idx];
       const totalTakeLines = recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? loaded.length;
-      if (loaded.length < totalTakeLines && row.length_ms > 0 && Math.abs(said.t0 - tag.at_ms) > 30_000) {
+      if (
+        loaded.length < totalTakeLines &&
+        row.length_ms > 0 &&
+        Math.abs(said.t0 - tag.at_ms) > TAG_JUMP_TOLERANCE_MS
+      ) {
         // Estimate row index proportionally so VList loads the target chunk without scanning all chunks.
         const est = Math.min(totalTakeLines - 1, Math.max(0, Math.floor((tag.at_ms / row.length_ms) * totalTakeLines)));
         setScrollToIndex(est);
-        setPendingTagAtMs(tag.at_ms);
+        pendingTagAtMsRef.current = tag.at_ms;
       } else {
         setFocusLineKey(lineKey);
         setScrollToIndex(parseLineIndex(lineKey) ?? idx);
-        setPendingTagAtMs(null);
+        pendingTagAtMsRef.current = null;
       }
     } else if (row.length_ms > 0) {
       const totalTakeLines = recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? 0;
       if (totalTakeLines > 0) {
         const est = Math.min(totalTakeLines - 1, Math.max(0, Math.floor((tag.at_ms / row.length_ms) * totalTakeLines)));
         setScrollToIndex(est);
-        setPendingTagAtMs(tag.at_ms);
+        pendingTagAtMsRef.current = tag.at_ms;
       }
     }
   };
@@ -314,7 +328,7 @@ export function ReaderView({
     setTab('transcript');
     setCompare(false);
     setActiveTag(null);
-    setPendingTagAtMs(null);
+    pendingTagAtMsRef.current = null;
     setFocusLineKey(note.anchor);
     setScrollToIndex(parseLineIndex(note.anchor));
   };

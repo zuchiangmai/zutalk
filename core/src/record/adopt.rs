@@ -316,6 +316,16 @@ pub fn run(
         }
     }
 
+    // Snapshot legacy local `talk/term` entries before consuming `local_terms` so that when the
+    // local shelf has no `"always"` topic yet, they can still merge into the person's existing
+    // `"always"` topic purely at the `serde_json::Value` layer (zero `crate::knowledge` import).
+    let local_has_always = local_topics.iter().any(|(k, _)| k == ALWAYS_TOPIC_KEY);
+    let legacy_as_always = (!local_has_always && !local_terms.is_empty()).then(|| {
+        serde_json::json!({
+            "terms": local_terms.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
+        })
+    });
+
     // Adopt missing `talk/term` records without importing `crate::knowledge`.
     let existing_terms: BTreeSet<String> = person
         .kept::<serde_json::Value>(TERM)
@@ -333,9 +343,11 @@ pub fn run(
         person.put("", TERM, &missing_terms, now).map_err(|_| "adopt.failed")?;
     }
 
-    // Adopt `talk/topic` records without importing `crate::knowledge`, merging `"always"` losslessly.
+    // Adopt `talk/topic` records without importing `crate::knowledge`, merging `"always"` losslessly
+    // and checking tombstones via `known_kept` so person-deleted custom topics never resurrect.
     let existing_topics: BTreeMap<String, serde_json::Value> =
         person.kept::<serde_json::Value>(TOPIC).map_err(|_| "adopt.failed")?.into_iter().collect();
+    let known_topics = person.known_kept(TOPIC).map_err(|_| "adopt.failed")?;
     let mut adopted_topics: Vec<(String, Option<serde_json::Value>)> = Vec::new();
     for (k, val) in local_topics {
         if k == ALWAYS_TOPIC_KEY {
@@ -347,9 +359,15 @@ pub fn run(
                     }
                 }
             }
-        } else if !existing_topics.contains_key(&k) {
+        } else if !known_topics.contains(&k) {
             adopted_topics.push((k, Some(val)));
         }
+    }
+    if let (Some(legacy), Some(person_always)) =
+        (legacy_as_always.as_ref(), existing_topics.get(ALWAYS_TOPIC_KEY))
+        && let Some(merged) = merge_always_topic_value(person_always, legacy)
+    {
+        adopted_topics.push((ALWAYS_TOPIC_KEY.to_owned(), Some(merged)));
     }
     let topics_count = u32::try_from(adopted_topics.len()).unwrap_or(u32::MAX);
     if !adopted_topics.is_empty() {

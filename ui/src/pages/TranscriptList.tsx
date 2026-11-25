@@ -118,7 +118,6 @@ export function TranscriptList({
   const skipLineBlurRef = useRef(false);
   const skipSpeakerBlurRef = useRef(false);
 
-  const defaultRememberTopic = recordingTopics[0] || ALWAYS_TOPIC_ID;
   const topicOptions = useMemo(() => {
     const hasAlways = topics.some((x) => x.id === ALWAYS_TOPIC_ID);
     const list: { id: string; label: string }[] = [];
@@ -133,6 +132,11 @@ export function TranscriptList({
     }
     return list;
   }, [topics]);
+
+  const defaultRememberTopic = useMemo(
+    () => recordingTopics.find((tid) => topicOptions.some((opt) => opt.id === tid)) ?? ALWAYS_TOPIC_ID,
+    [recordingTopics, topicOptions],
+  );
 
   const openRemember = (lineKey: string, initialText: string) => {
     setAddingNoteKey(null);
