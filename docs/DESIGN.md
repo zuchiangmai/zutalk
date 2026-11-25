@@ -36,7 +36,8 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 行 | 一个声音用一种语言说的一句。现场和散场用同一套断句规则 | `lines`、`lang` |
 | 记录 | 一条签名的 Zu 记录。改动是同一路径上多一条；草稿、转写、房间清单、词表、交城的去向都是记录 | `shelf` |
 | 请求 | 对我们服务器的每个请求都是一条本人签名的记录，在 `zu::auth::WINDOW` 之内。一个端口 `keys::Ours::ask` | `keys`、`server` |
-| 本机身份 | 没有人登录时签记录的 `did:key`（Ed25519 签名钥匙）；不联网、不登记，记录只留在本机书架 | `id/keys.rs`、`zu::did::local` |
+| 本机身份与领回 | 没有人登录时签记录的 `did:key`（Ed25519 签名钥匙），不联网、不登记，记录留在本机书架；首次以某个 `did:zu` 登录时经 `adopt` 重签全部录音（含全部 `take`、说话人与笔记）及词表入本人书架，由 `<data>/adopted.json` 绑定首任 DID（拒绝第二位 DID），`tape` 不动，本机备份留至显式 `Command::DiscardLocal` 清理 | `id/keys.rs`、`record/adopt.rs`、`zu::did::local` |
+| 身份流程与每日额度 | `AuthFlow` 显式状态机管两段式扫码确认（`Scanning` → `Confirm { did, handle, code }` → `ConfirmSignIn` / `CancelSignIn`）、新建（可选句柄 + `rotation_unsaved`）与恢复密钥找回（`zu::did::add_signing_key`）；`Quota` 按服务（`soniox`/`openrouter`）与 UTC 自然日统计当日已用与剩余次数，由服务器 `POST /quota`、`POST /lease` 与核心 `id/quota.rs` 协同执行 | `id/identity.rs`、`id/quota.rs`、`server/src/ledger.rs` |
 | 钥匙 | 各服务的钥匙：本人自带的，或用授予的额度换来的短命钥匙；录音和房间的密钥由本机一个秘密派生。秘密只放一处：系统钥匙库，macOS 上是一个只有本人账户读得了的文件 | `keys` |
 | 房间 | 只追加的密文日志，加一个只放最新一帧的槽。钥匙只在链接 `#` 后面 | `room`、`server/src/room.rs` |
 | 导出器 | `EXPORTERS` 表里的一行 | `export` |
@@ -45,7 +46,7 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 词表 | 本人要听对、写对的人名和词：怎么说，各语言怎么写。一个词一条记录 | `glossary`、`shelf` |
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
 | 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
-| 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：有上限的小状态（`State`，13 个定界字段，不含资料库/正文/搜索/词表/日历）变了整份发；信号（`Frame`、`Session`、`Level`、`Progress`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；失效环（`Invalidations`）保留最近 64 条合并后的 `Invalidate`；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs`、`view/query.rs` |
+| 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：有上限的小状态（`State`，16 个定界字段，含 `auth`/`handle`/`quota`/`local_shelf`，不含资料库/正文/搜索/词表/日历）变了整份发；信号（`Frame`、`Session`、`Level`、`Progress`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；失效环（`Invalidations`）保留最近 64 条合并后的 `Invalidate`；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs`、`view/query.rs` |
 | 视图与投影索引 | 会随录音和资料增长的数据（按月统计、分页列表、全文检索、单场详情、64 行分块正文与两版对比、词表、日历、对外记录）全部由 `ViewEngine::query`（L3 `Tree::blocking` 并发限 8、同槽取消）按需拉取；本机 SQLite + FTS5 `trigram`（加 1–2 字短词回退）是可丢弃重建的投影加速器 | `view/index.rs`、`view/transcript.rs`、`view/query.rs` |
 | 笔记与多版本精修 | 带时间与行锚点的多条 `talk/note`（向后兼容旧单串笔记，空文本即标记）；`talk/line` 支持读取任意旧 `take` 与版本列表；精修生命周期由 `RefineStatus` 状态机与 `Journal.failed` 持久化表达，支持 `Command::Refine` 手动触发、重试与再精修 | `record/notes.rs`、`record/takes.rs`、`ai/write.rs` |
 | 寄存器 | `Register<T>` / `Reading<T>`：最新值加单调序号的 `watch` 薄包装，非阻塞、多写多读，晚来的读者立刻拿到最新一份 | `rt/signal.rs` |
@@ -67,17 +68,17 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `log` | `log/src/lib.rs`、`log/src/line.rs`、`log/src/sink.rs`、`log/src/hear.rs`、`log/src/capture.rs` | 独立 crate `zutalk-log`：四个事件宏与 `Plain` 类型、平铺 JSONL 写线程 `log.writer` 与轮换、panic 钩子、测试捕获与任务/线程透传；全仓仅它依赖 `tracing` |
 | `rt` | `rt.rs`、`rt/signal.rs`、`rt/water.rs`、`rt/supervise.rs`、`rt/queue.rs`、`rt/stats.rs`、`rt/keep.rs` | 运行时地基（不认识业务）：最新值寄存器、水位线与 `judge`、具名监督树与重启上限、有名字有界队列、统计与分桶分布、泛型批量阻塞落盘部件 |
 | `capture` | `capture.rs`、`capture/audio.rs`、`capture/audio/file.rs`、`capture/clock.rs`、`capture/tape.rs` | 麦克风/电脑声音（cpal）与音频文件；重采样、混音、补静音、具名线程与重开；采集时钟与 `wall_clock_policy`；加密分钟块 `tape`、静音补洞、崩溃截尾与销毁 |
-| `id` | `id.rs`、`id/keys.rs` | 身份（本机 `did:key` 与登录 `did:zu`，状态机 `Who`）、秘密文件与钥匙库、各服务钥匙来源（`From`）与 `Chain`、派生密钥、对服务器的签名请求、旧版邀请认领 |
+| `id` | `id.rs`、`id/keys.rs`、`id/identity.rs`、`id/quota.rs` | 身份（本机 `did:key` 与登录 `did:zu`，状态机 `Who` 与 `AuthFlow`）、两段式扫码确认、建号/恢复密钥找回与离线句柄缓存、按服务每日额度 `Quota` 解析与拉取、秘密文件与钥匙库、各服务钥匙来源（`From`）与 `Chain`、派生密钥、对服务器的签名请求、旧版邀请认领 |
 | `live` | `live.rs`、`live/wire.rs`、`live/lane.rs`、`live/frame.rs`、`live/lines.rs`、`live/lang.rs` | 实时连接端口 `Dial`、每栏一条 `lane`（重连、换钥匙、取钥匙时限、跳直播沿）、增量组帧器 `Composer` 与 8 KB `fit`、断句规则、各语言档案与逐字显现单位 |
-| `record` | `record.rs`、`record/shelf.rs`、`record/notes.rs`、`record/takes.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录读写、改、删与撤销、`Writer`、O(1) 草稿写手 `DraftWriter` 与 `DraftGap`）；带时间/锚点的多条笔记 `notes`；多版本读取与精修状态机 `takes`；音频保留与清扫 `retain`；0.8 交接搬运 `migrate` |
+| `record` | `record.rs`、`record/shelf.rs`、`record/notes.rs`、`record/takes.rs`、`record/adopt.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录读写、改、删与撤销、`Writer`、O(1) 草稿写手 `DraftWriter` 与 `DraftGap`）；带时间/锚点的多条笔记 `notes`；多版本读取与精修状态机 `takes`；本机 `did:key` 首次登录重签领回与清理 `adopt`；音频保留与清扫 `retain`；0.8 交接搬运 `migrate` |
 | `knowledge` | `knowledge.rs`、`knowledge/glossary.rs` | 词表（读写、给现场各流的 `terms`/`translation_terms` 与整场转写的 `Plan.terms`；P6 升级为 `topic.rs`） |
 | `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed`、精修失败状态持久化 |
 | `out` | `out.rs`、`out/export.rs`、`out/room.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；房间密文封帧与写槽；交城日历、签名上传与分段音频 |
 | `view` | `view.rs`、`view/index.rs`、`view/transcript.rs`、`view/query.rs` | L3 可丢弃本机投影层：SQLite WAL + FTS5 `trigram` 索引与自动重建/对账/增量同步、64 行正文分块与纯函数对比、并发限 8 可取消 `ViewEngine` 与有界 `Invalidations` 环 |
 | `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口（含 `Core::query`）；零 IO 状态机 `hub`（含 `Boot`）；瘦身后的协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`（单写 SQLite 同步）、导出、串行后台精修/交城/搬运与自检包 `work` |
 | `shell` | `app/src/lib.rs`、`app/src/main.rs`、`app/src/pump.rs`、`app/src/beat.rs`、`app/src/windows.rs`、`app/src/updates.rs` | 无锁全 async 的 Tauri 外壳：异步 `query` 命令、独占推送状态机 `Fan`（含 `Progress` 与 `Invalidate` 转发/溢出降级）、非阻塞主线程心跳 `Beat`、不查询主线程的字幕窗显隐、无锁更新任务 |
-| `ui` | `ui/src`（含 `ui/src/lib/vitals.ts`） | 主窗口、字幕窗、观看页；rAF 帧间隔采样与每秒 `drawn` 回报 |
-| `server` | `server/src/lib.rs`、`server/src/main.rs`、`server/src/ledger.rs`、`server/src/relay.rs`、`server/src/room.rs` | 授予、取钥与认领账本、登录中继、密文房间与结构化请求日志 |
+| `ui` | `ui/src`（`bus/`、`ds/`、`shell/`、`pages/`、`captions/`、`viewer/`） | React 19 + TypeScript dsh 架构：主窗口两栏外壳、按需身份纸 `IdentitySheet`、设置页额度与领回区、字幕窗、观看页与 8 语字典 |
+| `server` | `server/src/lib.rs`、`server/src/main.rs`、`server/src/tasks.rs`、`server/src/ledger.rs`、`server/src/relay.rs`、`server/src/room.rs` | 具名任务监督 `Tasks`、授予/认领/取钥与按服务 UTC 每日额度账本（含 `POST /quota`）、登录中继、密文房间与结构化请求日志 |
 
 ## 5. 补回的功能，各落在哪里
 
@@ -260,6 +261,24 @@ P2 将 `PLAN.md` §2（事实/视图/小状态/信号）与 `docs/build/phases/P
   - `app/src/pump.rs` 转发 `Signal::Progress`（订阅时重放当前值）与 `Event::Invalidate`（仅当合并环满 64 条且版本号断层时才降级为 7 个 `ViewKind` 的粗粒度全量失效）。
 
 测试：`core/tests/notes.rs`、`core/tests/takes.rs`、`core/tests/view.rs`、`core/tests/view_scale.rs`（1,000 条录音全查询 ≤ 8 ms、10 小时 6,400 行分块与对比 ≤ 13 ms、I2 并发查询不卡字幕、I3 重建与 `Tally = 390 B` 边界、I8 单块代价与时长无关）、`core/tests/liveness.rs::i8_what_one_change_sends_does_not_grow_with_the_library`（5 条 vs 100 条 `State` 字节数比 `1.00`）。
+
+### 5.17 身份、按服务每日额度与本机记录领回（P4）
+
+P4 零新增外部 crate 与 npm 包（`server/Cargo.toml` 仅复用锁文件既有的 `tokio-util`），打通新设备离线录音到按需登录/建号/恢复、查看每日社区额度与领回本机记录的完整闭环（详见 `docs/build/phases/P4.md`）：
+
+- **服务器每日按服务额度与具名任务监督（`server/src/tasks.rs`、`server/src/ledger.rs`）**：
+  - `Tasks`（基于 `tokio_util::task::TaskTracker`）接管 `ledger.lease` 与 `ledger.claim`，起止发 `task.start` / `task.end` 并透传日志上下文，还清 `scripts/build/rules/spawn.sh` 的 P4 欠账；
+  - 纯函数 `day_bounds(now_ms)` 与 `daily_service(...)` 按 UTC 自然日统计 `soniox`（默认 40 次/天）与 `openrouter`（默认 30 次/天）的已用与剩余次数，可通过 `ZUTALK_DAILY_SONIOX` / `ZUTALK_DAILY_OPENROUTER` 配置；`Book::pending` 同时防余额并发超支与单日服务次数并发超支；`POST /lease` 在余额充足但单日次数用完时回 `402 quota.daily`；新增 `POST /quota`（验签 `talk/quota`，拒绝 `did:key`）返回余额、次日重置时间与按服务明细。
+- **`zu` 身份原语与核心身份/额度状态机（`zu/src/did.rs`、`core/src/id/{identity,quota}.rs`）**：
+  - `zu::did` 新增 `create_with_aka`、`Rotation::from_multikey` 与 `add_signing_key`（零网络 IO，纯值函数）；
+  - 核心新增显式状态机 `AuthFlow`（`Idle` / `Scanning` / `Confirm { did, handle, code }` / `Creating` / `Recovering`，每次转换发 `identity.auth`；`code` 预留给未来六位数核对 `DECISIONS.md` #5）；扫码收到密钥后先在内存 `PendingSignIn`（种子包入 `Zeroizing`、自定义 `Debug` 全遮蔽）等待 `Command::ConfirmSignIn` 才落盘；支持 `Command::CancelSignIn`、`Command::CreateIdentity`（经 `normalize_handle` 规整可选句柄并默认拼 `DEFAULT_HANDLE_DOMAIN`）、`Command::RecoverIdentity`（恢复密钥立即包进 `Zeroizing`）与 `Command::RefreshQuota`（发 `quota.updated`）；离线句柄缓存于 `<shelf_root>/profile.json`，未登录绝不发任何网络请求。
+- **本机 `did:key` 记录领回与显式清理（`core/src/record/adopt.rs`）**：
+  - 首次登录为某个 `did:zu` 时，`adopt::plan` / `adopt::run` 将本机书架全部现行录音的所有 `take`、`talk/speaker`、全部 `talk/note`（含时间戳笔记、空文本标记与旧单串笔记）、最后 `talk/recording` 与 `talk/term` 重签写入本人书架；`tape/` 原封不动；`<data>/adopted.json` 原子绑定本机到首任 DID，第二位 DID 永远返回 `OtherPerson` 拒绝再领；登录时正在录制的本机录音按原 `did:key` 签到底，封盘后由 `adopt::run_one` 自动补领并同步 SQLite 索引与 `Invalidate`；本机书架保留直至显式 `Command::DiscardLocal`（录音中拒回 `discard.busy`），清理后仍保留 `adopted.json` 与 `tape/`。
+- **界面按需身份纸与设置页（`ui/src/bus/identity.ts`、`ui/src/pages/{IdentitySheet,SettingsPage}.tsx`）**：
+  - 无登录墙：首页与录音零拦截；仅在点击侧栏本地身份、设置页入口或收到 `sign_in.first` 时弹出由 `identitySheetStep` 驱动的 `IdentitySheet`（`Ask` / `Login` 纯 React SVG 二维码与 5 分钟倒计时 / `Check` / `Create`+遮罩 `Recovery` / `Recover` 提交即清秘密框）；
+  - `SettingsPage` 展示 `@handle` 与截断 DID、本机领回备份横幅（红底两步 `InlineConfirm`）、出字/AI 每日社区额度进度条与刷新、自有密钥优先说明与全部 8 语字典同步。
+
+测试：`server/tests/quota.rs`、`zu/tests/did.rs`、`core/tests/identity.rs`（含端到端落盘隐私与统计上限验收 `identity_secrets_dids_and_handles_never_reach_logs_or_diagnose`）、`core/tests/adopt.rs`、`ui/tests/identity_sheet.test.tsx`、`ui/tests/library_settings.test.tsx`。
 
 ## 6. 各模块的大小（上限已取消）
 

@@ -91,3 +91,11 @@
 - **jsdom 下测 `virtua` 必须还原真实浏览器的两项时序。** `virtua` 在 `ResizeObserver.observe(scrollEl)` 之后才初始化滚动监听器，若测试替身在 `observe()` 内同步回回调会读到未初始化状态；同时 jsdom 默认 `offsetParent === null`，会导致 `virtua` 一直保留 `visibility: hidden` 跳过项高测量。改由 `queueMicrotask` 异步派发尺寸并在 `ui/tests/dom.ts` 补齐 `offsetParent` 后，虚拟列表在 jsdom 中能真实按 600 px 视口裁剪并测出确定 DOM 节点数。
 - **行内说话人编辑必须同时按 `lineKey` 定位，且所有行内提交都要防 IME 组合键。** 若只按 `speaker` 编号判断编辑态，整页同说话人的多个 `autoFocus` 输入框会互相抢焦点立即触发 `onBlur` 关闭编辑；同时必须检查 `e.nativeEvent.isComposing || e.keyCode === 229`，避免中文/日文/韩文输入法按回车选词时误提交。
 - **把 `test.environment` 保持在 Node、仅 DOM 测试文件标注 `// @vitest-environment jsdom`，避免 `crypto.subtle` 跨 realm 冲突。** `room.test.ts` 的 AES-256-GCM 加密测试与 `words.test.ts` 字典全量核对原生跑在 Node 下既快又无 jsdom `ArrayBuffer` 跨 realm 报错。
+
+## P4 里学到的（2026-11）
+
+- **在 `multi_thread` 运行时里测真实落盘文件日志，不能复用带 `zutalk_log::capture()` 的测试壳，也不能把 `Entered` 守卫跨 `.await` 持有。** `App::with` 会安装线程局部内存捕获器，顶掉 `zutalk_log::files`；而 `Entered` 是 `!Send`。只在 `Core::start(cfg)` 同步启动那一刻进入 `scope.enter()`，核心监督树会自动把文件日志接收者透传给全部后台任务与线程，既能跑多核真实本地端口，又能把每条事件真实落进 `<data>/logs/zutalk.jsonl` 供 `Command::Diagnose` 打包审计。
+- **本机记录领回放在 `record` 层而绝不碰 `knowledge` 层，靠 `Shelf::kept::<Value>(TERM)` 就守住了单向依赖。** 领回需要同时重签录音和词表；若在 `record/adopt.rs` 引入 `crate::knowledge`，会直接破坏 `layers.sh` 的分层红线。直接按通用 JSON 值重签 `talk/term` 记录既保持零跨层依赖，也对词表未来字段扩展天然兼容。
+- **并发防超支必须在「余额」和「每日次数」两把尺子上共用同一个 `pending` 预占账。** 如果 `Book::pending` 只扣余额、不记 `(did, service)` 在途件数，两个并发 `POST /lease` 在当日只剩 1 次额度时会同时通过上限检查并双双铸钥。把 `service` 编进 `pending` 并在 `Book::quota` 与 `lease` 里同步计入在途次数，并发压测下绝不超发。
+- **领回必须靠 `person.known(&id)`（含墓碑）而不是 `person.about(&id)` 判重，否则会复活用户已删的录音。** 用户把领回来的录音删掉后，本人书架里留的是空值墓碑；如果下次登录只看现行清单，会把本机备份里同一条录音再次领回来。用 `known` 检查路径历史即可同时保证幂等、防复活、又允许同人补领后来新录的本机录音。
+- **`Stats` 接近硬上限（38/40 计数）时，新业务观测应优先走结构化事件而非滥加计数器。** P4 全程零新增 `Stats` 计数/分布行，身份/额度/领回全部复用 `jobs.done`/`jobs.failed`/`commands.done` 配合 4 个语义清晰的事件（`identity.auth`、`quota.updated`、`identity.adopt`、`identity.discard_local`），稳守 `stats.full == 0` 与 `Tally ≤ 8192 B`。

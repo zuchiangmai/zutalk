@@ -7,18 +7,25 @@ mod hub;
 use hub::{App, NOWHERE, STORE, config_on, store};
 use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::timeout;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use zu::{Cid, Codec, Doc, Path as ZuPath, Record, SecretKey, Value, did, login};
-use zutalk_core::app::hub::Config;
-use zutalk_core::app::proto::{AuthFlow, Command};
+use zutalk_core::app::hub::{Config, Core, Outlet};
+use zutalk_core::app::proto::{
+    AuthFlow, Change, Command, NoteOp, Query, QueryValue, RecordingView, Session, State,
+};
 use zutalk_core::id::identity::{
     self, AuthEvent, DEFAULT_HANDLE_DOMAIN, auth_step, did_doc_url, normalize_handle,
     read_cached_handle, write_cached_handle,
 };
 use zutalk_core::id::keys::{self, Keys, Ours, Service};
 use zutalk_core::id::quota::{self, Quota, ServiceQuota, is_exhausted, remaining_for};
+use zutalk_core::knowledge::glossary::Term;
 use zutalk_core::rt::supervise::End;
 use zutalk_server::{
     BoxFuture, Config as ServerConfig, Directory, Minted, Refusal, Server, Upstream,
@@ -606,4 +613,379 @@ async fn refresh_quota_and_daily_exhaustion_are_visible() {
         q_events.iter().any(|l| l.u64("soniox_left") == Some(0) && l.text("code") == Some("ok"))
     );
     assert_eq!(app.seen.refused(), 0);
+}
+
+/// Core wrapper that inherits the caller's active `zutalk_log::files` scope instead of installing
+/// an in-memory `capture()`, so events reach real `<data>/logs/zutalk.jsonl` on disk.
+struct FileApp {
+    core: Core,
+    outlet: Outlet,
+    said_at: u64,
+}
+
+impl FileApp {
+    fn start(scope: &zutalk_log::Scope, cfg: Config) -> Self {
+        let (core, outlet) = {
+            let _entered = scope.enter();
+            Core::start(cfg).expect("core starts")
+        };
+        Self { core, outlet, said_at: 0 }
+    }
+
+    fn send(&self, scope: &zutalk_log::Scope, command: Command) {
+        let _entered = scope.enter();
+        self.core.send(command).expect("hub accepts command");
+    }
+
+    async fn until(&mut self, holds: impl Fn(&State) -> bool) -> State {
+        let wait = async {
+            let (seq, state) = self.outlet.state.now();
+            if seq > 0 && holds(&state) {
+                return (*state).clone();
+            }
+            while let Some((_, state)) = self.outlet.state.next().await {
+                if holds(&state) {
+                    return (*state).clone();
+                }
+            }
+            panic!("the core stopped");
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("state came in time")
+    }
+
+    async fn session(&mut self, holds: impl Fn(Option<&Session>) -> bool) -> Option<Session> {
+        let wait = async {
+            loop {
+                let (_, current) = self.outlet.session.now();
+                if holds((*current).as_ref()) {
+                    return (*current).clone();
+                }
+                self.outlet.session.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("session came in time")
+    }
+
+    async fn notice(&mut self, code: &str) {
+        let wait = async {
+            loop {
+                let (_, notices) = self.outlet.said.now();
+                let first = notices.next.saturating_sub(notices.codes.len() as u64);
+                if self.said_at < first {
+                    self.said_at = first;
+                }
+                while self.said_at < notices.next {
+                    let idx = (self.said_at - first) as usize;
+                    self.said_at += 1;
+                    if notices.codes[idx] == code {
+                        return;
+                    }
+                }
+                self.outlet.said.next().await.expect("the core runs");
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("notice came in time")
+    }
+
+    async fn wait_recording(
+        &self,
+        id: &str,
+        holds: impl Fn(Option<&RecordingView>) -> bool,
+    ) -> Option<RecordingView> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Recording { id: id.into() }).await
+                    && let QueryValue::Recording(view) = reply.value
+                {
+                    let view = view.map(|b| *b);
+                    if holds(view.as_ref()) {
+                        return view;
+                    }
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("recording condition came in time")
+    }
+
+    async fn wait_glossary(&self, holds: impl Fn(&[Term]) -> bool) -> Vec<Term> {
+        let mut inv = self.outlet.invalidated.clone();
+        let wait = async {
+            loop {
+                if let Ok(reply) = self.core.query(Query::Glossary).await
+                    && let QueryValue::Glossary(terms) = reply.value
+                    && holds(&terms)
+                {
+                    return terms;
+                }
+                let _ = timeout(Duration::from_millis(50), inv.next()).await;
+            }
+        };
+        timeout(Duration::from_secs(20), wait).await.expect("glossary condition came in time")
+    }
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_secrets_dids_and_handles_never_reach_logs_or_diagnose() {
+    let _store = STORE.lock().await;
+    store(false);
+    keys::set("identity.local", Some(&hub::LOCAL_SEED)).expect("local identity seed");
+    let local_did = hub::local_did();
+    let refused_before = zutalk_log::refused();
+
+    // Set up stand-in PLC directory and local server before opening the file log scope.
+    let plc = Arc::new(MemoryPlc::default());
+    let directory = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(PlcResponder(plc.clone())).mount(&directory).await;
+    Mock::given(method("GET")).respond_with(PlcResponder(plc.clone())).mount(&directory).await;
+
+    let coord_key = SecretKey::from_seed(&[61u8; 32]);
+    let coord_rot = did::Rotation::from_bytes(&[62u8; 32]).unwrap();
+    let (coord_did, coord_op) = did::create(&coord_rot, &coord_key.public()).unwrap();
+    plc.push_op(&coord_did, serde_json::from_str(&coord_op).unwrap());
+
+    let (server_url, _server, _srv_dir) =
+        start_local_server(plc.clone(), [40, 30], Some(coord_did.clone())).await;
+    let http = reqwest::Client::new();
+
+    let data_dir = tempfile::tempdir().expect("data tempdir");
+    let data_path = data_dir.path().to_string_lossy().into_owned();
+    let log_dir = data_dir.path().join("logs");
+    let (scope, guard) = zutalk_log::files(
+        &log_dir,
+        "zutalk",
+        zutalk_log::Level::Debug,
+        zutalk_log::Limits::default(),
+    )
+    .expect("open file log");
+
+    let copied = Arc::new(Mutex::new(String::new()));
+    let copied_cb = copied.clone();
+    let mut cfg = Config { directory: directory.uri(), ..config_on(data_dir.path(), &server_url) };
+    cfg.clip = Arc::new(move |text| {
+        *copied_cb.lock().unwrap() = text.to_owned();
+        true
+    });
+
+    let mut app = FileApp::start(&scope, cfg);
+    app.until(|_| true).await;
+
+    // 1. Offline local recording with sentinel title, note, and glossary term.
+    let title_sentinel = "AdoptTitleSentinel44";
+    let note_sentinel = "AdoptNoteSentinel55";
+    let term_sentinel = "AdoptTermSentinel66";
+    let handle_sentinel = "handleprobe44";
+    let wrong_recovery_sentinel = "zWrongRecoveryProbe99";
+
+    app.send(&scope, Command::Start);
+    let rec_id = app.session(|s| s.is_some()).await.expect("live session").id;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    app.send(&scope, Command::Stop);
+    app.session(|s| s.is_none()).await;
+    app.wait_recording(&rec_id, |v| v.is_some()).await;
+
+    app.send(
+        &scope,
+        Command::Change {
+            id: rec_id.clone(),
+            change: Change::Title { text: title_sentinel.into() },
+        },
+    );
+    app.send(
+        &scope,
+        Command::Note {
+            id: rec_id.clone(),
+            op: NoteOp::Add { at_ms: 100, anchor: None, text: note_sentinel.into() },
+        },
+    );
+    app.send(&scope, Command::Term { said: term_sentinel.into(), written: Some(BTreeMap::new()) });
+    app.wait_recording(&rec_id, |v| {
+        v.is_some_and(|r| {
+            r.row.title == title_sentinel && r.notes.iter().any(|n| n.text == note_sentinel)
+        })
+    })
+    .await;
+    app.wait_glossary(|terms| terms.iter().any(|t| t.said == term_sentinel)).await;
+
+    // 2. CreateIdentity with handle -> triggers first-login adoption of local recording & glossary.
+    app.send(&scope, Command::CreateIdentity { handle: Some(handle_sentinel.into()) });
+    let created = app
+        .until(|s| s.me.is_some() && s.local_shelf.adopted && s.local_shelf.recordings >= 1)
+        .await;
+    let person_did = created.me.clone().expect("created did:zu");
+    assert!(person_did.starts_with("did:zu:"));
+    assert_eq!(created.handle.as_deref(), Some("handleprobe44.zuzalu.ink"));
+    assert!(created.rotation_unsaved);
+
+    // 3. CopyRotation & RotationSaved -> capture real rotation multikey sentinel.
+    app.send(&scope, Command::CopyRotation);
+    app.notice("copied").await;
+    let rot_key = copied.lock().unwrap().clone();
+    assert!(rot_key.starts_with('z'));
+    assert!(did::Rotation::from_multikey(&rot_key).is_ok());
+
+    app.send(&scope, Command::RotationSaved);
+    app.until(|s| !s.rotation_unsaved).await;
+
+    // 4. Grant quota on local server & RefreshQuota.
+    post_grant(&http, &server_url, &coord_did, &coord_key, &person_did, 500).await;
+    app.send(&scope, Command::RefreshQuota);
+    app.notice("quota.refreshed").await;
+    app.until(|s| {
+        s.quota
+            .as_ref()
+            .is_some_and(|q| q.services.iter().any(|x| x.service == "soniox" && x.limit == 40))
+    })
+    .await;
+
+    // 5. SignOut -> RecoverIdentity with wrong key, then with real rotation key.
+    app.send(&scope, Command::SignOut);
+    app.until(|s| s.me.is_none()).await;
+
+    app.send(
+        &scope,
+        Command::RecoverIdentity { did: person_did.clone(), key: wrong_recovery_sentinel.into() },
+    );
+    app.notice("id.recovery_key").await;
+    app.until(|s| s.auth == AuthFlow::Idle).await;
+
+    app.send(&scope, Command::RecoverIdentity { did: person_did.clone(), key: rot_key.clone() });
+    let recovered = app.until(|s| s.me.as_deref() == Some(person_did.as_str())).await;
+    assert_eq!(recovered.handle.as_deref(), Some("handleprobe44.zuzalu.ink"));
+
+    // 6. DiscardLocal removes local backup cleanly.
+    app.send(&scope, Command::DiscardLocal);
+    app.notice("local.discarded").await;
+    let after_discard = app.until(|s| s.local_shelf.recordings == 0).await;
+    let state_json = serde_json::to_string(&after_discard).expect("serialize final state");
+
+    // 7. Drain file log briefly, then generate Diagnose bundle.
+    std::thread::sleep(Duration::from_millis(50));
+    app.send(&scope, Command::Diagnose);
+    app.notice("diagnose.done").await;
+
+    // Shut down core and flush file log writer completely.
+    drop(app);
+    drop(guard);
+
+    // State must never carry rotation or recovery secret material.
+    assert!(!state_json.contains(&rot_key), "rotation key appeared in State JSON");
+    assert!(
+        !state_json.contains(wrong_recovery_sentinel),
+        "wrong recovery key sentinel appeared in State JSON"
+    );
+
+    // Collect every line from <data>/logs/*.jsonl.
+    let mut log_lines = Vec::new();
+    for entry in fs::read_dir(&log_dir).expect("read logs dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            let content = fs::read_to_string(&path).expect("read jsonl");
+            for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                log_lines.push(line.to_owned());
+            }
+        }
+    }
+    assert!(!log_lines.is_empty(), "log files must not be empty");
+
+    // Verify diagnose bundle structure, copied logs, and Tally <= 8192 B.
+    let diagnose_root = data_dir.path().join("diagnose");
+    let mut bundle_dirs: Vec<PathBuf> = fs::read_dir(&diagnose_root)
+        .expect("read diagnose dir")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    bundle_dirs.sort();
+    assert_eq!(bundle_dirs.len(), 1, "expected exactly one diagnose bundle: {bundle_dirs:?}");
+    let bundle = &bundle_dirs[0];
+    assert!(bundle.join("logs").is_dir(), "expected logs/ copied inside diagnose bundle");
+    let tally_raw = fs::read_to_string(bundle.join("stats.json")).expect("read stats.json");
+    let tally: Json = serde_json::from_str(&tally_raw).expect("parse Tally JSON from stats.json");
+    assert!(tally["counts"].is_array(), "stats.json must contain counts array");
+    assert!(tally["peaks"].is_array(), "stats.json must contain peaks array");
+    assert!(tally["spreads"].is_array(), "stats.json must contain spreads array");
+    assert!(tally["queues"].is_array(), "stats.json must contain queues array");
+    let tally_compact_bytes = serde_json::to_vec(&tally).expect("serialize Tally").len();
+    assert!(
+        tally_compact_bytes <= 8192,
+        "Tally serialized size must stay <= 8192 B, got {tally_compact_bytes} B"
+    );
+
+    // Forbidden sensitive strings that must have ZERO occurrences in logs or diagnose bundle.
+    let forbidden: Vec<String> = vec![
+        rot_key,
+        wrong_recovery_sentinel.into(),
+        person_did,
+        local_did,
+        "did:zu:".into(),
+        "did:key:".into(),
+        handle_sentinel.into(),
+        title_sentinel.into(),
+        note_sentinel.into(),
+        term_sentinel.into(),
+        "sk-minted-soniox".into(),
+        data_path,
+    ];
+
+    // Check every log line: valid flat JSON, zero refused "!" values, zero sensitive hits.
+    for (idx, line) in log_lines.iter().enumerate() {
+        let parsed: Json = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("log line {idx} invalid json: {e}: {line}"));
+        let obj = parsed.as_object().expect("log line must be JSON object");
+        for (k, v) in obj {
+            assert!(
+                !v.is_object() && !v.is_array(),
+                "nested value in log line {idx} key `{k}`: {line}"
+            );
+            assert!(v.as_str() != Some("!"), "refused field `!` in log line {idx} key `{k}`");
+        }
+        for needle in &forbidden {
+            assert!(!line.contains(needle), "log line {idx} leaked forbidden `{needle}`: {line}");
+        }
+    }
+
+    // Check every file under diagnose/ recursively for zero sensitive hits.
+    let mut bundle_files = Vec::new();
+    collect_files(&diagnose_root, &mut bundle_files);
+    assert!(!bundle_files.is_empty(), "diagnose bundle must contain files");
+    for file in &bundle_files {
+        let content = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
+        for needle in &forbidden {
+            assert!(
+                !content.contains(needle),
+                "diagnose file {} leaked forbidden `{needle}`",
+                file.display()
+            );
+        }
+    }
+
+    // Verify all 4 P4 structured events + diagnose.wrote appeared, zero stats.full, zero refused.
+    let has_event =
+        |code: &str| log_lines.iter().any(|l| l.contains(&format!(r#""event":"{code}""#)));
+    for required in [
+        "identity.auth",
+        "quota.updated",
+        "identity.adopt",
+        "identity.discard_local",
+        "diagnose.wrote",
+    ] {
+        assert!(has_event(required), "expected structured event `{required}` in logs");
+    }
+    assert!(!has_event("stats.full"), "stats.full must never trigger (Stats table stayed bounded)");
+    assert_eq!(zutalk_log::refused(), refused_before, "zutalk_log::refused() must not increase");
 }

@@ -87,7 +87,7 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
 
 身份（DID、句柄、要不要存恢复密钥）、城、额度（出字、AI 各一条，每天的次数）、各服务钥匙的来源、下一场的设置、字幕窗是否显示、有没有新版本、提示的队列（最多 N 条）。
 
-**不再放进去**：资料库、正文、搜索结果、词表、日历。（**P2-06 已做**：`State` 瘦身为 13 个定界字段，移除 `library`/`open`/`hits`/`terms`/`city`/`writing`/`filing`/`moving` 及旧命令 `Open`/`Close`/`Search`，I8 字节数比 `1.00`。）
+**不再放进去**：资料库、正文、搜索结果、词表、日历。（**P2-06 已做**：`State` 瘦身为 13 个定界字段，移除 `library`/`open`/`hits`/`terms`/`city`/`writing`/`filing`/`moving` 及旧命令 `Open`/`Close`/`Search`，I8 字节数比 `1.00`；**P4-02/03 补齐**：以 `auth: AuthFlow` 取代裸 `login`，增补定界 `handle`、`quota`（固定 2 服务）与 `local_shelf`（`recordings` + `adopted`），共 16 个定界字段，5 条 vs 100 条录音 `State` 为 `523 B / 525 B`，比值仍为 `1.00`。）
 
 ### 2.5 视图（由事实算出，可以丢掉重建，按范围取，带版本号）
 
@@ -138,13 +138,13 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
   - 主持和对外（直播房间）；
   - 交到档案馆；
   - 城给的额度；
-  - 恢复密钥和换设备。（P1-06 已做：`Command::needs_person` 拦下 `Share`/`Unshare`/`File`，回 `sign_in.first` 且不写任何东西；其余随 P4/P5 补行。）
-- 按下这些功能时才弹登录的纸，没有登录墙。设计稿里「按下开始录音时弹出」那一张，改为在按下要登录的功能时弹。（P1 未做：界面的事，P3 画、P4 接。）
-- **登录以后：领回本机的记录。** 第一次以某个 DID 登录时，把本机身份名下的记录全部用这个 DID 重新签一遍，放进这个人的书架（和 §5.12 搬运 0.8 录音的路一样：签成本人的记录）。音频不动：tape 的钥匙由本机秘密派生，与身份无关。（P1 未做，放在 P4，见 `DECISIONS.md` 第 11 条。）
-  - 领完记下「本机身份已归某个 DID」，之后不再领给别人。（P4）
-  - 本机身份的书架留着，等本人删除，以便撤销。（P4）
-  - 登录前正在录的那一场，录完再领。（P4；P1-06 已保证一场录音由开始时的身份签到底。）
-- **退出登录**：回到本机身份。已领走的记录只在那个 DID 的书架里。（P1-06 已做；P1 到 P4 之间登录/登出各自打开对应书架，互不挪动。）
+  - 恢复密钥和换设备。（P1-06 + P4 已做：`Command::needs_person` 拦下 `Share`/`Unshare`/`File`/`RefreshQuota`/`DiscardLocal`，回 `sign_in.first` 且不写任何东西；其余随 P5 补行。）
+- 按下这些功能时才弹登录的纸，没有登录墙。设计稿里「按下开始录音时弹出」那一张，改为在按下要登录的功能时弹。（**P4-04 已做**：`ui/src/bus/identity.ts` 显式状态机 + `IdentitySheet.tsx` 按需弹出，首页与录音零拦截。）
+- **登录以后：领回本机的记录。** 第一次以某个 DID 登录时，把本机身份名下的记录全部用这个 DID 重新签一遍，放进这个人的书架（和 §5.12 搬运 0.8 录音的路一样：签成本人的记录）。音频不动：tape 的钥匙由本机秘密派生，与身份无关。（**P4-03 已做**：`core/src/record/adopt.rs` 重签全部 `take`、说话人、全部笔记、`talk/recording` 与词表，并同步 SQLite 索引与 `Invalidate`。）
+  - 领完记下「本机身份已归某个 DID」，之后不再领给别人。（**P4-03 已做**：`<data>/adopted.json` 单人绑定，`OtherPerson` 拒绝第二位 DID。）
+  - 本机身份的书架留着，等本人删除，以便撤销。（**P4-03/05 已做**：显式 `Command::DiscardLocal` + 设置页红底两步 `InlineConfirm` 清除，保留 `adopted.json` 与 `tape/`。）
+  - 登录前正在录的那一场，录完再领。（**P4-03 已做**：`started_by` 为 `did:key` 的进行中录音按原身份签到底，封盘后经 `adopt::run_one` 自动补领。）
+- **退出登录**：回到本机身份。已领走的记录只在那个 DID 的书架里。（P1-06 + P4-03 已做。）
 - **服务器**：没登录不向我们的服务器发任何请求。（P1-06 已做，由 `nobody_signed_in_nothing_is_asked_of_our_server` 守着。）
 
 ## 3. 界面重设计逐屏对照
@@ -380,6 +380,8 @@ server/src/
 
 > **P3 实际变更**：`ui/package.json` 彻底移除 Svelte 三项（`svelte`、`svelte-check`、`@sveltejs/vite-plugin-svelte`），新增运行时依赖 `react@^19`、`react-dom@^19`、`virtua@^0.56`（连同既有 `@tauri-apps/api`、`@tauri-apps/plugin-dialog`、`uqr`）及开发/测试依赖 `@vitejs/plugin-react`、`@types/react`、`@types/react-dom`、`@testing-library/react`、`jsdom`；Rust 侧零改动、零协议变更。
 
+> **P4 实际变更**：**零新增外部依赖**（`Cargo.lock` 与 `ui/package-lock.json` 无新增外部包）；仅在 `server/Cargo.toml` 复用锁文件既有的 `tokio-util = { version = "0.7.20", features = ["rt"] }` 以搭建 `server/src/tasks.rs` 监督树并还清 `spawn.sh` 的 P4 欠账。
+
 ### 5.4 写法规矩（加进 `CLAUDE.md` 的 Rules）
 
 - 没有无上限的队列；每个队列写明满了以后怎么办。
@@ -445,8 +447,8 @@ ui/src/
 | I5 外壳不会死锁 | 用 `loom` 给外壳的订阅和推送协议建模；也测「页面重新加载时正好在推送」。**P1 实测**：单任务独占 `Fan` 无锁，`app/tests/pump.rs::every_interleaving_ends_with_each_window_holding_the_latest` 穷举交错 + `a_reload_while_frames_are_coming_loses_nothing_and_the_old_channel_goes_quiet` + `shell.sh` |
 | I6 任何部件都能被杀掉并自愈 | 随机杀掉 lane、帧任务、写盘线程、网页，N 秒内恢复，事实不丢失。**P1 实测**：`i6_a_lane_that_dies_comes_back_and_marks_what_it_missed`、`i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence`、`core/tests/supervise.rs::a_part_that_panics_is_opened_again`、`core/tests/keep.rs`、`app/tests/pump.rs::a_pump_that_dies_is_started_again_and_no_window_has_to_join_again` |
 | I7 停滞一定被看见 | 用 `turmoil` 模拟：Soniox 连着但不回话、取钥匙卡住、断网；`judge` 在预算内给出 `Stalled` 并采取动作。**P1 实测**：暂停时钟 + `Dial`/`Keys` 替身：`core/tests/water.rs`、`i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection`、`i7_a_capture_that_stops_delivering_ends_the_recording_out_loud`、`i7_offline_is_said_and_captions_stop_trying_until_asked`、`core/tests/live.rs::a_lease_that_never_comes_is_given_up_on` |
-| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1。**P2 实测**：`i8_what_one_change_sends_does_not_grow_with_the_library` 已转正通过（5 条 vs 100 条 `State = 441 B / 441 B`，比值 `1.00`，`Invalidate = 60 B`）；`core/tests/view_scale.rs::i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration`（1 分钟 vs 4 小时 2,560 行，64 行单块 JSON 封顶 13.6 KB / 26.0 KB，耗时均 ≤ 12 ms）。**P3 界面侧实测**：`ui/tests/scale_i8.test.tsx` 在 600 px 模拟视口下实测 1 分钟（16 行）与 4 小时（2,560 行 = 40 块）阅读页挂载 DOM 行数均为 `11`（比值 `1.00`，远 ≤ 40），4 小时仅按需拉取 `2` 块（绝不拉第 39 块）；15 条与 500 条资料库挂载 DOM 行数均为 `11`（比值 `1.00`）；同帧突灌 50 帧 `Frame` + 50 次 `Level` 合并为 `1` 次 React 提交 |
-| **I9 显式与可观测**（原则 10，§4.5） | **P1 + P2 + P3 实测**：全部 10 个规则脚本全绿（P3 新增并加固 `ui.sh`，`pending.sh` 升级同禁 P1/P2/P3，72 个 Rust 事件入 `docs/EVENTS.md`）；界面新增 `routeStep`、`confirmStep` 与 `stateView` 穷举映射 3 台显式状态机、`HealthOverlay`（画 `Water` + `Stats`）与设置页一键「导出诊断」（`Command::Diagnose`）；`ui/tests/scale_i8.test.tsx::injected_faults_are_visible_and_actionable_across_main_flow` 串联验证 `AudioOnly`、`Stalled`、`Dead`+重连、`keys.async_refused`+再试/设置、命令拒绝 `busy` 与 `HealthOverlay` 全部可见且可恢复 |
+| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1。**P2 实测**：`i8_what_one_change_sends_does_not_grow_with_the_library` 已转正通过（5 条 vs 100 条 `State = 441 B / 441 B`，比值 `1.00`，`Invalidate = 60 B`）；`core/tests/view_scale.rs::i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration`（1 分钟 vs 4 小时 2,560 行，64 行单块 JSON 封顶 13.6 KB / 26.0 KB，耗时均 ≤ 12 ms）。**P3 界面侧实测**：`ui/tests/scale_i8.test.tsx` 在 600 px 模拟视口下实测 1 分钟（16 行）与 4 小时（2,560 行 = 40 块）阅读页挂载 DOM 行数均为 `11`（比值 `1.00`，远 ≤ 40），4 小时仅按需拉取 `2` 块（绝不拉第 39 块）；15 条与 500 条资料库挂载 DOM 行数均为 `11`（比值 `1.00`）；同帧突灌 50 帧 `Frame` + 50 次 `Level` 合并为 `1` 次 React 提交。**P4 复测**：加入 `auth`/`handle`/`quota`/`local_shelf` 定界字段后，5 条 vs 100 条 `State = 523 B / 525 B`（比值仍为 `1.00`），`Invalidate = 60 B` |
+| **I9 显式与可观测**（原则 10，§4.5） | **P1–P4 实测**：全部 10 个规则脚本全绿（P4 清零 `spawn.sh` 的 `server/src/ledger.rs 2 P4`，`pending.sh` 升级同禁 P1/P2/P3/P4，76 个 Rust 事件入 `docs/EVENTS.md`，P4 零新增 `Stats` 行、`stats.full == 0`、`Tally ≤ 8192 B`）；新增 4 台显式状态机/决策表（服务器 `day_bounds`/`daily_service`、核心 `AuthFlow`/`auth_step`、`AdoptPlan`/`adopt::plan`、界面 `IdentitySheetStep`/`identitySheetStep`）并全配转换表测试；全链路落盘隐私测试 `identity_secrets_dids_and_handles_never_reach_logs_or_diagnose` 断言轮换密钥/恢复输入/DID/句柄/标题/笔记在 `logs/*.jsonl`、`diagnose/` 与 `State` 零泄漏 |
 | 真机 | `core/tests/audio.rs` 开头的手工清单，三个系统；8 小时实录一次 |
 
 **先写测试**：P1 的第一件事是让台架在现在的代码上跑起来，并且让它失败。失败的地方就是要改的地方。
@@ -463,7 +465,7 @@ ui/src/
 | **P1 运行时地基** | 模拟台架和 I1–I8（先让它失败）；`rt/`（signal、water、supervise）；`Frame` 绕开 hub；外壳无锁、全部 async、`pump.rs`；hub 不再读写磁盘；有上限的队列加 lint；tape 写盘线程；`wall_clock_policy`（照临时决定实现，数字等负责人确认）。**已做（P1-01 至 P1-26）**：补齐显式与可观测（`zutalk-log`、9 个规则脚本、自检包、心跳）与不登录也能录（§2.7 归 P1 部分） | I1、I2、I4、I5、I6、I7（核心）、I9、E11 全在门禁通过；**出口 E9（真机录 1 小时不卡）等负责人执行**（见 `docs/build/reports/P1-26-close.md`） | 1.5 周 |
 | **P2 数据层** | `view/`（SQLite 索引、FTS、分块、compare）；`Query` 与 `Invalidate`；状态瘦身；能读旧版本；带时间的笔记；精修可以手动触发、失败会留下状态。**已做（P2-01 至 P2-08）**：`record/{notes,takes}.rs`、`DraftWriter`、`view/{index,transcript,query}.rs`、`State` 瘦身、`Outlet.{progress,invalidated}`、Tauri `async fn query`、Svelte 最小适配、`layers.sh` P2 欠账清零、`pending.sh` 升级 | **E1–E8 全通过**：I2、I3、I8、I9 均在门禁守着；1,000 条录音查询 0.64–7.37 ms、10 小时正文与对比 5.44–12.76 ms（全 ≤ 100 ms）；见 `docs/build/reports/P2-08-close.md` | 1.5 周 |
 | **P3 界面主流程** | 框架定下；`ds/` 设计系统；两栏版面；首页、录音中、边录边记、停止以后、精修稿、读一场录音、全部录音；字幕窗基本款；状态一览里各种状态都有画法。**已做（P3-01 至 P3-07）**：零 Rust 协议改动，切至 React 19 + TypeScript + `virtua` dsh 结构；落地 `bus/`（rAF 合并、128 项活跃订阅 `QueryCache`、`routeStep`）、`ds/`（亮/暗令牌、`InlineConfirm`、`stateView`）、`shell/`（侧栏、顶栏、通知、`⌘K`、`HealthOverlay`）、全部 6 个主流程页、零查询 `CaptionsWindow`、React `ViewerPage`、8 语 312 键字典、`ui.sh` 与升级后 `pending.sh` | **E1–E7 自动化出口全通过**（12 份 UI 测试 76 条 + 10 个规则脚本 + 3 入口构建全绿；I8 阅读 16 vs 2,560 行与资料库 15 vs 500 条均恒挂 11 个 DOM 行、50 帧突灌合并 1 次提交）；**真机 WebView 视觉走查与 1 小时实录 I1 延迟等负责人核对**（见 `docs/build/reports/P3-07-close.md`） | 2 周（可以和 P2 后半并行：先用假数据） |
-| **P4 身份与额度** | 需要时才问；扫码登录加核对数字（要先补 zu `login.md`，§9 第 5 条）；新建身份、恢复密钥、句柄；额度按服务、按天（服务器 + 城）；**领回本机身份名下的记录（§2.7）** | 新设备从零到第一次录音，全程不用读说明 | 1–1.5 周（服务器部分可以和 P3 并行） |
+| **P4 身份与额度** | 需要时才问；扫码登录加核对数字（要先补 zu `login.md`，§9 第 5 条）；新建身份、恢复密钥、句柄；额度按服务、按天（服务器 + 城）；**领回本机身份名下的记录（§2.7）**。**已做（P4-01 至 P4-06）**：`server/src/tasks.rs` 监督账本任务并还清 `spawn.sh` P4 欠账、`POST /quota` 与按服务 UTC 日上限；`zu::did` 补 `create_with_aka`/`Rotation::from_multikey`/`add_signing_key`；核心 `id/{identity,quota}.rs`（`AuthFlow` 两段扫码确认、建号、恢复、句柄离线缓存、按服务额度）与 `record/adopt.rs`（首次登录重签领回、`adopted.json` 单人绑定、进行中本机录音封盘补领、`DiscardLocal`）；界面 `bus/identity.ts`、`IdentitySheet.tsx`（无登录墙按需弹出）与 `SettingsPage.tsx`（`@handle`+短 DID、出字/AI 每日进度条、本机领回备份横幅与两步清除）、8 语全量词条、全链路隐私落盘验收与 `pending.sh` 升级禁 P4 | **E1–E6 自动化出口全通过**（零新增外部依赖，10 个规则脚本全绿，I8 `State` 523 B / 525 B 比值 `1.00`，`stats.full == 0`，日志/自检包秘密与隐私零泄漏；**六位数派生算法、短句柄域名、线上目录与生产额度参数待负责人确认**，见 `docs/build/reports/P4-06-close.md`） | 1–1.5 周（服务器部分可以和 P3 并行） |
 | **P5 主持与对外** | `out/host.rs`（不落盘、人数、两道保险）；房间只留槽；删掉单条录音的分享；色带；字幕窗的场合、大小、穿透点击、舞台全屏；观众页；按住交档案馆、8 秒撤销；记录类型和档案馆对齐 | 主持一场、崩溃一次、重开应用：外面不留任何东西 | 1.5 周 |
 | **P6 知识库与 AI** | `talk/topic` 与知识库页；主题送进现场和精修的 context；标题与话题；「记进知识库」；只用额度的人怎么精修（§9 第 4 条） | 一场读书会：专有名词识别对、标题像人写的 | 1.5 周 |
 | **P7 搬家与发布** | 打上并发布 0.8.6 交接补丁；在 175 条真数据的副本上搬一遍；更新签名钥匙；Sparkle 的 `zu` 频道；三个系统的手工清单；8 小时实录 | 发布清单（`RELEASE.md`）全部打钩 | 1 周 |
