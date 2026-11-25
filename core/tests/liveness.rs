@@ -22,7 +22,7 @@ use std::time::{Duration, Instant as WallInstant};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use zutalk_core::app::proto::{
-    Change, Command, Device, Query, QueryValue, Setup, Status, ViewKind,
+    Change, Command, Device, NoteOp, Query, QueryValue, Setup, Status, ViewKind,
 };
 use zutalk_core::app::work::{DIAGNOSE_KEPT_DIRS, Facts};
 use zutalk_core::capture::clock::BLOCK;
@@ -277,6 +277,7 @@ async fn without_a_key_the_bench_records_sound_and_no_caption() {
 #[tokio::test(start_paused = true)]
 async fn nothing_said_or_secret_reaches_the_log() {
     let _store = STORE.lock().await;
+    let refused_before = zutalk_log::refused();
     let log_dir = tempfile::tempdir().expect("log tempdir");
     let (scope, guard) =
         zutalk_log::files(log_dir.path(), "zutalk", Level::Debug, Limits::default())
@@ -297,17 +298,52 @@ async fn nothing_said_or_secret_reaches_the_log() {
 
     let secret_title = "SecretTitleZeta99";
     let secret_query = "QueryNeedleOmega88";
+    let secret_note = "SecretNotePhi77";
+    let secret_note_edit = "SecretNoteEditPhi78";
 
     tokio::time::sleep(Duration::from_millis(60_000)).await;
     bench.send(Command::Change {
         id: rec_id.clone(),
         change: Change::Title { text: secret_title.into() },
     });
+    bench.send(Command::Note {
+        id: rec_id.clone(),
+        op: NoteOp::Add { at_ms: 1_000, anchor: None, text: secret_note.into() },
+    });
+    // Wait until the note lands on disk + SQLite, then edit it with a second secret sentinel.
+    let mut note_key = None;
+    for _ in 0..40 {
+        if let Ok(reply) = bench.query(Query::Recording { id: rec_id.clone() }).await
+            && let QueryValue::Recording(Some(rec)) = reply.value
+            && let Some(first) = rec.notes.first()
+        {
+            note_key = Some(first.key.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let note_key = note_key.expect("added note must appear in Query::Recording");
+    bench.send(Command::Note {
+        id: rec_id.clone(),
+        op: NoteOp::Edit { key: note_key, text: secret_note_edit.into() },
+    });
+
     let _ = bench.query(Query::Search { query: secret_query.into(), limit: 50 }).await;
+    let _ = bench.query(Query::Recording { id: rec_id.clone() }).await;
+    let _ = bench.query(Query::Transcript { id: rec_id.clone(), take: Some(0), chunk: 0 }).await;
+    let _ =
+        bench.query(Query::Compare { id: rec_id.clone(), take_a: 0, take_b: 0, chunk: 0 }).await;
+    let _ = bench.query(Query::LibrarySummary { tz_offset_min: 480 }).await;
+
     tokio::time::sleep(Duration::from_millis(60_000)).await;
 
     bench.stop_recording().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Trigger manual Refine (reaches unreachable NOWHERE cleanly, exercising refine.state logging).
+    bench.send(Command::Refine { id: rec_id.clone() });
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+
     bench.finish();
 
     drop(entered);
@@ -329,10 +365,14 @@ async fn nothing_said_or_secret_reaches_the_log() {
     assert!(has_code("recording.start"), "expected recording.start in log");
     assert!(has_code("recording.end"), "expected recording.end in log");
     assert!(has_code("identity.who"), "expected identity.who in log");
+    assert!(has_code("query.done"), "expected query.done in log");
+    assert_eq!(zutalk_log::refused(), refused_before, "zero log fields must be refused as '!'");
 
     let mut forbidden = forbidden_words;
     forbidden.push(secret_title.into());
     forbidden.push(secret_query.into());
+    forbidden.push(secret_note.into());
+    forbidden.push(secret_note_edit.into());
     for spk in SPEAKERS {
         forbidden.push(spk.into());
     }
