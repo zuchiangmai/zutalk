@@ -310,5 +310,13 @@
  "captions.layout": "字幕レイアウトを切り替え",
  "viewer.live": "ライブ字幕",
  "viewer.ended": "字幕が終了しました",
- "viewer.all_langs": "すべて"
+ "viewer.all_langs": "すべて",
+ "code.quota.daily": "本日の利用枠を使い切りました",
+ "code.keys.quota.daily": "本日の利用枠を使い切りました",
+ "code.id.handle": "ハンドルの形式が正しくありません",
+ "code.id.recovery_key": "復元キーが一致しません",
+ "code.id.signed_in": "すでにサインインしています",
+ "code.id.no_pending": "確認待ちのサインインはありません",
+ "code.id.cancelled": "サインインをキャンセルしました",
+ "code.quota.refreshed": "利用枠を更新しました"
 }

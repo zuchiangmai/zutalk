@@ -310,5 +310,13 @@
  "captions.layout": "สลับรูปแบบคำบรรยาย",
  "viewer.live": "คำบรรยายสด",
  "viewer.ended": "คำบรรยายจบลงแล้ว",
- "viewer.all_langs": "ทั้งหมด"
+ "viewer.all_langs": "ทั้งหมด",
+ "code.quota.daily": "โควตาวันนี้ใช้หมดแล้ว",
+ "code.keys.quota.daily": "โควตาวันนี้ใช้หมดแล้ว",
+ "code.id.handle": "รูปแบบชื่อผู้ใช้ไม่ถูกต้อง",
+ "code.id.recovery_key": "คีย์กู้คืนไม่ตรงกัน",
+ "code.id.signed_in": "ลงชื่อเข้าใช้แล้ว",
+ "code.id.no_pending": "ไม่มีการลงชื่อเข้าใช้ที่รอยืนยัน",
+ "code.id.cancelled": "ยกเลิกการลงชื่อเข้าใช้แล้ว",
+ "code.quota.refreshed": "อัปเดตโควตาแล้ว"
 }

@@ -310,5 +310,13 @@
  "captions.layout": "Switch caption layout",
  "viewer.live": "Live captions",
  "viewer.ended": "Captions ended",
- "viewer.all_langs": "All"
+ "viewer.all_langs": "All",
+ "code.quota.daily": "Today’s quota is used up",
+ "code.keys.quota.daily": "Today’s quota is used up",
+ "code.id.handle": "Not a valid handle",
+ "code.id.recovery_key": "Recovery key did not match",
+ "code.id.signed_in": "Already signed in",
+ "code.id.no_pending": "No sign-in waiting to be confirmed",
+ "code.id.cancelled": "Sign-in cancelled",
+ "code.quota.refreshed": "Quota updated"
 }

@@ -310,5 +310,13 @@
  "captions.layout": "Cambiar diseño de subtítulos",
  "viewer.live": "Subtítulos en vivo",
  "viewer.ended": "Subtítulos finalizados",
- "viewer.all_langs": "Todos"
+ "viewer.all_langs": "Todos",
+ "code.quota.daily": "Cuota de hoy agotada",
+ "code.keys.quota.daily": "Cuota de hoy agotada",
+ "code.id.handle": "El identificador no es válido",
+ "code.id.recovery_key": "La clave de recuperación no coincide",
+ "code.id.signed_in": "Ya has iniciado sesión",
+ "code.id.no_pending": "No hay ningún inicio de sesión pendiente",
+ "code.id.cancelled": "Inicio de sesión cancelado",
+ "code.quota.refreshed": "Cuota actualizada"
 }

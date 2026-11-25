@@ -137,14 +137,14 @@ export function SettingsView({
             </span>
             <Pill onClick={onSignOut}>{t('signout')}</Pill>
           </div>
-        ) : state.login ? (
+        ) : state.auth.is === 'Scanning' ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
-            <QrSvg value={state.login} label={t('qr')} />
+            <QrSvg value={state.auth.url} label={t('qr')} />
             <p className="k" style={{ margin: 0 }}>
               {t('signin.tip')}
             </p>
             <span className="mono" style={{ color: 'var(--ink3)', wordBreak: 'break-all' }}>
-              {state.login}
+              {state.auth.url}
             </span>
           </div>
         ) : (

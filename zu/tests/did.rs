@@ -1153,3 +1153,55 @@ fn a_devices_own_identity_is_the_did_key_of_its_signing_key() {
     assert_eq!(url(&local, true), Err(Error::Method));
     assert_eq!(resolve(&local, b"{}"), Err(Error::Method));
 }
+
+#[test]
+fn rotation_multikey_roundtrips_and_rejects_bad_input() {
+    let original = zu::did::Rotation::from_bytes(&[11; 32]).unwrap();
+    let encoded = original.multikey();
+    let parsed = zu::did::Rotation::from_multikey(&encoded).unwrap();
+    assert_eq!(parsed.did_key(), original.did_key());
+    assert_eq!(parsed.multikey().as_str(), encoded.as_str());
+
+    let wrong_codec =
+        format!("z{}", multibase::Base::Base58Btc.encode([&[0x80, 0x24][..], &[11; 32]].concat()));
+    let short = format!("z{}", multibase::Base::Base58Btc.encode([0x86, 0x26, 1, 2, 3]));
+    let zero_scalar =
+        format!("z{}", multibase::Base::Base58Btc.encode([&[0x86, 0x26][..], &[0; 32]].concat()));
+    for bad in ["", "not-a-key", &encoded[1..], &wrong_codec, &short, &zero_scalar, "z0OIl"] {
+        assert_eq!(zu::did::Rotation::from_multikey(bad).err(), Some(Error::Key), "{bad}");
+    }
+}
+
+#[test]
+fn create_with_aka_resolves_handle() {
+    let rot = zu::did::Rotation::from_bytes(&[12; 32]).unwrap();
+    let aka = vec!["zu://demo.zuzalu.ink".to_owned()];
+    let (did, op_json) = zu::did::create_with_aka(&rot, &key(1), &aka).unwrap();
+    let op: Json = serde_json::from_str(&op_json).unwrap();
+    let doc = resolve(&did, &log(&did, &[(&op, AT, false)])).unwrap();
+    assert_eq!(doc.keys, vec![(key(1), None)]);
+    assert_eq!(doc.handles, vec!["demo.zuzalu.ink".to_owned()]);
+}
+
+#[test]
+fn add_signing_key_appends_new_device_key_and_rejects_wrong_rotation_key() {
+    let rot = zu::did::Rotation::from_bytes(&[13; 32]).unwrap();
+    let wrong_rot = zu::did::Rotation::from_bytes(&[14; 32]).unwrap();
+    let aka = vec!["zu://lin.zuzalu.ink".to_owned()];
+    let (did, gen_json) = zu::did::create_with_aka(&rot, &key(1), &aka).unwrap();
+    let gen_op: Json = serde_json::from_str(&gen_json).unwrap();
+    let audit1 = log(&did, &[(&gen_op, AT, false)]);
+
+    // Wrong rotation key is refused with Error::Signer.
+    assert_eq!(zu::did::add_signing_key(&did, &audit1, &wrong_rot, &key(2)), Err(Error::Signer));
+
+    // Right rotation key signs an update appending key(2) while keeping key(1) and the handle.
+    let (add_json, handles) = zu::did::add_signing_key(&did, &audit1, &rot, &key(2)).unwrap();
+    assert_eq!(handles, vec!["lin.zuzalu.ink".to_owned()]);
+    let add_op: Json = serde_json::from_str(&add_json).unwrap();
+    let audit2 = log(&did, &[(&gen_op, AT, false), (&add_op, AT + HOUR, false)]);
+    let doc = resolve(&did, &audit2).unwrap();
+    assert!(doc.key_now(&key(1)), "original key stays valid");
+    assert!(doc.key_now(&key(2)), "new device key is active");
+    assert_eq!(doc.handles, vec!["lin.zuzalu.ink".to_owned()]);
+}

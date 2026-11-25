@@ -310,5 +310,13 @@
  "captions.layout": "切换字幕版面",
  "viewer.live": "现场字幕",
  "viewer.ended": "字幕结束了",
- "viewer.all_langs": "全部"
+ "viewer.all_langs": "全部",
+ "code.quota.daily": "今日额度已用完",
+ "code.keys.quota.daily": "今日额度已用完",
+ "code.id.handle": "句柄格式不正确",
+ "code.id.recovery_key": "恢复密钥对不上",
+ "code.id.signed_in": "已经登录了",
+ "code.id.no_pending": "没有待确认的登录",
+ "code.id.cancelled": "登录已取消",
+ "code.quota.refreshed": "额度已更新"
 }

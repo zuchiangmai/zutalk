@@ -8,13 +8,15 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    Change, Command, Device, From, Level as SoundLevel, Room, Session, Sound, State, Status,
+    AuthFlow, Change, Command, Device, From, Level as SoundLevel, Quota, Room, Session, Sound,
+    State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
 use crate::app::work::{BootOut, OwnKeyOut, Refreshed, SignedOut, Survey, Work};
 use crate::capture::audio::Source;
 use crate::capture::clock::wall_ms;
+use crate::id::identity::{self, AuthEvent, auth_step};
 use crate::id::keys::Service;
 use crate::live::frame::{Frame, MAX_COLUMNS};
 use crate::live::lane::{self, Mode};
@@ -100,8 +102,12 @@ pub(crate) enum Msg {
     Ended(String),
     Wrote(String),
     RefineReady { id: String, from: RefineStatus },
+    SignInPending { did: String, handle: Option<String>, code: Option<String> },
     SignInFailed(&'static str),
     Signed(Result<SignedOut, &'static str>),
+    QuotaUpdated { left: u64, quota: Quota, notify: bool },
+    QuotaFailed(&'static str),
+    HandleResolved(Option<String>),
     Copied,
     Diagnosed,
     RotationSaved,
@@ -128,8 +134,12 @@ impl Msg {
             Msg::Ended(_) => "Ended",
             Msg::Wrote(_) => "Wrote",
             Msg::RefineReady { .. } => "RefineReady",
+            Msg::SignInPending { .. } => "SignInPending",
             Msg::SignInFailed(_) => "SignInFailed",
             Msg::Signed(_) => "Signed",
+            Msg::QuotaUpdated { .. } => "QuotaUpdated",
+            Msg::QuotaFailed(_) => "QuotaFailed",
+            Msg::HandleResolved(_) => "HandleResolved",
             Msg::Copied => "Copied",
             Msg::Diagnosed => "Diagnosed",
             Msg::RotationSaved => "RotationSaved",
@@ -285,6 +295,21 @@ impl Hub {
         }
     }
 
+    fn set_auth(&mut self, event: AuthEvent, why: &'static str) {
+        let is_fail = matches!(event, AuthEvent::Failed);
+        let from = self.state.auth.code();
+        let next = auth_step(&self.state.auth, event);
+        let to = next.code();
+        if next != self.state.auth {
+            if is_fail {
+                warn!("identity.auth", from = from, to = to, why = why);
+            } else {
+                info!("identity.auth", from = from, to = to, why = why);
+            }
+            self.state.auth = next;
+        }
+    }
+
     fn publish(&mut self) {
         if self.boot == Boot::Starting {
             return;
@@ -320,6 +345,13 @@ impl Hub {
     fn apply_refreshed(&mut self, refreshed: Refreshed) {
         self.state.keys = refreshed.keys;
         self.state.left = refreshed.left;
+        if self.state.me.is_some() {
+            if let Some(quota) = refreshed.quota {
+                self.state.quota = Some(quota);
+            }
+        } else {
+            self.state.quota = None;
+        }
         if let Some(rooms) = refreshed.rooms {
             self.state.rooms = rooms;
         }
@@ -347,8 +379,12 @@ impl Hub {
         for c in out.say {
             self.said.say(c);
         }
-        self.state.login = None;
+        self.set_auth(AuthEvent::Completed, "signed");
         self.state.me = out.me;
+        self.state.handle = out.handle;
+        if self.state.me.is_none() {
+            self.state.quota = None;
+        }
         self.state.rotation_unsaved = out.rotation_unsaved;
         self.apply_refreshed(out.refreshed);
         self.state.rooms = out.rooms;
@@ -386,11 +422,29 @@ impl Hub {
                 self.refining.insert(id.clone());
                 self.work.write_manual(id, from);
             }
+            Msg::SignInPending { did, handle, code } => {
+                self.set_auth(AuthEvent::Received { did, handle, code }, "received");
+            }
             Msg::SignInFailed(c) => {
-                self.state.login = None;
+                self.set_auth(AuthEvent::Failed, c);
                 return Err(c);
             }
             Msg::Signed(out) => self.apply_signed(out?),
+            Msg::QuotaUpdated { left, quota, notify } => {
+                if self.state.me.is_some() {
+                    self.state.left = Some(left);
+                    self.state.quota = Some(quota);
+                    if notify {
+                        self.said.say("quota.refreshed");
+                    }
+                }
+            }
+            Msg::QuotaFailed(c) => return Err(c),
+            Msg::HandleResolved(handle) => {
+                if self.state.me.is_some() {
+                    self.state.handle = handle;
+                }
+            }
             Msg::Copied => self.said.say("copied"),
             Msg::Diagnosed => self.said.say("diagnose.done"),
             Msg::RotationSaved => self.state.rotation_unsaved = false,
@@ -520,11 +574,42 @@ impl Hub {
                 self.work.unshare(room, recording)?;
             }
             Command::SignIn => {
-                let url = self.work.sign_in()?;
-                self.state.login = Some(url);
+                let (url, expires_at) = self.work.sign_in()?;
+                self.set_auth(AuthEvent::BeginScan { url, expires_at }, "sign_in");
             }
+            Command::ConfirmSignIn => {
+                if !matches!(self.state.auth, AuthFlow::Confirm { .. }) {
+                    return Err("id.no_pending");
+                }
+                self.work.confirm_sign_in(self.state.setup.keep, self.busy_ids())?;
+            }
+            Command::CancelSignIn => {
+                self.work.cancel_sign_in();
+                self.set_auth(AuthEvent::Cancelled, "id.cancelled");
+            }
+            Command::CreateIdentity { handle } => {
+                if self.state.me.is_some() {
+                    return Err("id.signed_in");
+                }
+                let normalized = match handle {
+                    Some(raw) => identity::normalize_handle(&raw)?,
+                    None => None,
+                };
+                self.work.create_identity(normalized);
+                self.set_auth(AuthEvent::BeginCreate, "create");
+            }
+            Command::RecoverIdentity { did, key } => {
+                if self.state.me.is_some() {
+                    return Err("id.signed_in");
+                }
+                self.work.recover_identity(did, key);
+                self.set_auth(AuthEvent::BeginRecover, "recover");
+            }
+            Command::RefreshQuota => self.work.refresh_quota()?,
             Command::SignOut => {
-                self.state.login = None;
+                self.set_auth(AuthEvent::Cancelled, "sign_out");
+                self.state.handle = None;
+                self.state.quota = None;
                 self.work.sign_out(self.state.setup.keep, self.busy_ids())?;
             }
             Command::CopyRotation => self.work.copy_rotation()?,

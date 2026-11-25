@@ -3,7 +3,9 @@
 //! nothing of its own but what is being typed. The TypeScript is written by `cargo test`.
 
 pub use crate::capture::audio::Device;
+pub use crate::id::identity::AuthFlow;
 pub use crate::id::keys::From;
+pub use crate::id::quota::{Quota, ServiceQuota};
 pub use crate::live::frame::{Caption, Column, Frame, Status};
 use crate::out::city::Filing;
 pub use crate::record::notes::Note;
@@ -30,12 +32,14 @@ use ts_rs::TS;
 #[ts(export)]
 pub struct State {
     pub me: Option<String>,     // the DID signed in on this device
-    pub login: Option<String>,  // a sign-in under way: the address to show as a code
+    pub auth: AuthFlow,         // explicit sign-in / create / recover state machine
+    pub handle: Option<String>, // primary Zu handle for `me`, cached offline and refreshed on sign-in
     pub rotation_unsaved: bool, // the identity made here has a rotation key not saved elsewhere
     pub update: Option<String>, // a newer version of the app, downloaded and ready to install
     pub keys: Vec<(String, From)>,
     #[ts(type = "number | null")]
     pub left: Option<u64>, // µ$ of granted quota left, as last heard
+    pub quota: Option<Quota>, // per-service UTC daily community quota (bounded to 2 services)
     pub setup: Setup,
     pub devices: Vec<Device>,
     pub languages: Vec<String>, // the ones there are rules for
@@ -262,6 +266,11 @@ pub enum Command {
     Share { recording: Option<String> },
     Unshare { room: String },
     SignIn,
+    ConfirmSignIn,
+    CancelSignIn,
+    CreateIdentity { handle: Option<String> },
+    RecoverIdentity { did: String, key: String },
+    RefreshQuota,
     SignOut,
     RotationSaved,
     CopyRotation,
@@ -296,6 +305,11 @@ impl Command {
             Command::Share { .. } => "Share",
             Command::Unshare { .. } => "Unshare",
             Command::SignIn => "SignIn",
+            Command::ConfirmSignIn => "ConfirmSignIn",
+            Command::CancelSignIn => "CancelSignIn",
+            Command::CreateIdentity { .. } => "CreateIdentity",
+            Command::RecoverIdentity { .. } => "RecoverIdentity",
+            Command::RefreshQuota => "RefreshQuota",
             Command::SignOut => "SignOut",
             Command::RotationSaved => "RotationSaved",
             Command::CopyRotation => "CopyRotation",
@@ -314,7 +328,10 @@ impl Command {
     /// explicitly so any future command must state whether it requires a signed-in person.
     pub fn needs_person(&self) -> bool {
         match self {
-            Command::Share { .. } | Command::Unshare { .. } | Command::File { .. } => true,
+            Command::Share { .. }
+            | Command::Unshare { .. }
+            | Command::File { .. }
+            | Command::RefreshQuota => true,
             Command::Start
             | Command::Import { .. }
             | Command::Pause
@@ -329,6 +346,10 @@ impl Command {
             | Command::Restore { .. }
             | Command::Export { .. }
             | Command::SignIn
+            | Command::ConfirmSignIn
+            | Command::CancelSignIn
+            | Command::CreateIdentity { .. }
+            | Command::RecoverIdentity { .. }
             | Command::SignOut
             | Command::RotationSaved
             | Command::CopyRotation

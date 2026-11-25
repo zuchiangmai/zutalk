@@ -6,11 +6,15 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, NoteOp, Open, Progress, Room, Row, Setup, Sound, Writing};
+use crate::app::proto::{
+    Change, From, NoteOp, Open, Progress, Quota, Room, Row, Setup, Sound, Writing,
+};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
-use crate::id::keys::{self, Chain, Me, Ours, Secret, Service, SignIn, Who};
+use crate::id::identity::{self, PendingSignIn};
+use crate::id::keys::{self, Chain, Me, Ours, SIGN_IN_WAIT_MS, Secret, Service, SignIn, Who};
+use crate::id::quota;
 use crate::knowledge::glossary::{self, Term};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
@@ -42,6 +46,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 use zutalk_log::{Id, info, warn};
 
 const WHOLE: &str = "stt-async-v6";
@@ -176,11 +181,12 @@ impl<J: DeskJob> Desk<J> {
     }
 }
 
-/// Lightweight snapshot of bounded small-state fields (`keys`, `left`, `rooms`) read on `desk`.
+/// Lightweight snapshot of bounded small-state fields (`keys`, `left`, `quota`, `rooms`) read on `desk`.
 pub(crate) struct Refreshed {
     pub rev: u64,
     pub keys: Vec<(String, From)>,
     pub left: Option<u64>,
+    pub quota: Option<Quota>,
     pub rooms: Option<Vec<Room>>,
 }
 
@@ -194,6 +200,7 @@ pub(crate) struct Survey {
 /// Complete result of switching the signing identity on `desk` (carries no keys).
 pub(crate) struct SignedOut {
     pub me: Option<String>,
+    pub handle: Option<String>,
     pub rotation_unsaved: bool,
     pub refreshed: Refreshed,
     pub rooms: Vec<Room>,
@@ -302,27 +309,95 @@ impl IndexSync {
 
 enum Job {
     Boot,
-    Settings { setup: Setup },
-    Sign { who: Who, why: &'static str, made: bool, keep: Option<u32>, busy: Vec<String> },
-    SignOut { keep: Option<u32>, busy: Vec<String> },
+    Settings {
+        setup: Setup,
+    },
+    Sign {
+        who: Who,
+        why: &'static str,
+        made: bool,
+        keep: Option<u32>,
+        busy: Vec<String>,
+        initial_handle: Option<Option<String>>,
+    },
+    ConfirmSignIn {
+        keep: Option<u32>,
+        busy: Vec<String>,
+    },
+    SignOut {
+        keep: Option<u32>,
+        busy: Vec<String>,
+    },
     Clip,
     RotationSaved,
-    Refresh { rev: u64, retain: Option<Option<u32>>, include_rooms: bool },
-    Change { id: String, change: Change },
-    Note { id: String, op: NoteOp },
-    RefinePrepare { id: String },
-    Remove { id: String },
-    Restore { id: String },
-    Term { said: String, written: Option<BTreeMap<String, String>> },
-    DestroyAudio { id: String, under_way: Option<String> },
-    Export { id: String, exporter: &'static str, languages: Vec<String>, to: String },
-    SharePrepare { recording: Option<String> },
-    PutShare { id: String, share: Option<Share>, reply: oneshot::Sender<Result<(), &'static str>> },
-    UnsharePrepare { id: String, recording: Option<String> },
-    BeginFile { id: String, event: String, audio: bool },
-    OwnKey { service: Service, key: Option<String>, busy: Vec<String> },
-    Diagnose { spoken: Vec<String>, shown: Vec<String>, sound: Sound, captions: bool },
-    IndexSync { kind: SyncKind, done: oneshot::Sender<()> },
+    Refresh {
+        rev: u64,
+        retain: Option<Option<u32>>,
+        include_rooms: bool,
+    },
+    Change {
+        id: String,
+        change: Change,
+    },
+    Note {
+        id: String,
+        op: NoteOp,
+    },
+    RefinePrepare {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    Restore {
+        id: String,
+    },
+    Term {
+        said: String,
+        written: Option<BTreeMap<String, String>>,
+    },
+    DestroyAudio {
+        id: String,
+        under_way: Option<String>,
+    },
+    Export {
+        id: String,
+        exporter: &'static str,
+        languages: Vec<String>,
+        to: String,
+    },
+    SharePrepare {
+        recording: Option<String>,
+    },
+    PutShare {
+        id: String,
+        share: Option<Share>,
+        reply: oneshot::Sender<Result<(), &'static str>>,
+    },
+    UnsharePrepare {
+        id: String,
+        recording: Option<String>,
+    },
+    BeginFile {
+        id: String,
+        event: String,
+        audio: bool,
+    },
+    OwnKey {
+        service: Service,
+        key: Option<String>,
+        busy: Vec<String>,
+    },
+    Diagnose {
+        spoken: Vec<String>,
+        shown: Vec<String>,
+        sound: Sound,
+        captions: bool,
+    },
+    IndexSync {
+        kind: SyncKind,
+        done: oneshot::Sender<()>,
+    },
 }
 
 impl DeskJob for Job {
@@ -331,6 +406,7 @@ impl DeskJob for Job {
             Job::Boot => "boot",
             Job::Settings { .. } => "settings",
             Job::Sign { .. } => "sign",
+            Job::ConfirmSignIn { .. } => "confirm_signin",
             Job::SignOut { .. } => "signout",
             Job::Clip => "clip",
             Job::RotationSaved => "rotation_saved",
@@ -407,6 +483,7 @@ struct DeskEnv {
     terms: Arc<Mutex<Vec<Term>>>,
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
+    pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
     root: Tree,
     water: Reading<Water>,
@@ -438,6 +515,7 @@ pub(crate) struct Work {
     frame: Reading<Frame>,
     identity: Arc<Mutex<Identity>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
+    pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
     desk: Desk<Job>,
     bg: Arc<Semaphore>,
@@ -470,6 +548,7 @@ impl Work {
         let terms: Arc<Mutex<Vec<Term>>> = Arc::new(Mutex::new(Vec::new()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let pending_signin: Arc<Mutex<Option<PendingSignIn>>> = Arc::new(Mutex::new(None));
         let keep_hint: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
         let slot: Arc<Mutex<Option<(String, CancellationToken)>>> = Arc::new(Mutex::new(None));
 
@@ -482,6 +561,7 @@ impl Work {
             terms: terms.clone(),
             invite: invite.clone(),
             signing: signing.clone(),
+            pending_signin: pending_signin.clone(),
             keep_hint: keep_hint.clone(),
             root: root.clone(),
             water,
@@ -548,7 +628,14 @@ impl Work {
                                 .map(|r| r.id.clone());
                             let snap = snapshot(&identity);
                             sync_slot_inner(
-                                &tree, &slot, live, snap.ours, &frame, &said, &next_seq, &jobs_done,
+                                &tree,
+                                &slot,
+                                live,
+                                snap.ours.clone(),
+                                &frame,
+                                &said,
+                                &next_seq,
+                                &jobs_done,
                             );
                             if start_create {
                                 let desk = desk_holder
@@ -562,7 +649,7 @@ impl Work {
                                         &next_seq,
                                         &jobs_done,
                                         &jobs_failed,
-                                        http,
+                                        http.clone(),
                                         config.directory.clone(),
                                         desk,
                                         keep_hint,
@@ -577,8 +664,32 @@ impl Work {
                                     &next_seq,
                                     &jobs_done,
                                     &jobs_failed,
-                                    snap.keys,
+                                    snap.keys.clone(),
                                     token,
+                                    results.clone(),
+                                );
+                            } else if let Some(ours) = snap.ours.clone() {
+                                spawn_quota_net(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    ours,
+                                    snap.keys.clone(),
+                                    results.clone(),
+                                    false,
+                                );
+                            }
+                            if let (Some(ours), Ok(shelf)) = (snap.ours, snap.shelf) {
+                                spawn_profile_net(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    http,
+                                    config.directory.clone(),
+                                    ours.me.did,
+                                    shelf.root().to_path_buf(),
                                     results.clone(),
                                 );
                             }
@@ -592,7 +703,14 @@ impl Work {
                                 .map(|r| r.id.clone());
                             let snap = snapshot(&identity);
                             sync_slot_inner(
-                                &tree, &slot, live, snap.ours, &frame, &said, &next_seq, &jobs_done,
+                                &tree,
+                                &slot,
+                                live,
+                                snap.ours.clone(),
+                                &frame,
+                                &said,
+                                &next_seq,
+                                &jobs_done,
                             );
                             if let Some(token) = start_claim {
                                 spawn_claim_net(
@@ -602,8 +720,32 @@ impl Work {
                                     &next_seq,
                                     &jobs_done,
                                     &jobs_failed,
-                                    snap.keys,
+                                    snap.keys.clone(),
                                     token,
+                                    results.clone(),
+                                );
+                            } else if let Some(ours) = snap.ours.clone() {
+                                spawn_quota_net(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    ours,
+                                    snap.keys.clone(),
+                                    results.clone(),
+                                    false,
+                                );
+                            }
+                            if let (Some(ours), Ok(shelf)) = (snap.ours, snap.shelf) {
+                                spawn_profile_net(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    http,
+                                    config.directory.clone(),
+                                    ours.me.did,
+                                    shelf.root().to_path_buf(),
                                     results.clone(),
                                 );
                             }
@@ -696,6 +838,7 @@ impl Work {
                             let msg = match kind {
                                 "refresh" => Msg::Refreshed(Err(code)),
                                 "sign" | "signout" => Msg::Signed(Err(code)),
+                                "confirm_signin" => Msg::SignInFailed(code),
                                 "own_key" => Msg::OwnKeyDone(Err(code)),
                                 _ => Msg::DeskFailed(code),
                             };
@@ -720,6 +863,7 @@ impl Work {
             frame,
             identity,
             signing,
+            pending_signin,
             keep_hint,
             desk,
             bg,
@@ -771,15 +915,17 @@ impl Work {
         self.desk.offer(Job::Settings { setup }).map(|_| ())
     }
 
-    /// Starts a sign-in relay wait on `net.signin` and returns the QR URL to display.
-    /// Keys stay inside `Work` and never cross the hub's mailbox (`P1-20`).
-    pub(crate) fn sign_in(&self) -> Result<String, &'static str> {
+    /// Starts a sign-in relay wait on `net.signin` and returns `(url, expires_at)`.
+    /// Keys stay inside `Work::pending_signin` until `confirm_sign_in` commits them.
+    pub(crate) fn sign_in(&self) -> Result<(String, i64), &'static str> {
         let sign_in = SignIn::begin(&self.config.server).map_err(code)?;
         let url = sign_in.code().to_owned();
+        let expires_at = now() + SIGN_IN_WAIT_MS as i64;
+        clear_pending(&self.pending_signin);
         let cancel = replace_signing(&self.signing);
         let http = self.http.clone();
-        let desk = self.desk.clone();
-        let keep_hint = self.keep_hint.clone();
+        let directory = self.config.directory.clone();
+        let pending_signin = self.pending_signin.clone();
         let results = self.results.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
@@ -789,25 +935,21 @@ impl Work {
             let started = std::time::Instant::now();
             let outcome = tokio::select! {
                 () = cancel.cancelled() => None,
-                res = sign_in.finish(&http) => Some(res),
+                res = identity::receive_sign_in(&sign_in, &http, &directory) => Some(res),
             };
             let ms = started.elapsed().as_millis() as u64;
             match outcome {
                 None => {
                     info!("job.done", kind = "signin", job = seq, code = "cancelled", ms = ms);
                 }
-                Some(Ok(me)) => {
+                Some(Ok(pending)) => {
+                    let did = pending.did().to_owned();
+                    let handle = pending.handle().map(str::to_owned);
+                    let code_str = pending.code().map(str::to_owned);
+                    *pending_signin.lock().unwrap_or_else(PoisonError::into_inner) = Some(pending);
                     info!("job.done", kind = "signin", job = seq, code = "ok", ms = ms);
                     jobs_done.add(1);
-                    let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
-                    let job = Job::Sign {
-                        who: Who::Person(me),
-                        why: "sign_in",
-                        made: false,
-                        keep,
-                        busy: Vec::new(),
-                    };
-                    let _ = desk.send(job).await; // dropped: desk ended on shutdown
+                    let _ = results.send(Msg::SignInPending { did, handle, code: code_str }).await; // dropped: the hub has ended
                 }
                 Some(Err(end)) => {
                     let c = code(end);
@@ -817,7 +959,134 @@ impl Work {
                 }
             }
         });
-        Ok(url)
+        Ok((url, expires_at))
+    }
+
+    pub(crate) fn confirm_sign_in(
+        &self,
+        keep: Option<u32>,
+        busy: Vec<String>,
+    ) -> Result<(), &'static str> {
+        self.desk.offer(Job::ConfirmSignIn { keep, busy }).map(|_| ())
+    }
+
+    pub(crate) fn cancel_sign_in(&self) {
+        cancel_signing(&self.signing, &self.pending_signin);
+    }
+
+    /// Creates a new `did:zu` (with optional normalized handle) on `net.create_manual`.
+    pub(crate) fn create_identity(&self, handle: Option<String>) {
+        clear_pending(&self.pending_signin);
+        let cancel = replace_signing(&self.signing);
+        let http = self.http.clone();
+        let directory = self.config.directory.clone();
+        let desk = self.desk.clone();
+        let keep_hint = self.keep_hint.clone();
+        let results = self.results.clone();
+        let seq = self.alloc_seq();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        self.tree.spawn("net.create_manual", async move {
+            info!("job.start", kind = "create", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let outcome = tokio::select! {
+                () = cancel.cancelled() => None,
+                res = identity::create_identity(&http, &directory, handle) => Some(res),
+            };
+            let ms = started.elapsed().as_millis() as u64;
+            match outcome {
+                None => {
+                    info!("job.done", kind = "create", job = seq, code = "cancelled", ms = ms);
+                }
+                Some(Ok((me, resolved_handle))) => {
+                    info!("job.done", kind = "create", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                    let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
+                    let job = Job::Sign {
+                        who: Who::Person(me),
+                        why: "sign_in",
+                        made: false,
+                        keep,
+                        busy: Vec::new(),
+                        initial_handle: Some(resolved_handle),
+                    };
+                    let _ = desk.send(job).await; // dropped: desk ended on shutdown
+                }
+                Some(Err(end)) => {
+                    let c = code(end);
+                    warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
+                    jobs_failed.add(1);
+                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                }
+            }
+        });
+    }
+
+    /// Recovers an existing `did:zu` using its P-256 rotation key on `net.recover`.
+    /// Immediately wraps the key string in `Zeroizing` so it is wiped on drop.
+    pub(crate) fn recover_identity(&self, did: String, key: String) {
+        let key = Zeroizing::new(key);
+        clear_pending(&self.pending_signin);
+        let cancel = replace_signing(&self.signing);
+        let http = self.http.clone();
+        let directory = self.config.directory.clone();
+        let desk = self.desk.clone();
+        let keep_hint = self.keep_hint.clone();
+        let results = self.results.clone();
+        let seq = self.alloc_seq();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        self.tree.spawn("net.recover", async move {
+            info!("job.start", kind = "recover", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let outcome = tokio::select! {
+                () = cancel.cancelled() => None,
+                res = identity::recover_identity(&http, &directory, &did, key) => Some(res),
+            };
+            let ms = started.elapsed().as_millis() as u64;
+            match outcome {
+                None => {
+                    info!("job.done", kind = "recover", job = seq, code = "cancelled", ms = ms);
+                }
+                Some(Ok((me, resolved_handle))) => {
+                    info!("job.done", kind = "recover", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                    let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
+                    let job = Job::Sign {
+                        who: Who::Person(me),
+                        why: "sign_in",
+                        made: false,
+                        keep,
+                        busy: Vec::new(),
+                        initial_handle: Some(resolved_handle),
+                    };
+                    let _ = desk.send(job).await; // dropped: desk ended on shutdown
+                }
+                Some(Err(end)) => {
+                    let c = code(end);
+                    warn!("job.done", kind = "recover", job = seq, code = c, ms = ms);
+                    jobs_failed.add(1);
+                    let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+                }
+            }
+        });
+    }
+
+    /// Manually refreshes the signed-in person's daily quota from `POST /quota`.
+    pub(crate) fn refresh_quota(&self) -> Result<(), &'static str> {
+        let snap = snapshot(&self.identity);
+        let ours = snap.ours.ok_or("sign_in.first")?;
+        spawn_quota_net(
+            &self.tree,
+            &self.next_seq,
+            &self.jobs_done,
+            &self.jobs_failed,
+            ours,
+            snap.keys,
+            self.results.clone(),
+            true,
+        );
+        Ok(())
     }
 
     pub(crate) fn sign_out(
@@ -1273,7 +1542,12 @@ fn replace_signing(cell: &Mutex<Option<CancellationToken>>) -> CancellationToken
     next
 }
 
-fn cancel_signing(cell: &Mutex<Option<CancellationToken>>) {
+fn clear_pending(cell: &Mutex<Option<PendingSignIn>>) {
+    let _ = cell.lock().unwrap_or_else(PoisonError::into_inner).take(); // dropped: zeroize abandoned pending sign-in
+}
+
+fn cancel_signing(cell: &Mutex<Option<CancellationToken>>, pending: &Mutex<Option<PendingSignIn>>) {
+    clear_pending(pending);
     let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(old) = guard.take() {
         old.cancel();
@@ -1351,9 +1625,9 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 .map_err(|_| "settings")?;
             Ok(DeskOut::Silent)
         }
-        Job::Sign { who, why, made, keep, busy } => {
+        Job::Sign { who, why, made, keep, busy, initial_handle } => {
             let has_person = who.person().is_some();
-            let out = run_sign(env, who, why, made, keep, &busy)?;
+            let out = run_sign(env, who, why, made, keep, &busy, initial_handle)?;
             let start_claim = if has_person {
                 env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone()
             } else {
@@ -1361,11 +1635,23 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             };
             Ok(DeskOut::Signed { out, start_claim })
         }
+        Job::ConfirmSignIn { keep, busy } => {
+            let pending = env
+                .pending_signin
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .ok_or("id.no_pending")?;
+            let (me, handle) = pending.commit().map_err(code)?;
+            let out = run_sign(env, Who::Person(me), "sign_in", false, keep, &busy, Some(handle))?;
+            let start_claim = env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            Ok(DeskOut::Signed { out, start_claim })
+        }
         Job::SignOut { keep, busy } => {
-            cancel_signing(&env.signing);
+            cancel_signing(&env.signing, &env.pending_signin);
             keys::set("identity", None).map_err(code)?;
             let local = keys::local().map(|(me, _)| me);
-            let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy)?;
+            let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
             Ok(DeskOut::Signed { out, start_claim: None })
         }
         Job::Clip => {
@@ -1866,7 +2152,7 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Who::Local(_) | Who::Person(_) => None,
     };
     let has_person = who.person().is_some();
-    let mut signed = run_sign(env, who, "boot", made, setup.keep, &[])?;
+    let mut signed = run_sign(env, who, "boot", made, setup.keep, &[], None)?;
     let id_ms = t.elapsed().as_millis() as u64;
     if let Some(c) = who_err {
         warn!("boot.step", step = "identity", code = c, ms = id_ms);
@@ -1911,6 +2197,7 @@ fn run_sign(
     made: bool,
     keep: Option<u32>,
     busy: &[String],
+    initial_handle: Option<Option<String>>,
 ) -> Result<SignedOut, &'static str> {
     let config = &env.config;
     let http = &env.http;
@@ -1929,6 +2216,16 @@ fn run_sign(
     let keys = Arc::new(Chain::new(ours.clone()));
     let me = who.person().map(|me| me.did.clone());
     let rotation_unsaved = keys::unsaved();
+    if let (Some(h), Some(s)) = (initial_handle.as_ref(), shelf.as_deref()) {
+        let _ = identity::write_cached_handle(s.root(), h.as_deref()); // dropped: offline handle cache is best-effort
+    }
+    let handle = if me.is_some() {
+        initial_handle
+            .flatten()
+            .or_else(|| shelf.as_deref().and_then(|s| identity::read_cached_handle(s.root())))
+    } else {
+        None
+    };
 
     {
         let mut guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1961,6 +2258,7 @@ fn run_sign(
                 rev: 0,
                 keys: Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect(),
                 left: snap.keys.left(),
+                quota: snap.keys.quota(),
                 rooms: Some(Vec::new()),
             }
         }
@@ -1995,7 +2293,7 @@ fn run_sign(
         }
     };
 
-    Ok(SignedOut { me, rotation_unsaved, refreshed, rooms, survey, say })
+    Ok(SignedOut { me, handle, rotation_unsaved, refreshed, rooms, survey, say })
 }
 
 fn run_refresh(
@@ -2009,8 +2307,15 @@ fn run_refresh(
     let keys: Vec<(String, From)> =
         Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
     let left = snap.keys.left();
+    let quota = snap.keys.quota();
     let Ok(shelf) = &snap.shelf else {
-        return Ok(Refreshed { rev, keys, left, rooms: include_rooms.then_some(Vec::new()) });
+        return Ok(Refreshed {
+            rev,
+            keys,
+            left,
+            quota,
+            rooms: include_rooms.then_some(Vec::new()),
+        });
     };
     if let Some(keep) = retain {
         let tapes = config.tapes();
@@ -2037,7 +2342,7 @@ fn run_refresh(
         }
     }
     let rooms = if include_rooms { Some(read_rooms(config, Some(shelf))?) } else { None };
-    Ok(Refreshed { rev, keys, left, rooms })
+    Ok(Refreshed { rev, keys, left, quota, rooms })
 }
 
 fn read_rooms(config: &Config, shelf: Option<&Shelf>) -> Result<Vec<Room>, &'static str> {
@@ -2146,6 +2451,7 @@ fn spawn_create_net(
                     made: false,
                     keep,
                     busy: Vec::new(),
+                    initial_handle: None,
                 };
                 let _ = desk.send(job).await; // dropped: desk ended on shutdown
             }
@@ -2154,6 +2460,99 @@ fn spawn_create_net(
                 warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
                 jobs_failed.add(1);
                 let _ = results.send(Msg::SignInFailed(c)).await; // dropped: the hub has ended
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_quota_net(
+    tree: &Tree,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    jobs_failed: &Counter,
+    ours: Ours,
+    chain: Arc<Chain>,
+    results: Tx<Msg>,
+    notify: bool,
+) {
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("net.quota", async move {
+        info!("job.start", kind = "quota", job = seq, waited_ms = 0u64);
+        let started = std::time::Instant::now();
+        let outcome = quota::fetch(&ours).await;
+        let ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((left, quota_info)) => {
+                chain.set_quota(left, quota_info.clone());
+                let now_ms = now();
+                let soniox_left =
+                    quota::remaining_for(&quota_info, Service::Soniox, now_ms).unwrap_or(0);
+                let openrouter_left =
+                    quota::remaining_for(&quota_info, Service::OpenRouter, now_ms).unwrap_or(0);
+                info!(
+                    "quota.updated",
+                    soniox_left = soniox_left,
+                    openrouter_left = openrouter_left,
+                    code = "ok"
+                );
+                info!("job.done", kind = "quota", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+                let _ = results.send(Msg::QuotaUpdated { left, quota: quota_info, notify }).await; // dropped: the hub has ended
+            }
+            Err(end) => {
+                let c = code(end);
+                warn!("quota.updated", soniox_left = 0u32, openrouter_left = 0u32, code = c);
+                warn!("job.done", kind = "quota", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
+                if notify {
+                    let _ = results.send(Msg::QuotaFailed(c)).await; // dropped: the hub has ended
+                }
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_profile_net(
+    tree: &Tree,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    jobs_failed: &Counter,
+    http: reqwest::Client,
+    directory: String,
+    did: String,
+    shelf_root: PathBuf,
+    results: Tx<Msg>,
+) {
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let run_tree = tree.clone();
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("net.profile", async move {
+        info!("job.start", kind = "profile", job = seq, waited_ms = 0u64);
+        let started = std::time::Instant::now();
+        let outcome = identity::fetch_handle(&http, &directory, &did).await;
+        let ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok(handle) => {
+                let to_cache = handle.clone();
+                let write_res = run_tree
+                    .blocking("profile.write", move || {
+                        identity::write_cached_handle(&shelf_root, to_cache.as_deref())
+                    })
+                    .await;
+                let _ = write_res; // dropped: best-effort offline handle cache
+                info!("job.done", kind = "profile", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+                let _ = results.send(Msg::HandleResolved(handle)).await; // dropped: the hub has ended
+            }
+            Err(end) => {
+                let c = code(end);
+                warn!("job.done", kind = "profile", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
             }
         }
     });

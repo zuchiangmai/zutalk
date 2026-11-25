@@ -37,7 +37,8 @@ const DAY_MS = 24 * HOUR_MS;
 /** The bounded state before anything has happened. */
 export const EMPTY: State = {
   me: null,
-  login: null,
+  auth: { is: 'Idle' },
+  handle: null,
   rotation_unsaved: false,
   update: null,
   keys: [
@@ -45,6 +46,7 @@ export const EMPTY: State = {
     ['openrouter', 'Nowhere'],
   ],
   left: null,
+  quota: null,
   setup: { spoken: [], shown: [], sound: 'Mic', device: null, mode: 'Audience', language: null, keep: null },
   devices: [],
   languages: ['en', 'fr', 'es', 'de', 'zh', 'ja', 'ko', 'th'],
@@ -430,14 +432,52 @@ export function mockBus(recording = false): Bus {
       s.rooms = s.rooms.filter((r) => r.id !== c.room);
     },
     SignIn: () => {
-      s.login = 'https://zu.example/login#7Q4M-2KXP-9HTR';
-      later(6000, () => {
-        s.login = null;
-        s.me = 'did:zu:z6Mkq3demo8Fh2';
+      s.auth = { is: 'Scanning', url: 'https://zu.example/.well-known/zu-relay/00000000000000000000000000000000#demo', expires_at: Date.now() + 300_000 };
+      later(2000, () => {
+        if (s.auth.is === 'Scanning') {
+          s.auth = { is: 'Confirm', did: 'did:zu:z6Mkq3demo8Fh2', handle: 'demo.zuzalu.ink', code: null };
+        }
       });
+    },
+    ConfirmSignIn: () => {
+      if (s.auth.is !== 'Confirm') {
+        on({ kind: 'Notice', is: 'id.no_pending' });
+        return;
+      }
+      s.me = s.auth.did;
+      s.handle = s.auth.handle;
+      s.auth = { is: 'Idle' };
+    },
+    CancelSignIn: () => {
+      s.auth = { is: 'Idle' };
+    },
+    CreateIdentity: (c) => {
+      s.auth = { is: 'Idle' };
+      s.me = 'did:zu:z6Mkq3demo8Fh2';
+      s.handle = c.handle ? (c.handle.includes('.') ? c.handle : `${c.handle}.zuzalu.ink`) : null;
+      s.rotation_unsaved = true;
+    },
+    RecoverIdentity: (c) => {
+      s.auth = { is: 'Idle' };
+      s.me = c.did;
+      s.handle = 'demo.zuzalu.ink';
+      s.rotation_unsaved = false;
+    },
+    RefreshQuota: () => {
+      s.quota = {
+        resets_at: Date.now() + 12 * HOUR_MS,
+        services: [
+          { service: 'soniox', used: 4, limit: 40, remaining: 36 },
+          { service: 'openrouter', used: 2, limit: 30, remaining: 28 },
+        ],
+      };
+      on({ kind: 'Notice', is: 'quota.refreshed' });
     },
     SignOut: () => {
       s.me = null;
+      s.handle = null;
+      s.quota = null;
+      s.auth = { is: 'Idle' };
     },
     RotationSaved: () => {
       s.rotation_unsaved = false;

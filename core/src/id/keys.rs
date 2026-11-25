@@ -5,6 +5,7 @@
 //! print.
 
 use crate::capture::clock::wall_ms;
+use crate::id::quota::{self, Quota};
 use crate::rt::supervise::End;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use keyring_core::{Entry, Error};
@@ -202,9 +203,19 @@ pub fn kept() -> Result<Option<Me>, End> {
 }
 
 /// Keeps an identity on this device, as [`kept`] reads it.
+pub(crate) fn keep_me(seed: &[u8; 32], did: String) -> Result<Me, End> {
+    keep(seed, did)
+}
+
+/// Keeps an identity on this device, as [`kept`] reads it.
 fn keep(seed: &[u8; 32], did: String) -> Result<Me, End> {
     set("identity", Some(&Zeroizing::new([seed.as_slice(), did.as_bytes()].concat())))?;
     Ok(Me { did, key: Arc::new(SecretKey::from_seed(seed)) })
+}
+
+/// Saves a newly created identity's rotation key until the person confirms they backed it up.
+pub(crate) fn save_unsaved_rotation(secret: &[u8; 32]) -> Result<(), End> {
+    set(UNSAVED, Some(secret.as_slice()))
 }
 
 /// The device's own identity, made the first time it is asked for and kept with the secrets
@@ -281,12 +292,12 @@ impl Who {
 const UNSAVED: &str = "rotation.unsaved";
 
 /// How long the directory has to take a new DID. Origin to be traced.
-const CREATE_WAIT_MS: u64 = 30_000;
+pub(crate) const CREATE_WAIT_MS: u64 = 30_000;
 /// How often a sign-in asks the relay whether the other device has sent the key. Origin to
 /// be traced.
-const SIGN_IN_POLL_MS: u64 = 1_000;
+pub(crate) const SIGN_IN_POLL_MS: u64 = 1_000;
 /// How long a sign-in code stays good: five minutes to scan it. Origin to be traced.
-const SIGN_IN_WAIT_MS: u64 = 300_000;
+pub(crate) const SIGN_IN_WAIT_MS: u64 = 300_000;
 /// The issuer says a connection's cap in seconds (`session_cap_s`); time here is in ms.
 const MS_PER_S: u64 = 1_000;
 
@@ -362,26 +373,53 @@ fn mark(token: &Secret) -> Vec<u8> {
     Sha256::digest(token.expose()).to_vec()
 }
 
-/// A sign-in under way: the code to show, and how to open what comes back.
-pub struct SignIn(login::Code);
+/// A sign-in under way: the code to show, how to open what comes back, and the relay URL to poll.
+pub struct SignIn {
+    code: login::Code,
+    relay_room: String,
+}
 
 impl SignIn {
-    /// `origin` relays the key: our server.
+    /// `origin` relays the key: our server. Loopback `http://127.0.0.1:` / `http://localhost:`
+    /// origins used by local tests wrap as `https://` inside the `zu::login` code while polling
+    /// the loopback relay over plain HTTP; every other origin must already be `https://`.
     pub fn begin(origin: &str) -> Result<SignIn, End> {
         let (secret, room) = (Zeroizing::new(random::<32>()?), random::<16>()?);
-        login::Code::new(origin, &secret, &room).map(SignIn).map_err(|_| End::Fatal("id.code"))
+        let local_http =
+            origin.starts_with("http://127.0.0.1:") || origin.starts_with("http://localhost:");
+        let code_origin = if local_http {
+            format!("https://{}", &origin["http://".len()..])
+        } else {
+            origin.to_owned()
+        };
+        let code =
+            login::Code::new(&code_origin, &secret, &room).map_err(|_| End::Fatal("id.code"))?;
+        let relay_room = if local_http {
+            code.room.replacen("https://", "http://", 1)
+        } else {
+            code.room.clone()
+        };
+        Ok(SignIn { code, relay_room })
     }
 
     /// What to show as a QR code for the other device to scan.
     pub fn code(&self) -> &str {
-        &self.0.url
+        &self.code.url
+    }
+
+    pub(crate) fn login_code(&self) -> &login::Code {
+        &self.code
+    }
+
+    pub(crate) fn relay_room(&self) -> &str {
+        &self.relay_room
     }
 
     /// Waits for the key, checks it is a current key of its DID, and keeps it.
     pub async fn finish(&self, http: &Client) -> Result<Me, End> {
         let (deadline, offline) = (wall_ms() + SIGN_IN_WAIT_MS, |_| End::Retry("offline"));
         let sealed = loop {
-            let reply = http.get(&self.0.room).send().await.map_err(offline)?;
+            let reply = http.get(&self.relay_room).send().await.map_err(offline)?;
             match reply.status() {
                 StatusCode::OK => break reply.bytes().await.map_err(offline)?,
                 StatusCode::NOT_FOUND if wall_ms() < deadline => {}
@@ -389,7 +427,7 @@ impl SignIn {
             }
             tokio::time::sleep(Duration::from_millis(SIGN_IN_POLL_MS)).await;
         };
-        let received = self.0.open(&sealed, None).map_err(|_| End::Fatal("id.sealed"))?;
+        let received = self.code.open(&sealed, None).map_err(|_| End::Fatal("id.sealed"))?;
         let url = did::url(&received.did, false).map_err(|_| End::Fatal("id.did"))?;
         let doc = http.get(url).send().await.and_then(|r| r.error_for_status()).map_err(offline)?;
         let doc = did::resolve(&received.did, &doc.bytes().await.map_err(offline)?);
@@ -409,8 +447,9 @@ pub struct Ours {
 
 /// The server's refusals that mean something here, by their stable code; the rest is trouble
 /// that may pass, or a person the server does not take as who they say.
-const REFUSED: [(&str, &str); 7] = [
+const REFUSED: [(&str, &str); 8] = [
     ("quota", "keys.quota"),
+    ("quota.daily", "keys.quota.daily"),
     ("claimed", "invite.claimed"),
     ("invite", "invite.unknown"),
     ("room", "room.gone"),
@@ -448,15 +487,16 @@ impl Ours {
         })
     }
 
-    /// A short-lived key drawn from granted quota, and what is left of it.
-    async fn issue(&self, service: Service) -> Result<(Lease, u64), End> {
+    /// A short-lived key drawn from granted quota, what is left of it, and any updated daily quota.
+    async fn issue(&self, service: Service) -> Result<(Lease, u64, Option<Quota>), End> {
         let issued = self.ask("lease", "talk/lease", json!({ "service": service.name() })).await?;
         let key = Secret::new(issued["key"].as_str().ok_or(End::Retry("server"))?);
         let session_cap = issued["session_cap_s"].as_u64().map(|cap_s| {
             let cap_ms = cap_s.saturating_mul(MS_PER_S);
             Duration::from_millis(cap_ms)
         });
-        Ok((Lease { key, session_cap }, issued["left"].as_u64().unwrap_or(0)))
+        let quota = issued.get("quota").and_then(quota::parse_quota);
+        Ok((Lease { key, session_cap }, issued["left"].as_u64().unwrap_or(0), quota))
     }
 }
 
@@ -488,11 +528,17 @@ pub struct Chain {
     refused: Mutex<Vec<Service>>,
     issuer: Option<Ours>,
     left: AtomicU64, // µ$ of granted quota, as the issuer last said; `MAX`: not heard yet
+    quota: Mutex<Option<Quota>>,
 }
 
 impl Chain {
     pub fn new(issuer: Option<Ours>) -> Self {
-        Self { refused: Mutex::default(), issuer, left: AtomicU64::new(u64::MAX) }
+        Self {
+            refused: Mutex::default(),
+            issuer,
+            left: AtomicU64::new(u64::MAX),
+            quota: Mutex::new(None),
+        }
     }
 
     /// The person set or cleared their own key: whatever was refused before is forgotten.
@@ -515,12 +561,28 @@ impl Chain {
         Some(self.left.load(Relaxed)).filter(|left| *left != u64::MAX)
     }
 
+    pub fn quota(&self) -> Option<Quota> {
+        self.quota.lock().ok().and_then(|q| q.clone())
+    }
+
+    pub fn set_quota(&self, left: u64, quota: Quota) {
+        self.left.store(left, Relaxed);
+        if let Ok(mut guard) = self.quota.lock() {
+            *guard = Some(quota);
+        }
+    }
+
     /// Carries the hours left on a 0.8 community invite into what is granted here. The token
     /// goes to our server, which has the old service retire it, and is kept nowhere.
     pub async fn claim(&self, token: &Secret) -> Result<(), End> {
         let issuer = self.issuer.as_ref().ok_or(End::Fatal("sign_in.first"))?;
         let said = issuer.ask("claim", "talk/claim", json!({ "token": token.expose() })).await?;
         self.left.store(said["left"].as_u64().unwrap_or(0), Relaxed);
+        if let Some(q) = said.get("quota").and_then(quota::parse_quota)
+            && let Ok(mut guard) = self.quota.lock()
+        {
+            *guard = Some(q);
+        }
         Ok(())
     }
 }
@@ -537,8 +599,13 @@ impl Keys for Chain {
         } else {
             "keys.none"
         }))?;
-        let (lease, left) = issuer.issue(service).await?;
+        let (lease, left, quota) = issuer.issue(service).await?;
         self.left.store(left, Relaxed);
+        if let Some(q) = quota
+            && let Ok(mut guard) = self.quota.lock()
+        {
+            *guard = Some(q);
+        }
         Ok(lease)
     }
 

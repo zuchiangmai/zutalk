@@ -310,5 +310,13 @@
  "captions.layout": "자막 레이아웃 전환",
  "viewer.live": "실시간 자막",
  "viewer.ended": "자막이 종료되었습니다",
- "viewer.all_langs": "전체"
+ "viewer.all_langs": "전체",
+ "code.quota.daily": "오늘 할당량을 모두 사용했습니다",
+ "code.keys.quota.daily": "오늘 할당량을 모두 사용했습니다",
+ "code.id.handle": "올바른 핸들이 아닙니다",
+ "code.id.recovery_key": "복구 키가 일치하지 않습니다",
+ "code.id.signed_in": "이미 로그인되어 있습니다",
+ "code.id.no_pending": "확인 대기 중인 로그인이 없습니다",
+ "code.id.cancelled": "로그인이 취소되었습니다",
+ "code.quota.refreshed": "할당량이 업데이트되었습니다"
 }

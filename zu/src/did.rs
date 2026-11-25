@@ -268,6 +268,20 @@ impl Rotation {
         let bytes = zeroize::Zeroizing::new([&[0x86, 0x26][..], &self.0.to_bytes()].concat());
         zeroize::Zeroizing::new(format!("z{}", Base::Base58Btc.encode(&*bytes)))
     }
+
+    /// Exact inverse of [`Rotation::multikey`]: parses a `z`-prefixed base58btc P-256 private
+    /// multikey (`[0x86, 0x26]` + 32-byte scalar) while zeroizing intermediate buffers.
+    pub fn from_multikey(text: &str) -> Result<Rotation, Error> {
+        let body = text.strip_prefix('z').ok_or(Error::Key)?;
+        let decoded =
+            zeroize::Zeroizing::new(Base::Base58Btc.decode(body).map_err(|_| Error::Key)?);
+        if decoded.len() != 34 || decoded[0] != 0x86 || decoded[1] != 0x26 {
+            return Err(Error::Key);
+        }
+        let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(&decoded[2..34]);
+        Self::from_bytes(&secret)
+    }
 }
 
 /// did-zu.md § DID Creation: a new `did:zu` with one rotation key and one Zu signing key, and
@@ -275,13 +289,23 @@ impl Rotation {
 /// derives from it. The DID, and its signed genesis operation as the JSON the directory takes
 /// at `{DIRECTORY}/{did}`. The signature is deterministic (RFC 6979): the same keys, the same DID.
 pub fn create(rotation: &Rotation, key: &PublicKey) -> Result<(String, String), Error> {
+    create_with_aka(rotation, key, &[])
+}
+
+/// did-zu.md § DID Creation with caller-supplied `alsoKnownAs` entries (such as `zu://<handle>`).
+pub fn create_with_aka(
+    rotation: &Rotation,
+    key: &PublicKey,
+    also_known_as: &[String],
+) -> Result<(String, String), Error> {
     let name = format!("zu-{}", &Base::Base32Lower.encode(Sha256::digest(key.as_bytes()))[..8]);
     let method = Value::Map(Map::from([(name, Value::Str(format!("did:key:{key}")))]));
+    let aka = also_known_as.iter().cloned().map(Value::Str).collect();
     let mut op = Map::from([
         ("type".into(), Value::Str("plc_operation".into())),
         ("rotationKeys".into(), Value::List(vec![Value::Str(rotation.did_key())])),
         ("verificationMethods".into(), method),
-        ("alsoKnownAs".into(), Value::List(Vec::new())),
+        ("alsoKnownAs".into(), Value::List(aka)),
         ("services".into(), Value::Map(Map::new())),
         ("prev".into(), Value::Null),
     ]);
@@ -290,6 +314,67 @@ pub fn create(rotation: &Rotation, key: &PublicKey) -> Result<(String, String), 
     op.insert("sig".into(), Value::Str(Base::Base64Url.encode(sig.normalize_s().to_bytes())));
     let op = Value::Map(op);
     Ok((named(&Cid::of(Codec::Drisl, &op.encode())), op.to_json()?))
+}
+
+/// did-zu.md § Key Rotation: append a new Ed25519 Zu signing key to an existing `did:zu`,
+/// preserving its rotation keys, handles, services, and prior verification methods.
+/// Returns the signed `plc_operation` JSON and the handles currently claimed by the DID.
+pub fn add_signing_key(
+    did: &str,
+    audit_log: &[u8],
+    rotation: &Rotation,
+    new_key: &PublicKey,
+) -> Result<(String, Vec<String>), Error> {
+    match parts(did).ok_or(Error::Path)? {
+        ("zu", _) => {}
+        _ => return Err(Error::Method),
+    }
+    let json: Json = serde_json::from_slice(audit_log).map_err(|_| Error::Json)?;
+    let log = json.as_array().ok_or(Error::Json)?;
+    let _ = audit(did, log)?;
+    let head = log
+        .iter()
+        .rev()
+        .find(|entry| entry["nullified"] == Json::Bool(false))
+        .ok_or(Error::Log(1))?;
+    let prev_cid = head["cid"].as_str().ok_or(Error::Cid)?;
+    let Some(Value::Map(mut prev_map)) = plain(&head["operation"]) else {
+        return Err(Error::Json);
+    };
+    let kind = take!(prev_map, "type", Value::Str(kind) => kind);
+    let (rotation_keys, mut methods, also_known_as, services) = match kind.as_str() {
+        "plc_operation" => {
+            let rkeys = strings(take!(prev_map, "rotationKeys", Value::List(k) => k))?;
+            let aka = strings(take!(prev_map, "alsoKnownAs", Value::List(a) => a))?;
+            let methods = take!(prev_map, "verificationMethods", Value::Map(m) => m);
+            let services = take!(prev_map, "services", Value::Map(s) => s);
+            (rkeys, methods, aka, services)
+        }
+        "create" => {
+            let signing = take!(prev_map, "signingKey", Value::Str(k) => k);
+            let recovery = take!(prev_map, "recoveryKey", Value::Str(k) => k);
+            (vec![recovery, signing], Map::new(), Vec::new(), Map::new())
+        }
+        _ => return Err(Error::Signer),
+    };
+    let rot_did = rotation.did_key();
+    rule(rotation_keys.iter().any(|k| k == &rot_did), Error::Signer)?;
+
+    let name = format!("zu-{}", &Base::Base32Lower.encode(Sha256::digest(new_key.as_bytes()))[..8]);
+    methods.insert(name, Value::Str(format!("did:key:{new_key}")));
+    let handles: Vec<String> =
+        also_known_as.iter().filter_map(|uri| handle(uri.strip_prefix("zu://")?)).collect();
+    let mut op = Map::from([
+        ("type".into(), Value::Str("plc_operation".into())),
+        ("rotationKeys".into(), Value::List(rotation_keys.into_iter().map(Value::Str).collect())),
+        ("verificationMethods".into(), Value::Map(methods)),
+        ("alsoKnownAs".into(), Value::List(also_known_as.into_iter().map(Value::Str).collect())),
+        ("services".into(), Value::Map(services)),
+        ("prev".into(), Value::Str(prev_cid.to_owned())),
+    ]);
+    let sig: Signature = rotation.0.sign(&Value::Map(op.clone()).encode());
+    op.insert("sig".into(), Value::Str(Base::Base64Url.encode(sig.normalize_s().to_bytes())));
+    Ok((Value::Map(op).to_json()?, handles))
 }
 
 /// did-zu.md § Operation Serialization: the operation in one entry of an audit log, the bytes

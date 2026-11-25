@@ -357,7 +357,7 @@ describe('SettingsPage', () => {
     const sent: Command[] = [];
     const state: State = {
       ...EMPTY,
-      login: 'https://zu.example/login#ABCD-1234',
+      auth: { is: 'Scanning', url: 'https://zu.example/login#ABCD-1234', expires_at: Date.now() + 300_000 },
       keys: [
         ['soniox', 'Nowhere'],
         ['openrouter', 'Granted'],

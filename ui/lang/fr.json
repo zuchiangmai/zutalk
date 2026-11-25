@@ -310,5 +310,13 @@
  "captions.layout": "Changer la disposition des sous-titres",
  "viewer.live": "Sous-titres en direct",
  "viewer.ended": "Sous-titres terminés",
- "viewer.all_langs": "Toutes"
+ "viewer.all_langs": "Toutes",
+ "code.quota.daily": "Le quota du jour est épuisé",
+ "code.keys.quota.daily": "Le quota du jour est épuisé",
+ "code.id.handle": "Identifiant non valide",
+ "code.id.recovery_key": "La clé de récupération ne correspond pas",
+ "code.id.signed_in": "Déjà connecté",
+ "code.id.no_pending": "Aucune connexion en attente de confirmation",
+ "code.id.cancelled": "Connexion annulée",
+ "code.quota.refreshed": "Quota mis à jour"
 }

@@ -125,6 +125,11 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Share { recording: Some("id".into()) }, true),
         (Command::Unshare { room: "r1".into() }, true),
         (Command::SignIn, false),
+        (Command::ConfirmSignIn, false),
+        (Command::CancelSignIn, false),
+        (Command::CreateIdentity { handle: None }, false),
+        (Command::RecoverIdentity { did: "did:zu:made-up-1".into(), key: "z".into() }, false),
+        (Command::RefreshQuota, true),
         (Command::SignOut, false),
         (Command::RotationSaved, false),
         (Command::CopyRotation, false),
@@ -384,11 +389,16 @@ async fn a_sign_in_shows_its_code_and_says_when_the_relay_is_out_of_reach() {
     app.until(|_| true).await;
     app.send(Command::SignIn);
     let (stream, _) = relay.accept().await.expect("a connection");
-    let code = app.until(|state| state.login.is_some()).await.login.expect("a code");
+    let state = app
+        .until(|state| matches!(state.auth, zutalk_core::app::proto::AuthFlow::Scanning { .. }))
+        .await;
+    let zutalk_core::app::proto::AuthFlow::Scanning { url: code, .. } = state.auth else {
+        panic!("expected Scanning auth flow");
+    };
     assert!(code.starts_with(&format!("{server}/.well-known/zu-relay/")));
     drop((stream, relay));
     app.notice("offline").await;
-    app.until(|state| state.login.is_none()).await;
+    app.until(|state| state.auth == zutalk_core::app::proto::AuthFlow::Idle).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

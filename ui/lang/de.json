@@ -310,5 +310,13 @@
  "captions.layout": "Untertitellayout wechseln",
  "viewer.live": "Live-Untertitel",
  "viewer.ended": "Untertitel beendet",
- "viewer.all_langs": "Alle"
+ "viewer.all_langs": "Alle",
+ "code.quota.daily": "Heutiges Kontingent aufgebraucht",
+ "code.keys.quota.daily": "Heutiges Kontingent aufgebraucht",
+ "code.id.handle": "Kein gültiger Handle",
+ "code.id.recovery_key": "Wiederherstellungsschlüssel passt nicht",
+ "code.id.signed_in": "Bereits angemeldet",
+ "code.id.no_pending": "Keine Anmeldung zur Bestätigung offen",
+ "code.id.cancelled": "Anmeldung abgebrochen",
+ "code.quota.refreshed": "Kontingent aktualisiert"
 }
