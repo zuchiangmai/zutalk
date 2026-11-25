@@ -83,3 +83,11 @@
 - **现场草稿行键永不覆写，不该用通用 `Writer` 留一辈子 `heads` 映射。** 通用 `shelf::Writer` 为支持同路径覆写会保留每条路径的 `heads`，10 小时草稿会白占数千项；拆出专用的只追加 `DraftWriter`（结构体仅 48 字节、`O(1)` 内存），写 10,000 行不涨内存，且落盘格式与 `Writer` 完全一致。
 - **合并型失效环的溢出判定不能只看版本号差值，必须看环是否真被挤满。** `Invalidations::push` 按 `(view, key)` 合并旧条目，合并本身会让 `items[0].version` 跳号；外壳 `PumpState` 只有在 `items.len() >= 64` 且 `invalidated_at + 1 < first.version` 时才判定发生了溢出并降级为 7 类粗粒度失效，避免正常合并误触发全量重刷。
 - **固定上限的统计表是一种硬预算。** `Stats` 有固定行数上限（计数 40、高水位 4、分布 12、队列 16）和 8 KB 序列化上限；P2 新增 4 个计数和 2 个分布时同步移除了淘汰的 `search.stale`，并把 `stats.full == 0` 与 `Tally <= 8192 B` 写进规模压测断言，防止指标悄悄超标失明。
+
+## P3 里学到的（2026-11）
+
+- **dsh 总线把 `useSyncExternalStore` 和 Tauri IPC 锁死在 `ui/src/bus/` 一处，页面测试就能脱离 Tauri 飞快跑完。** 所有组件拆成「纯 props 视图 + 薄总线容器」，配合静态规则脚本 `ui.sh` 禁止总线外出现 `useSyncExternalStore`、`@tauri-apps/*`、`invoke(`、`new Channel`、外网 CSS `@import` 与 `dangerouslySetInnerHTML`，既守住离线桌面启动与 XSS 边界，也让全量 76 条 UI 测试在 1.3 秒内确定性跑完。
+- **动态分块虚拟列表靠总线层的 `useQueries` 聚合，既不打破 Hooks 规则也不拉离屏块。** 阅读页按 64 行分块拉取 `Query::Transcript` / `Query::Compare`，在 `bus/query.ts` 把当前可见块组合为单个复合 `Source`；滚动离开旧块即自动退订，收到 `Invalidate` 绝不重拉离屏块，4 小时（2,560 行 = 40 块）实录在 600 px 视口下仅拉取 2 块、仅挂载 11 个 DOM 行。
+- **jsdom 下测 `virtua` 必须还原真实浏览器的两项时序。** `virtua` 在 `ResizeObserver.observe(scrollEl)` 之后才初始化滚动监听器，若测试替身在 `observe()` 内同步回回调会读到未初始化状态；同时 jsdom 默认 `offsetParent === null`，会导致 `virtua` 一直保留 `visibility: hidden` 跳过项高测量。改由 `queueMicrotask` 异步派发尺寸并在 `ui/tests/dom.ts` 补齐 `offsetParent` 后，虚拟列表在 jsdom 中能真实按 600 px 视口裁剪并测出确定 DOM 节点数。
+- **行内说话人编辑必须同时按 `lineKey` 定位，且所有行内提交都要防 IME 组合键。** 若只按 `speaker` 编号判断编辑态，整页同说话人的多个 `autoFocus` 输入框会互相抢焦点立即触发 `onBlur` 关闭编辑；同时必须检查 `e.nativeEvent.isComposing || e.keyCode === 229`，避免中文/日文/韩文输入法按回车选词时误提交。
+- **把 `test.environment` 保持在 Node、仅 DOM 测试文件标注 `// @vitest-environment jsdom`，避免 `crypto.subtle` 跨 realm 冲突。** `room.test.ts` 的 AES-256-GCM 加密测试与 `words.test.ts` 字典全量核对原生跑在 Node 下既快又无 jsdom `ArrayBuffer` 跨 realm 报错。

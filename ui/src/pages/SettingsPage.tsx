@@ -27,7 +27,7 @@ import { keyFromView } from '../ds/stateView';
 /** All four audio retention policies exposed by Settings (null = forever, 30d, 7d, 0 = delete after refined). */
 export const KEEP_OPTIONS: readonly (number | null)[] = [null, 30, 7, 0];
 
-/** Safe SVG QR renderer using uqr's boolean matrix — never uses dangerouslySetInnerHTML. */
+/** Safe SVG QR renderer using uqr's boolean matrix with direct React <rect> elements. */
 function QrSvg({ value, label }: { value: string; label: string }) {
   const matrix = useMemo(() => encodeQr(value, { border: 2 }), [value]);
   const cells: { x: number; y: number }[] = [];
