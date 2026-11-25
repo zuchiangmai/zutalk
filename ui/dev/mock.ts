@@ -35,6 +35,64 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
 /** The bounded state before anything has happened. */
+export const DEFAULT_CAPTION_PREFS = {
+  scene: 'SelfView' as const,
+  scenes: {
+    self_view: {
+      lines: 2,
+      size: 'Auto' as const,
+      bg: 'Half' as const,
+      light: false,
+      sans: false,
+      top: false,
+      always_on_top: false,
+      click_through: false,
+      auto_hide: false,
+      fullscreen: false,
+      geometry: null,
+    },
+    band: {
+      lines: 2,
+      size: 'Auto' as const,
+      bg: 'Solid' as const,
+      light: false,
+      sans: false,
+      top: false,
+      always_on_top: true,
+      click_through: true,
+      auto_hide: false,
+      fullscreen: false,
+      geometry: null,
+    },
+    stage: {
+      lines: 3,
+      size: 'Large' as const,
+      bg: 'Solid' as const,
+      light: false,
+      sans: false,
+      top: false,
+      always_on_top: false,
+      click_through: false,
+      auto_hide: false,
+      fullscreen: true,
+      geometry: null,
+    },
+    facing: {
+      lines: 2,
+      size: 'Auto' as const,
+      bg: 'Solid' as const,
+      light: false,
+      sans: false,
+      top: false,
+      always_on_top: false,
+      click_through: false,
+      auto_hide: false,
+      fullscreen: false,
+      geometry: null,
+    },
+  },
+};
+
 export const EMPTY: State = {
   me: null,
   auth: { is: 'Idle' },
@@ -47,7 +105,17 @@ export const EMPTY: State = {
   ],
   left: null,
   quota: null,
-  setup: { spoken: [], shown: [], sound: 'Mic', device: null, mode: 'Audience', language: null, keep: null },
+  setup: {
+    spoken: [],
+    shown: [],
+    sound: 'Mic',
+    device: null,
+    mode: 'Audience',
+    language: null,
+    keep: null,
+    caption: DEFAULT_CAPTION_PREFS,
+    city: null,
+  },
   devices: [],
   languages: ['en', 'fr', 'es', 'de', 'zh', 'ja', 'ko', 'th'],
   exporters: ['markdown', 'srt', 'vtt'],
@@ -172,7 +240,17 @@ export function mockBus(recording = false): Bus {
     quota: makeDemoQuota(),
     local_shelf: { recordings: 2, adopted: true },
     update: '0.9.1',
-    setup: { spoken: ['zh', 'th'], shown: ['zh', 'th', 'en'], sound: 'Mic', device: null, mode: 'Audience', language: null, keep: 30 },
+    setup: {
+      spoken: ['zh', 'th'],
+      shown: ['zh', 'th', 'en'],
+      sound: 'Mic',
+      device: null,
+      mode: 'Audience',
+      language: null,
+      keep: 30,
+      caption: structuredClone(DEFAULT_CAPTION_PREFS),
+      city: null,
+    },
     devices: [
       { id: 'mbp', name: 'MacBook Pro Microphone', default: true },
       { id: 'usb', name: 'USB Microphone', default: false },
@@ -576,6 +654,17 @@ export function mockBus(recording = false): Bus {
       if (c.show && typeof globalThis.window?.open === 'function') {
         globalThis.window.open('/captions.html', 'captions', 'width=960,height=280');
       }
+    },
+    CaptionGeometry: (c) => {
+      const key =
+        c.scene === 'SelfView'
+          ? 'self_view'
+          : c.scene === 'Band'
+            ? 'band'
+            : c.scene === 'Stage'
+              ? 'stage'
+              : 'facing';
+      s.setup.caption.scenes[key].geometry = c.rect;
     },
     DestroyAudio: (c) => {
       for (const r of recs) {

@@ -195,6 +195,7 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `shell.join` | info | 一个窗口向外壳推送任务 `shell.pump` 订阅事件通道时发出 | `window` `replaced`（是否顶掉了该窗口旧通道） |
 | `shell.sink.gone` | warn | 某个窗口的通道已关闭或发送时 panic，被推送任务移出订阅表时发出 | `window` `why`（`closed` / `panic`） |
 | `shell.captions` | info；失败时 warn | 外壳按 `State.captions` 变化向字幕窗投递显隐请求后发出 | `shown` `code`（`ok` / `missing` / `failed`） |
+| `shell.captions.style` | info；失败时 warn | 外壳按当前字幕场合变化向字幕窗投递置顶、穿透点击、全屏或几何变更后发出 | `scene`（`self` / `band` / `stage` / `facing`） `top` `pass` `full` `code`（`ok` / `missing` / `failed`） |
 | `shell.main_thread.stalled` | warn | 外壳主线程心跳超过 `BEAT_STALLED_MS`（2000 ms）未回时发出（每次停滞仅一条） | `waited_ms` |
 | `shell.main_thread.back` | info | 停滞的主线程终于执行完那次心跳回调时发出 | `stalled_ms` |
 | `ui.frame.gap` | warn | 界面每秒回报中 `gaps > 0`（两次 rAF 间隔超 250 ms）时外壳写出 | `window` `gap_ms` `n` |

@@ -83,6 +83,248 @@ pub enum Mode {
     Conversation,
 }
 
+/// Smallest readable caption window width in physical pixels (`P5-03`).
+pub const CAPTION_MIN_WIDTH_PX: u32 = 240;
+/// Smallest readable caption window height in physical pixels (`P5-03`).
+pub const CAPTION_MIN_HEIGHT_PX: u32 = 80;
+/// Upper bound guarding against corrupted window geometry (`P5-03`).
+pub const CAPTION_MAX_EXTENT_PX: u32 = 16_384;
+/// Minimum caption lines per language (`CaptionScenes.dc.html`).
+pub const CAPTION_LINES_MIN: u8 = 1;
+/// Maximum caption lines per language (`CaptionScenes.dc.html`).
+pub const CAPTION_LINES_MAX: u8 = 3;
+
+/// Fixed caption window presentation scenes (`P5.md` §3.4, `CaptionScenes.dc.html`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum CaptionScene {
+    #[default]
+    SelfView,
+    Band,
+    Stage,
+    Facing,
+}
+
+impl CaptionScene {
+    /// Stable plain code recorded in `shell.captions.style`.
+    pub const fn code(self) -> &'static str {
+        match self {
+            CaptionScene::SelfView => "self",
+            CaptionScene::Band => "band",
+            CaptionScene::Stage => "stage",
+            CaptionScene::Facing => "facing",
+        }
+    }
+}
+
+/// Caption font scale preset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum CaptionSize {
+    Small,
+    #[default]
+    Auto,
+    Large,
+}
+
+/// Caption window surface opacity preset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum CaptionBg {
+    Clear,
+    Half,
+    #[default]
+    Solid,
+}
+
+/// Persisted physical-pixel window rectangle for a non-fullscreen caption scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WindowRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowRect {
+    /// Clamps degenerate or out-of-range coordinates and dimensions to safe physical pixel bounds.
+    pub fn clamp(self) -> Self {
+        let bound = CAPTION_MAX_EXTENT_PX as i32;
+        Self {
+            x: self.x.clamp(-bound, bound),
+            y: self.y.clamp(-bound, bound),
+            width: self.width.clamp(CAPTION_MIN_WIDTH_PX, CAPTION_MAX_EXTENT_PX),
+            height: self.height.clamp(CAPTION_MIN_HEIGHT_PX, CAPTION_MAX_EXTENT_PX),
+        }
+    }
+}
+
+/// Per-scene visual and window behavior settings (`CaptionScenes.dc.html`, `P5.md` §3.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct SceneStyle {
+    pub lines: u8,
+    pub size: CaptionSize,
+    pub bg: CaptionBg,
+    pub light: bool,
+    pub sans: bool,
+    pub top: bool,
+    pub always_on_top: bool,
+    pub click_through: bool,
+    pub auto_hide: bool,
+    pub fullscreen: bool,
+    pub geometry: Option<WindowRect>,
+}
+
+impl SceneStyle {
+    pub fn self_view() -> Self {
+        Self {
+            lines: 2,
+            size: CaptionSize::Auto,
+            bg: CaptionBg::Half,
+            light: false,
+            sans: false,
+            top: false,
+            always_on_top: false,
+            click_through: false,
+            auto_hide: false,
+            fullscreen: false,
+            geometry: None,
+        }
+    }
+
+    pub fn band() -> Self {
+        Self {
+            lines: 2,
+            size: CaptionSize::Auto,
+            bg: CaptionBg::Solid,
+            light: false,
+            sans: false,
+            top: false,
+            always_on_top: true,
+            click_through: true,
+            auto_hide: false,
+            fullscreen: false,
+            geometry: None,
+        }
+    }
+
+    pub fn stage() -> Self {
+        Self {
+            lines: 3,
+            size: CaptionSize::Large,
+            bg: CaptionBg::Solid,
+            light: false,
+            sans: false,
+            top: false,
+            always_on_top: false,
+            click_through: false,
+            auto_hide: false,
+            fullscreen: true,
+            geometry: None,
+        }
+    }
+
+    pub fn facing() -> Self {
+        Self {
+            lines: 2,
+            size: CaptionSize::Auto,
+            bg: CaptionBg::Solid,
+            light: false,
+            sans: false,
+            top: false,
+            always_on_top: false,
+            click_through: false,
+            auto_hide: false,
+            fullscreen: false,
+            geometry: None,
+        }
+    }
+
+    /// Clamps `lines` to `1..=3` and sanitizes any saved `geometry`.
+    pub fn normalized(mut self) -> Self {
+        self.lines = self.lines.clamp(CAPTION_LINES_MIN, CAPTION_LINES_MAX);
+        self.geometry = self.geometry.map(WindowRect::clamp);
+        self
+    }
+}
+
+impl Default for SceneStyle {
+    fn default() -> Self {
+        Self::self_view()
+    }
+}
+
+/// Fixed 4-scene caption style table (bounded struct, zero dynamic map for I8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct CaptionScenes {
+    pub self_view: SceneStyle,
+    pub band: SceneStyle,
+    pub stage: SceneStyle,
+    pub facing: SceneStyle,
+}
+
+impl Default for CaptionScenes {
+    fn default() -> Self {
+        Self {
+            self_view: SceneStyle::self_view(),
+            band: SceneStyle::band(),
+            stage: SceneStyle::stage(),
+            facing: SceneStyle::facing(),
+        }
+    }
+}
+
+/// Active caption scene plus per-scene styles persisted inside `Setup` (`settings.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct CaptionPrefs {
+    pub scene: CaptionScene,
+    pub scenes: CaptionScenes,
+}
+
+impl CaptionPrefs {
+    pub fn style(&self, scene: CaptionScene) -> &SceneStyle {
+        match scene {
+            CaptionScene::SelfView => &self.scenes.self_view,
+            CaptionScene::Band => &self.scenes.band,
+            CaptionScene::Stage => &self.scenes.stage,
+            CaptionScene::Facing => &self.scenes.facing,
+        }
+    }
+
+    pub fn style_mut(&mut self, scene: CaptionScene) -> &mut SceneStyle {
+        match scene {
+            CaptionScene::SelfView => &mut self.scenes.self_view,
+            CaptionScene::Band => &mut self.scenes.band,
+            CaptionScene::Stage => &mut self.scenes.stage,
+            CaptionScene::Facing => &mut self.scenes.facing,
+        }
+    }
+
+    pub fn active(&self) -> &SceneStyle {
+        self.style(self.scene)
+    }
+
+    pub fn active_mut(&mut self) -> &mut SceneStyle {
+        self.style_mut(self.scene)
+    }
+
+    /// Normalizes all 4 scenes' line counts and saved window rectangles.
+    pub fn normalized(mut self) -> Self {
+        self.scenes.self_view = self.scenes.self_view.normalized();
+        self.scenes.band = self.scenes.band.normalized();
+        self.scenes.stage = self.scenes.stage.normalized();
+        self.scenes.facing = self.scenes.facing.normalized();
+        self
+    }
+}
+
 /// What the next recording will be, which a recording freezes; the interface's language; and
 /// how long audio stays on this device once a recording's record is written (`retain`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -95,6 +337,10 @@ pub struct Setup {
     pub mode: Mode,
     pub language: Option<String>, // the interface's; none: the system's
     pub keep: Option<u32>,        // days from a recording's start; none: until destroyed
+    #[serde(default)]
+    pub caption: CaptionPrefs,
+    #[serde(default)]
+    pub city: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
@@ -247,6 +493,7 @@ pub enum Command {
     Update,
     OwnKey { service: String, key: Option<String> },
     Captions { show: bool },
+    CaptionGeometry { scene: CaptionScene, rect: WindowRect },
     DestroyAudio { id: String },
     Term { said: String, written: Option<BTreeMap<String, String>> },
     City { address: String },
@@ -308,6 +555,9 @@ impl std::fmt::Debug for Command {
                 .field("key", &key.as_ref().map(|_| "…"))
                 .finish(),
             Command::Captions { show } => f.debug_struct("Captions").field("show", show).finish(),
+            Command::CaptionGeometry { scene, rect } => {
+                f.debug_struct("CaptionGeometry").field("scene", scene).field("rect", rect).finish()
+            }
             Command::DestroyAudio { id } => f.debug_struct("DestroyAudio").field("id", id).finish(),
             Command::Term { said, written } => {
                 f.debug_struct("Term").field("said", said).field("written", written).finish()
@@ -358,6 +608,7 @@ impl Command {
             Command::Update => "Update",
             Command::OwnKey { .. } => "OwnKey",
             Command::Captions { .. } => "Captions",
+            Command::CaptionGeometry { .. } => "CaptionGeometry",
             Command::DestroyAudio { .. } => "DestroyAudio",
             Command::Term { .. } => "Term",
             Command::City { .. } => "City",
@@ -400,6 +651,7 @@ impl Command {
             | Command::Update
             | Command::OwnKey { .. }
             | Command::Captions { .. }
+            | Command::CaptionGeometry { .. }
             | Command::DestroyAudio { .. }
             | Command::Term { .. }
             | Command::City { .. }

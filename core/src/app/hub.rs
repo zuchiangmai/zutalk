@@ -8,8 +8,8 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    AuthFlow, Change, Command, Device, From, HostState, Level as SoundLevel, LocalShelf, Quota,
-    Session, Sound, State, Status,
+    AuthFlow, CaptionScene, Change, Command, Device, From, HostState, Level as SoundLevel,
+    LocalShelf, Mode as LayoutMode, Quota, Session, Sound, State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -98,7 +98,7 @@ pub fn next_refresh(dirty: u64, in_flight: Option<u64>, synced: u64) -> Option<u
 
 pub(crate) enum Msg {
     Do(Command),
-    Booted(BootOut),
+    Booted(Box<BootOut>),
     Devices(Vec<Device>),
     Ended(String),
     Wrote(String),
@@ -450,8 +450,9 @@ impl Hub {
         match msg {
             Msg::Do(command) => self.command(command)?,
             Msg::Booted(out) => {
-                self.state.setup = out.setup;
-                self.apply_signed(out.signed);
+                let BootOut { setup, signed } = *out;
+                self.state.setup = setup;
+                self.apply_signed(signed);
                 self.set_boot(BootEvent::Ready, "boot");
             }
             Msg::Devices(devices) => self.state.devices = devices,
@@ -621,10 +622,25 @@ impl Hub {
             Command::Resume => self.mode(Mode::Recording)?,
             Command::Stop => self.stop(),
             Command::Reconnect => self.reconnect()?,
-            Command::Setup { setup } => {
+            Command::Setup { mut setup } => {
                 if setup.shown.len() > MAX_COLUMNS {
                     return Err("captions.columns");
                 }
+                setup.caption = setup.caption.normalized();
+                if setup.caption.scene == self.state.setup.caption.scene
+                    && setup.mode != self.state.setup.mode
+                {
+                    setup.caption.scene = match setup.mode {
+                        LayoutMode::Conversation => CaptionScene::Facing,
+                        LayoutMode::Audience => CaptionScene::SelfView,
+                    };
+                }
+                setup.mode = match setup.caption.scene {
+                    CaptionScene::Facing => LayoutMode::Conversation,
+                    CaptionScene::SelfView | CaptionScene::Band | CaptionScene::Stage => {
+                        LayoutMode::Audience
+                    }
+                };
                 // Apply immediately in memory so the next Start uses it; desk persists it.
                 self.state.setup = setup.clone();
                 self.work.save_setup(setup)?;
@@ -795,6 +811,14 @@ impl Hub {
                 self.work.own_key(service, key, self.busy_ids())?;
             }
             Command::Captions { show } => self.state.captions = show,
+            Command::CaptionGeometry { scene, rect } => {
+                let clamped = rect.clamp();
+                let style = self.state.setup.caption.style_mut(scene);
+                if style.geometry != Some(clamped) {
+                    style.geometry = Some(clamped);
+                    self.work.save_setup(self.state.setup.clone())?;
+                }
+            }
             Command::DestroyAudio { id } => {
                 if self.under_way(&id) {
                     return Err("recording.under_way");

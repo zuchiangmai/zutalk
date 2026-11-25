@@ -39,6 +39,7 @@ describe('HomeView', () => {
   const baseState: State = {
     ...EMPTY,
     setup: {
+      ...EMPTY.setup,
       spoken: ['zh'],
       shown: ['zh', 'en'],
       sound: 'Mic',

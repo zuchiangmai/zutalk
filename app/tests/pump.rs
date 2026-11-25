@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zutalk::pump::{self, Fan, SHELL_JOINS_MSGS, Sink};
-use zutalk::windows::CaptionWindow;
+use zutalk::windows::{CaptionWindow, CaptionWindowOp};
 use zutalk_core::app::hub::Outlet;
 use zutalk_core::app::proto::{
     Event, Frame, Invalidate, Invalidations, Level as SoundLevel, Notices, Progress, Session,
@@ -483,8 +483,12 @@ async fn the_captions_window_follows_the_state_and_is_never_asked() {
         joins_rx,
         stats,
         |_| {},
-        move |show| {
-            calls_cb.lock().unwrap().push(show);
+        move |ops| {
+            if ops.contains(&CaptionWindowOp::Show) {
+                calls_cb.lock().unwrap().push(true);
+            } else if ops.contains(&CaptionWindowOp::Hide) {
+                calls_cb.lock().unwrap().push(false);
+            }
             CaptionWindow::Ok
         },
     )));

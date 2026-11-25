@@ -6,7 +6,7 @@
 //! returns the live state to the supervisor via a lock-free oneshot so windows never need to
 //! re-subscribe.
 
-use crate::windows::CaptionWindow;
+use crate::windows::{CaptionWindow, CaptionWindowOp, CaptionWindowSpec, CaptionWindowTracker};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -179,7 +179,7 @@ struct PumpState<S> {
     stats_seq: u64,
     invalidated_at: u64,
     said_at: u64,
-    captions_shown: bool,
+    caption_tracker: CaptionWindowTracker,
     pushed: Counter,
     sinks_gone: Counter,
 }
@@ -200,7 +200,7 @@ impl<S: Sink> PumpState<S> {
             stats_seq: 0,
             invalidated_at: 0,
             said_at: 0,
-            captions_shown: false,
+            caption_tracker: CaptionWindowTracker::new(),
             pushed: stats.counter("shell.pushed"),
             sinks_gone: stats.counter("shell.sinks.gone"),
         }
@@ -218,7 +218,7 @@ impl<S: Sink> PumpState<S> {
         self.note_gone(gone);
     }
 
-    fn handle_state<C: Fn(bool) -> CaptionWindow>(
+    fn handle_state<C: Fn(&[CaptionWindowOp]) -> CaptionWindow>(
         &mut self,
         seq: u64,
         state: Arc<State>,
@@ -228,14 +228,40 @@ impl<S: Sink> PumpState<S> {
             return;
         }
         self.state_seq = seq;
-        let wanted = state.captions;
+        let spec = CaptionWindowSpec::from_state(&state);
         self.push_event(Event::State(state));
-        if wanted != self.captions_shown {
-            self.captions_shown = wanted;
-            let outcome = on_captions(wanted);
-            match outcome {
-                CaptionWindow::Ok => info!("shell.captions", shown = wanted, code = "ok"),
-                other => warn!("shell.captions", shown = wanted, code = other.code()),
+        let ops = self.caption_tracker.diff(spec.clone());
+        if !ops.is_empty() {
+            let outcome = on_captions(&ops);
+            let has_visibility =
+                ops.iter().any(|op| matches!(op, CaptionWindowOp::Show | CaptionWindowOp::Hide));
+            let has_style =
+                ops.iter().any(|op| !matches!(op, CaptionWindowOp::Show | CaptionWindowOp::Hide));
+            if has_visibility {
+                match outcome {
+                    CaptionWindow::Ok => info!("shell.captions", shown = spec.shown, code = "ok"),
+                    other => warn!("shell.captions", shown = spec.shown, code = other.code()),
+                }
+            }
+            if has_style {
+                match outcome {
+                    CaptionWindow::Ok => info!(
+                        "shell.captions.style",
+                        scene = spec.scene.code(),
+                        top = spec.always_on_top,
+                        pass = spec.click_through,
+                        full = spec.fullscreen,
+                        code = "ok",
+                    ),
+                    other => warn!(
+                        "shell.captions.style",
+                        scene = spec.scene.code(),
+                        top = spec.always_on_top,
+                        pass = spec.click_through,
+                        full = spec.fullscreen,
+                        code = other.code(),
+                    ),
+                }
             }
         }
     }
@@ -330,7 +356,11 @@ impl<S: Sink> PumpState<S> {
         }
     }
 
-    fn seed<P: Fn(u64), C: Fn(bool) -> CaptionWindow>(&mut self, on_pushed: &P, on_captions: &C) {
+    fn seed<P: Fn(u64), C: Fn(&[CaptionWindowOp]) -> CaptionWindow>(
+        &mut self,
+        on_pushed: &P,
+        on_captions: &C,
+    ) {
         if self.seeded {
             return;
         }
@@ -369,7 +399,7 @@ impl<S: Sink> PumpState<S> {
         self.handle_notices(&notices);
     }
 
-    async fn step_loop<P: Fn(u64), C: Fn(bool) -> CaptionWindow>(
+    async fn step_loop<P: Fn(u64), C: Fn(&[CaptionWindowOp]) -> CaptionWindow>(
         &mut self,
         on_pushed: &P,
         on_captions: &C,
@@ -436,7 +466,7 @@ pub async fn run<S: Sink>(
     joins: Rx<(String, S)>,
     stats: Stats,
     on_pushed: impl Fn(u64) + Send + 'static,
-    on_captions: impl Fn(bool) -> CaptionWindow + Send + 'static,
+    on_captions: impl Fn(&[CaptionWindowOp]) -> CaptionWindow + Send + 'static,
 ) {
     let mut state = PumpState::new(outlet, joins, &stats);
     let _ = state.step_loop(&on_pushed, &on_captions).await; // dropped: End::Done marks normal shutdown
@@ -461,7 +491,7 @@ impl<S, P, C> Part for PumpPart<S, P, C>
 where
     S: Sink,
     P: Fn(u64) + Send + Sync + 'static,
-    C: Fn(bool) -> CaptionWindow + Send + Sync + 'static,
+    C: Fn(&[CaptionWindowOp]) -> CaptionWindow + Send + Sync + 'static,
 {
     async fn run(&mut self) -> End {
         let Some(state) = self.state.as_mut() else {
@@ -486,7 +516,7 @@ pub fn start<S, P, C>(
 where
     S: Sink,
     P: Fn(u64) + Send + Sync + 'static,
-    C: Fn(bool) -> CaptionWindow + Send + Sync + 'static,
+    C: Fn(&[CaptionWindowOp]) -> CaptionWindow + Send + Sync + 'static,
 {
     let initial = PumpState::new(outlet, joins, shell.stats());
     let mut initial = Some(initial);

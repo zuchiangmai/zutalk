@@ -434,7 +434,7 @@ enum DeskOut {
     Diagnosed,
     RotationSaved,
     Booted {
-        out: BootOut,
+        out: Box<BootOut>,
         start_create: bool,
         start_claim: Option<Secret>,
         recover_host: Option<String>,
@@ -2348,7 +2348,8 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
     let t = std::time::Instant::now();
     let setup = match fs::read(env.config.data.join("settings.json")) {
         Ok(json) => match serde_json::from_slice::<Setup>(&json) {
-            Ok(setup) => {
+            Ok(mut setup) => {
+                setup.caption = setup.caption.normalized();
                 let ms = t.elapsed().as_millis() as u64;
                 info!("boot.step", step = "settings", code = "ok", ms = ms);
                 setup
@@ -2428,7 +2429,12 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
     signed.say = boot_say;
 
     let recover_host = if has_person { host::read_lock(&env.config.data) } else { None };
-    Ok(DeskOut::Booted { out: BootOut { setup, signed }, start_create, start_claim, recover_host })
+    Ok(DeskOut::Booted {
+        out: Box::new(BootOut { setup, signed }),
+        start_create,
+        start_claim,
+        recover_host,
+    })
 }
 
 fn run_sign(

@@ -13,7 +13,8 @@ use std::time::Duration;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use zutalk_core::app::hub::{Clip, Config, HUB_MAIL_MSGS, Install, Notices};
 use zutalk_core::app::proto::{
-    Change, Command, NoteOp, Query, QueryValue, Session, Setup, State, Status,
+    CaptionBg, CaptionScene, CaptionSize, Change, Command, Mode, NoteOp, Query, QueryValue,
+    Session, Setup, State, Status, WindowRect,
 };
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::id::keys;
@@ -137,6 +138,13 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
         (Command::Update, false),
         (Command::OwnKey { service: "soniox".into(), key: None }, false),
         (Command::Captions { show: true }, false),
+        (
+            Command::CaptionGeometry {
+                scene: CaptionScene::Band,
+                rect: WindowRect { x: 10, y: 20, width: 800, height: 160 },
+            },
+            false,
+        ),
         (Command::DestroyAudio { id: "id".into() }, false),
         (Command::Term { said: "ZuTalk".into(), written: None }, false),
         (Command::City { address: "pol.example".into() }, false),
@@ -2842,4 +2850,91 @@ async fn a_diagnosis_says_who_signs_and_never_which_did() {
         assert!(!raw.contains("did:key:"), "did:key leaked into {}", file.display());
     }
     assert_eq!(app.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_caption_prefs_and_geometry_persist_per_scene_in_settings_json() {
+    let _store = STORE.lock().await;
+    store(false);
+    let dir = tempfile::tempdir().expect("a folder");
+
+    // 1. Legacy settings.json without `caption` or `city` loads defaults cleanly.
+    fs::write(
+        dir.path().join("settings.json"),
+        r#"{"spoken":["en"],"shown":["en","zh"],"sound":"Mic","device":null,"mode":"Audience","language":null,"keep":null}"#,
+    )
+    .expect("write legacy settings");
+    let mut app = App::start(dir.path());
+    let booted = app.until(|_| true).await;
+    assert_eq!(booted.setup.spoken, vec!["en"]);
+    assert_eq!(booted.setup.caption.scene, CaptionScene::SelfView);
+    assert!(booted.setup.caption.scenes.band.always_on_top);
+    assert!(booted.setup.caption.scenes.band.click_through);
+    assert!(booted.setup.caption.scenes.stage.fullscreen);
+    assert_eq!(booted.setup.city, None);
+
+    // 2. Switching to Facing syncs `mode = Conversation`, clamps out-of-range lines, and stores city.
+    let mut next = booted.setup.clone();
+    next.caption.scene = CaptionScene::Facing;
+    next.caption.scenes.facing.lines = 99;
+    next.caption.scenes.facing.size = CaptionSize::Large;
+    next.caption.scenes.facing.bg = CaptionBg::Clear;
+    next.city = Some("zuchiangmai.com".into());
+    app.send(Command::Setup { setup: next });
+    let after_setup = app.until(|s| s.setup.caption.scene == CaptionScene::Facing).await;
+    assert_eq!(after_setup.setup.mode, Mode::Conversation);
+    assert_eq!(after_setup.setup.caption.scenes.facing.lines, 3);
+    assert_eq!(after_setup.setup.caption.scenes.facing.size, CaptionSize::Large);
+    assert_eq!(after_setup.setup.caption.scenes.facing.bg, CaptionBg::Clear);
+    assert_eq!(after_setup.setup.city.as_deref(), Some("zuchiangmai.com"));
+
+    // 3. CaptionGeometry updates only the named scene's geometry (clamping degenerate values)
+    //    without overwriting other scenes or concurrent settings fields.
+    app.send(Command::CaptionGeometry {
+        scene: CaptionScene::Band,
+        rect: WindowRect { x: 40, y: 820, width: 1200, height: 140 },
+    });
+    app.send(Command::CaptionGeometry {
+        scene: CaptionScene::SelfView,
+        rect: WindowRect { x: 10, y: 20, width: 50, height: 20 },
+    });
+    let after_geo = app
+        .until(|s| {
+            s.setup.caption.scenes.band.geometry.is_some()
+                && s.setup.caption.scenes.self_view.geometry.is_some()
+        })
+        .await;
+    assert_eq!(
+        after_geo.setup.caption.scenes.band.geometry,
+        Some(WindowRect { x: 40, y: 820, width: 1200, height: 140 })
+    );
+    assert_eq!(
+        after_geo.setup.caption.scenes.self_view.geometry,
+        Some(WindowRect { x: 10, y: 20, width: 240, height: 80 })
+    );
+    assert_eq!(after_geo.setup.caption.scenes.facing.geometry, None);
+    assert_eq!(after_geo.setup.city.as_deref(), Some("zuchiangmai.com"));
+
+    // Wait for desk to finish flushing settings.json before restarting.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while app
+        .seen
+        .of("job.done")
+        .iter()
+        .filter(|l| l.text("kind") == Some("settings") && l.text("code") == Some("ok"))
+        .count()
+        < 3
+    {
+        assert!(tokio::time::Instant::now() < deadline, "settings jobs did not flush");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(app);
+
+    // 4. Restart Core and verify every scene's style, geometry, mode, and city survive reload.
+    let mut again = App::start(dir.path());
+    let reloaded = again.until(|_| true).await;
+    assert_eq!(reloaded.setup, after_geo.setup);
+    assert_eq!(reloaded.setup.mode, Mode::Conversation);
+    assert_eq!(reloaded.setup.city.as_deref(), Some("zuchiangmai.com"));
+    assert_eq!(again.seen.refused(), 0);
 }

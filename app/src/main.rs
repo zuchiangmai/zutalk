@@ -4,14 +4,16 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use tauri::{Manager, RunEvent, State, WebviewWindow, ipc::Channel};
+use tauri::{Manager, RunEvent, State, WebviewWindow, WindowEvent, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use zutalk::pump::{self, Joins, SHELL_JOINS_MSGS};
 use zutalk::{beat, updates, windows};
 use zutalk_core::app::hub::{Clip, Config, Core};
 use zutalk_core::app::proto::{Command, Event, Query, QueryReply};
 use zutalk_core::id::keys;
+use zutalk_core::out::host::HOST_EXIT_WAIT_MS;
 use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::stats::{Counter, Spread};
 use zutalk_core::rt::supervise::Tree;
@@ -111,6 +113,7 @@ fn main() {
             // Manage Core before starting shell tasks so handle.state::<Core>() is always ready.
             app.manage(core);
             app.manage(ui_vitals);
+            let state_reading = outlet.state.clone();
             let handle_pushed = app.handle().clone();
             let handle_captions = app.handle().clone();
             let _kept = pump::start(
@@ -118,8 +121,40 @@ fn main() {
                 outlet,
                 joins_rx,
                 move |seq| handle_pushed.state::<Core>().pushed(seq),
-                move |show| windows::set_captions(&handle_captions, show),
+                move |ops| windows::apply_captions(&handle_captions, ops),
             );
+            if let Some(cap_win) = app.get_webview_window("captions") {
+                let (geo_tx, geo_rx) =
+                    tokio::sync::watch::channel::<Option<windows::GeometrySample>>(None);
+                let close_handle = app.handle().clone();
+                cap_win.on_window_event(move |event| match event {
+                    WindowEvent::Moved(pos) => {
+                        geo_tx.send_modify(|slot| {
+                            slot.get_or_insert_with(Default::default).merge_move(pos.x, pos.y);
+                        });
+                    }
+                    WindowEvent::Resized(size) => {
+                        geo_tx.send_modify(|slot| {
+                            slot.get_or_insert_with(Default::default)
+                                .merge_resize(size.width, size.height);
+                        });
+                    }
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let sent =
+                            close_handle.state::<Core>().send(Command::Captions { show: false });
+                        let _ = sent; // dropped: core closed on exit
+                    }
+                    _ => {}
+                });
+                let geo_handle = app.handle().clone();
+                shell.spawn(
+                    "shell.captions_geo",
+                    windows::run_geometry_saver(geo_rx, state_reading, move |cmd| {
+                        let _ = geo_handle.state::<Core>().send(cmd); // dropped: core closed on exit
+                    }),
+                );
+            }
             let beat_handle = app.handle().clone();
             shell.spawn(
                 "shell.beat",
@@ -136,12 +171,30 @@ fn main() {
         .invoke_handler(tauri::generate_handler![dispatch, subscribe, drawn, query])
         .build(tauri::generate_context!());
     match built {
-        // What the log has not written yet is written before the process ends.
-        Ok(app) => app.run(|_, event| {
-            if let RunEvent::Exit = event {
-                let _ = zutalk_log::flush(LOG_FLUSH_WAIT_MS); // dropped: quitting goes on anyway
-            }
-        }),
+        // On clean exit while hosting, stop outbound asynchronously before exiting; always flush logs.
+        Ok(app) => {
+            let exiting = Arc::new(AtomicBool::new(false));
+            app.run(move |handle, event| match event {
+                RunEvent::ExitRequested { api, .. } => {
+                    if !exiting.swap(true, Ordering::AcqRel) {
+                        let core = handle.state::<Core>();
+                        if core.is_hosting() {
+                            api.prevent_exit();
+                            let _ = core.send(Command::StopOutbound); // dropped: core closed on exit
+                            let exit_handle = handle.clone();
+                            handle.state::<Tree>().spawn("shell.exit_host", async move {
+                                exit_handle.state::<Core>().wait_host_idle(HOST_EXIT_WAIT_MS).await;
+                                exit_handle.exit(0);
+                            });
+                        }
+                    }
+                }
+                RunEvent::Exit => {
+                    let _ = zutalk_log::flush(LOG_FLUSH_WAIT_MS); // dropped: quitting goes on anyway
+                }
+                _ => {}
+            });
+        }
         Err(error) => {
             eprintln!("ZuTalk could not start: {error}"); // before the log: it may not be there
             std::process::exit(1);
