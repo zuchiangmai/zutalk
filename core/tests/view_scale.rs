@@ -130,7 +130,7 @@ fn seed_1000_recordings(db_path: &Path, shelf: &Shelf, tapes: &Path, touch_disk_
         let spoken = spoken_sets[((i / 12) % 3) as usize];
         let take = if (i / 12) % 3 == 0 { 0i64 } else { 1i64 };
         let audio = i64::from((i / 12) % 2 == 0);
-        let filed_state = if (i / 12) % 5 == 0 { "filed" } else { "" };
+        let filed_state = if (i / 12) % 5 == 0 { "city.filed" } else { "" };
 
         let (about_sig, lines_sig) = if touch_disk_dirs {
             let dir = shelf.root().join(&id);
@@ -1021,13 +1021,18 @@ async fn i2_concurrent_view_queries_do_not_stall_live_captions() {
         ok_count >= 15,
         "expected most concurrent queries to succeed (ok={ok_count}, cancelled={cancelled_count})"
     );
-    let stalled = bench
+    let stalled_or_dead = bench
         .seen()
         .of("judge.verdict")
         .into_iter()
-        .filter(|e| e.text("verdict") == Some("Stalled"))
+        .filter(|e| matches!(e.text("to"), Some("Stalled" | "Dead")))
         .count();
-    assert_eq!(stalled, 0, "concurrent SQLite queries must never stall live captions");
+    assert_eq!(stalled_or_dead, 0, "concurrent SQLite queries must never stall live captions");
+    assert_eq!(
+        bench.seen().count("stall.snapshot"),
+        0,
+        "concurrent SQLite queries must never trigger a stall snapshot"
+    );
 
     bench.stop_recording().await;
 
