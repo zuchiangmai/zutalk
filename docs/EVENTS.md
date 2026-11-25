@@ -130,7 +130,7 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `command.refused` | warn | `Core::send` 遇到 hub 邮箱满或已关闭，命令未能入队时发出 | `kind` `code`（`busy`） |
 | `hub.turn.slow` | warn | hub 单次消息处理超过预算 `HUB_TURN_BUDGET_US`（1000 µs）时发出 | `kind` `took_us` |
 | `notice.said` | info | 核心通过 `Voice::say` 向界面发出一条稳定提示代码时发出 | `code` |
-| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（P1 全部 33 个：`boot`、`settings`、`sign`、`signout`、`signin`、`create`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`search`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`diagnose`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
+| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（`boot`、`settings`、`sign`、`signout`、`signin`、`create`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`note`、`refine.prepare`、`remove`、`restore`、`term`、`destroy`、`export`、`export.write`、`search`、`share.prepare`、`share.put`、`share`、`unshare.prepare`、`unshare`、`slot`、`file.begin`、`file`、`own_key`、`diagnose`、`index.sync`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
 | `job.done` | info；`code != "ok"` 时 warn | `desk` 或 `Work` 的一件活结束时发出 | `kind`（同上） `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败码） `ms` |
 | `job.again` | warn | 后台或重试任务（`write`、`file`、`create`、`claim`）遇可恢复失败，退避等待下一次重试时发出 | `kind` `why` `wait_ms` `n` |
 | `write.skipped` | info | 有音频的草稿因无钥匙可取（`keys.none`）未送去整场转写，留在现场稿等待时发出 | `n` `why`（`keys.none`） |

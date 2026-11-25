@@ -40,9 +40,12 @@ export function take(e: Event) {
     if (signal.of === 'Frame') store.live = signal.is.columns;
     else if (signal.of === 'Session') store.session = signal.is;
     else if (signal.of === 'Level') store.level = signal.is;
+    else if (signal.of === 'Progress') { /* wired to UI views in P2-06 */ }
     else if (signal.of === 'Water') store.water = signal.is;
     else if (signal.of === 'Stats') store.stats = signal.is;
-  } else say(e.is);
+  } else if (e.kind === 'Invalidate') {
+    // View refetch wired in P2-06.
+  } else if (e.kind === 'Notice') say(e.is);
 }
 
 export type Bus = {

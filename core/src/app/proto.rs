@@ -7,9 +7,19 @@ pub use crate::id::keys::From;
 use crate::knowledge::glossary::Term;
 pub use crate::live::frame::{Caption, Column, Frame, Status};
 use crate::out::city::{Calendar, Filing};
+pub use crate::record::notes::Note;
 use crate::record::shelf::Said;
+pub use crate::record::takes::{RefineFailure, RefineStatus, TakeInfo};
 use crate::rt::stats::Tally;
 use crate::rt::water::Water;
+pub use crate::view::index::{
+    LibraryFilter, LibraryPage, LibraryRow, LibrarySummary, MonthCount, SearchHit, SearchHitKind,
+    SearchResult,
+};
+pub use crate::view::query::{
+    Invalidate, Invalidations, OutboundRow, Query, QueryReply, QueryValue, RecordingView, ViewKind,
+};
+pub use crate::view::transcript::{CompareChunk, CompareRow, DiffOp, TranscriptChunk};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,12 +53,21 @@ pub struct State {
     pub captions: bool,                 // the captions window is on screen
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct Writing {
     pub id: String,
     pub step: String,
     pub done: u32,
     pub of: u32,
+}
+
+/// Latest progress of each bounded background job class (`P2.md` §3.6.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct Progress {
+    pub refine: Option<Writing>,
+    pub file: Option<Writing>,
+    pub move_old: Option<Writing>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -171,7 +190,7 @@ pub struct Stamped {
     pub signal: Signal,
 }
 
-/// Latest-value signals pushed from the core to the interface (`P1.md` §3.3).
+/// Latest-value signals pushed from the core to the interface (`P1.md` §3.3, `P2.md` §3.6.1).
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "of", content = "is")]
@@ -179,18 +198,20 @@ pub enum Signal {
     Frame(Arc<Frame>),
     Session(Arc<Option<Session>>),
     Level(Arc<Level>),
+    Progress(Arc<Progress>),
     Water(Arc<Water>),
     Stats(Arc<Tally>),
 }
 
 /// Bounded state replaced whole, latest-value signals stamped with per-kind sequence numbers,
-/// or one-shot notice codes (`P1.md` §3.3).
+/// view invalidations, or one-shot notice codes (`P1.md` §3.3, `P2.md` §3.6.2).
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "kind", content = "is")]
 pub enum Event {
     State(Arc<State>),
     Signal(Stamped),
+    Invalidate(Invalidate),
     Notice(String),
 }
 

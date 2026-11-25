@@ -10,7 +10,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use zutalk::pump::{self, Joins, SHELL_JOINS_MSGS};
 use zutalk::{beat, updates, windows};
 use zutalk_core::app::hub::{Clip, Config, Core};
-use zutalk_core::app::proto::{Command, Event};
+use zutalk_core::app::proto::{Command, Event, Query, QueryReply};
 use zutalk_core::id::keys;
 use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::stats::{Counter, Spread};
@@ -25,6 +25,11 @@ struct UiVitals {
 #[tauri::command]
 async fn dispatch(command: Command, core: State<'_, Core>) -> Result<(), String> {
     core.send(command).map_err(str::to_owned)
+}
+
+#[tauri::command]
+async fn query(query: Query, core: State<'_, Core>) -> Result<QueryReply, String> {
+    core.query(query).await.map_err(str::to_owned)
 }
 
 #[tauri::command]
@@ -128,7 +133,7 @@ fn main() {
             app.manage(joins_tx);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![dispatch, subscribe, drawn])
+        .invoke_handler(tauri::generate_handler![dispatch, subscribe, drawn, query])
         .build(tauri::generate_context!());
     match built {
         // What the log has not written yet is written before the process ends.

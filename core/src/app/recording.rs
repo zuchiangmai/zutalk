@@ -7,6 +7,7 @@
 
 use crate::app::hub::{Config, Msg, Voice};
 use crate::app::proto::{Level as SoundLevel, Session, Status};
+use crate::app::work::IndexSync;
 use crate::capture::audio::{Notice, Source};
 use crate::capture::clock::{Block, wall_ms};
 use crate::capture::tape;
@@ -331,6 +332,7 @@ pub(crate) struct Start {
     pub next_snap: Arc<AtomicU64>,
     pub root: Tree,
     pub results: Tx<Msg>,
+    pub index_sync: IndexSync,
 }
 
 /// Outcome of one recording after sealing its tape.
@@ -1026,6 +1028,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
         Err(code) => Err(code),
         Ok(()) => {
             about_written = true;
+            start.index_sync.recording_opened(start.id.clone()).await;
             let _ = start.results.send(Msg::RecordingOpened).await; // dropped: the hub has ended
             (|| {
                 let key = keys::derive("tape", &start.id).map_err(end_code)?;

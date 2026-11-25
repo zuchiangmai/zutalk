@@ -12,10 +12,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use zutalk_core::app::hub::Outlet;
-use zutalk_core::app::proto::{Event, Signal, Stamped, State};
+use zutalk_core::app::proto::{
+    Event, Invalidate, Invalidations, Progress, Signal, Stamped, State, ViewKind,
+};
 use zutalk_core::rt::queue::{Rx, Tx};
 use zutalk_core::rt::stats::{Counter, Stats};
 use zutalk_core::rt::supervise::{End, Kept, Part, Restarts, Tree};
+use zutalk_core::view::query::KEEP_INVALIDATIONS_EVENTS;
 use zutalk_log::{Id, info, warn};
 
 /// Window subscription requests buffered for the pump: only 2-3 windows exist and `subscribe` is
@@ -68,6 +71,7 @@ pub struct Fan<S> {
     frame: Option<Stamped>,
     session: Option<Stamped>,
     level: Option<Stamped>,
+    progress: Option<Stamped>,
     water: Option<Stamped>,
     stats: Option<Stamped>,
 }
@@ -86,6 +90,7 @@ impl<S> Fan<S> {
             frame: None,
             session: None,
             level: None,
+            progress: None,
             water: None,
             stats: None,
         }
@@ -95,8 +100,8 @@ impl<S> Fan<S> {
 impl<S: Sink> Fan<S> {
     /// Subscribes `window` with `sink`, replacing any previous sink for that window (`true` when
     /// an old sink was replaced). Immediately replays the latest `State` and then each signal's
-    /// latest value in fixed order (`Frame`, `Session`, `Level`, `Water`, `Stats`); notices are
-    /// never replayed.
+    /// latest value in fixed order (`Frame`, `Session`, `Level`, `Progress`, `Water`, `Stats`);
+    /// notices and view invalidations are never replayed.
     pub fn join(&mut self, window: &str, sink: S) -> bool {
         self.join_checked(window, sink).0
     }
@@ -108,6 +113,7 @@ impl<S: Sink> Fan<S> {
             self.frame.clone().map(Event::Signal),
             self.session.clone().map(Event::Signal),
             self.level.clone().map(Event::Signal),
+            self.progress.clone().map(Event::Signal),
             self.water.clone().map(Event::Signal),
             self.stats.clone().map(Event::Signal),
         ];
@@ -121,9 +127,10 @@ impl<S: Sink> Fan<S> {
         (replaced, None)
     }
 
-    /// Records `event` as the latest of its kind (notices are not kept), enforces monotonic
-    /// per-signal sequence numbers, pushes to every subscribed sink, drops any closed or
-    /// panicking sink, and returns `(window, why)` (`"closed"` or `"panic"`) for each dropped sink.
+    /// Records `event` as the latest of its kind (notices and invalidations are not kept),
+    /// enforces monotonic per-signal sequence numbers, pushes to every subscribed sink, drops any
+    /// closed or panicking sink, and returns `(window, why)` (`"closed"` or `"panic"`) for each
+    /// dropped sink.
     pub fn push(&mut self, event: Event) -> Vec<(String, &'static str)> {
         match &event {
             Event::State(state) => self.state = Some(state.clone()),
@@ -132,6 +139,7 @@ impl<S: Sink> Fan<S> {
                     Signal::Frame(_) => &mut self.frame,
                     Signal::Session(_) => &mut self.session,
                     Signal::Level(_) => &mut self.level,
+                    Signal::Progress(_) => &mut self.progress,
                     Signal::Water(_) => &mut self.water,
                     Signal::Stats(_) => &mut self.stats,
                 };
@@ -140,7 +148,7 @@ impl<S: Sink> Fan<S> {
                 }
                 *slot = Some(stamped.clone());
             }
-            Event::Notice(_) => {}
+            Event::Invalidate(_) | Event::Notice(_) => {}
         }
 
         let mut gone = Vec::new();
@@ -166,8 +174,10 @@ struct PumpState<S> {
     frame_seq: u64,
     session_seq: u64,
     level_seq: u64,
+    progress_seq: u64,
     water_seq: u64,
     stats_seq: u64,
+    invalidated_at: u64,
     said_at: u64,
     captions_shown: bool,
     pushed: Counter,
@@ -185,8 +195,10 @@ impl<S: Sink> PumpState<S> {
             frame_seq: 0,
             session_seq: 0,
             level_seq: 0,
+            progress_seq: 0,
             water_seq: 0,
             stats_seq: 0,
+            invalidated_at: 0,
             said_at: 0,
             captions_shown: false,
             pushed: stats.counter("shell.pushed"),
@@ -259,6 +271,38 @@ impl<S: Sink> PumpState<S> {
         self.push_event(Event::Signal(Stamped { seq, signal: Signal::Level(level) }));
     }
 
+    fn handle_progress(&mut self, seq: u64, progress: Arc<Progress>) {
+        if seq <= self.progress_seq {
+            return;
+        }
+        self.progress_seq = seq;
+        self.push_event(Event::Signal(Stamped { seq, signal: Signal::Progress(progress) }));
+    }
+
+    fn handle_invalidations(&mut self, inv: &Invalidations) {
+        if inv.next <= self.invalidated_at {
+            return;
+        }
+        let overflowed = inv.items.len() >= KEEP_INVALIDATIONS_EVENTS
+            && inv.items.first().is_some_and(|first| self.invalidated_at + 1 < first.version);
+        if overflowed {
+            for view in ViewKind::ALL {
+                self.push_event(Event::Invalidate(Invalidate {
+                    view,
+                    key: None,
+                    version: inv.next,
+                }));
+            }
+        } else {
+            for item in &inv.items {
+                if item.version > self.invalidated_at {
+                    self.push_event(Event::Invalidate(item.clone()));
+                }
+            }
+        }
+        self.invalidated_at = inv.next;
+    }
+
     fn handle_water(&mut self, seq: u64, water: Arc<zutalk_core::rt::water::Water>) {
         if seq <= self.water_seq {
             return;
@@ -307,6 +351,10 @@ impl<S: Sink> PumpState<S> {
         if seq > 0 {
             self.handle_level(seq, level);
         }
+        let (seq, progress) = self.outlet.progress.now();
+        if seq > 0 {
+            self.handle_progress(seq, progress);
+        }
         let (seq, water) = self.outlet.water.now();
         if seq > 0 {
             self.handle_water(seq, water);
@@ -315,6 +363,8 @@ impl<S: Sink> PumpState<S> {
         if seq > 0 {
             self.handle_stats(seq, stats);
         }
+        let (_, inv) = self.outlet.invalidated.now();
+        self.invalidated_at = inv.next;
         let (_, notices) = self.outlet.said.now();
         self.handle_notices(&notices);
     }
@@ -354,12 +404,20 @@ impl<S: Sink> PumpState<S> {
                     Some((seq, level)) => self.handle_level(seq, level),
                     None => return End::Done,
                 },
+                next = self.outlet.progress.next() => match next {
+                    Some((seq, progress)) => self.handle_progress(seq, progress),
+                    None => return End::Done,
+                },
                 next = self.outlet.water.next() => match next {
                     Some((seq, water)) => self.handle_water(seq, water),
                     None => return End::Done,
                 },
                 next = self.outlet.stats.next() => match next {
                     Some((seq, tally)) => self.handle_stats(seq, tally),
+                    None => return End::Done,
+                },
+                next = self.outlet.invalidated.next() => match next {
+                    Some((_, inv)) => self.handle_invalidations(&inv),
                     None => return End::Done,
                 },
                 next = self.outlet.said.next() => match next {

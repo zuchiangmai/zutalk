@@ -421,7 +421,7 @@ impl Index {
 
     /// Reconciles an existing index with disk packs, re-reading only added, removed, or modified
     /// recording directories.
-    fn reconcile(&mut self, shelf: &Shelf, tapes: &Path) -> Result<usize, &'static str> {
+    pub fn reconcile(&mut self, shelf: &Shelf, tapes: &Path) -> Result<usize, &'static str> {
         let filings = load_filings(shelf);
         let disk_ids = recording_dirs(shelf);
         let tx = self.conn.transaction().map_err(|_| "index")?;

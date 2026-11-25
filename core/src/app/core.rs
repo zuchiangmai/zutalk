@@ -4,7 +4,10 @@
 //! HTTP client construction, or task spawning (`P1-20` `hub.sh`).
 
 use crate::app::hub::{HUB_MAIL_MSGS, Hub, Msg};
-use crate::app::proto::{Device, Level as SoundLevel, Notices, Session, State};
+use crate::app::proto::{
+    Device, Invalidations, Level as SoundLevel, Notices, Progress, Query, QueryReply, Session,
+    State,
+};
 use crate::app::work::Work;
 use crate::capture::audio::{self, Capture, Hear, Hearing};
 use crate::capture::clock::wall_clock_policy;
@@ -17,6 +20,7 @@ use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::{self, Counter, Stats, Tally};
 use crate::rt::supervise::{End, Running, Tree};
 use crate::rt::water::{Gauge, Water};
+use crate::view::query::ViewEngine;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,13 +130,15 @@ impl Config {
 }
 
 /// Everything the core says outward: latest-value registers readable at once or on change,
-/// cloneable across the shell's pump, a live room's slot, and tests (`P1.md` §3.3).
+/// cloneable across the shell's pump, a live room's slot, and tests (`P1.md` §3.3, `P2.md` §3.6).
 #[derive(Clone, Debug)]
 pub struct Outlet {
     pub state: Reading<State>,
     pub frame: Reading<Frame>,
     pub session: Reading<Option<Session>>,
     pub level: Reading<SoundLevel>,
+    pub progress: Reading<Progress>,
+    pub invalidated: Reading<Invalidations>,
     pub water: Reading<Water>,
     pub stats: Reading<Tally>,
     pub said: Reading<Notices>,
@@ -177,6 +183,7 @@ pub struct Core {
     frame: Register<Frame>,
     shell: Arc<Gauge>,
     screen: Arc<Gauge>,
+    views: Arc<ViewEngine>,
 }
 
 impl Core {
@@ -193,13 +200,17 @@ impl Core {
         let results = commands.with(Full::Wait); // work that is done: must arrive; whoever did it can wait
         let progress = commands.with(Full::Drop); // how far a job has got: only the latest matters
         let root = Tree::root("core", stats.clone());
+        let work_tree = root.child("work");
         let config = Arc::new(config);
         let state_reg = Register::new(State::default());
         let frame_reg = Register::new(Frame::default());
         let session_reg = Register::new(None);
         let level_reg = Register::new(SoundLevel::default());
+        let progress_reg = Register::new(Progress::default());
         let water_reg = Register::new(Water::default());
         let stats_reg = Register::new(Tally::default());
+        let (views, invalidated_reading) = ViewEngine::new(work_tree.clone(), config.tapes());
+        let views = Arc::new(views);
         let shell = Arc::new(Gauge::new());
         let screen = Arc::new(Gauge::new());
         let (said, said_reading) = Voice::new(&stats);
@@ -208,6 +219,8 @@ impl Core {
             frame: frame_reg.read(),
             session: session_reg.read(),
             level: level_reg.read(),
+            progress: progress_reg.read(),
+            invalidated: invalidated_reading,
             water: water_reg.read(),
             stats: stats_reg.read(),
             said: said_reading,
@@ -220,6 +233,9 @@ impl Core {
             progress,
             said.clone(),
             root.clone(),
+            work_tree,
+            views.clone(),
+            progress_reg,
             frame_reg.read(),
             water_reg.read(),
         );
@@ -248,9 +264,15 @@ impl Core {
                 frame: frame_reg,
                 shell,
                 screen,
+                views,
             },
             outlet,
         ))
+    }
+
+    /// Executes an L3 view query off-hub via [`ViewEngine`] (`P2.md` §3.6.2).
+    pub async fn query(&self, query: Query) -> Result<QueryReply, &'static str> {
+        self.views.query(query).await
     }
 
     pub fn send(&self, command: crate::app::proto::Command) -> Result<(), &'static str> {

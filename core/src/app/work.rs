@@ -6,7 +6,7 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, NoteOp, Open, Room, Row, Setup, Sound, Writing};
+use crate::app::proto::{Change, From, NoteOp, Open, Progress, Room, Row, Setup, Sound, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -21,13 +21,17 @@ use crate::record::notes;
 use crate::record::shelf::{
     About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf, Words,
 };
-use crate::record::takes::{RefineEvent, RefineStatus, initial_refine_status, refine_step};
+use crate::record::takes::{
+    RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
+};
 use crate::record::{migrate, retain};
 use crate::rt::queue::{self, Full, Tx};
-use crate::rt::signal::Reading;
+use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::Counter;
 use crate::rt::supervise::{End, Tree, again};
 use crate::rt::water::Water;
+use crate::view::index::Index;
+use crate::view::query::{ViewEngine, ViewKind};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -247,6 +251,60 @@ struct Snapshot {
     keys: Arc<Chain>,
 }
 
+enum SyncKind {
+    RecordingOpened { id: String },
+    RecordingSealed { id: String },
+    Refined { id: String },
+    RefineFailed { id: String, failure: RefineFailure },
+    FilingUpdated { id: String, state: String },
+    Migrated,
+}
+
+/// Ordered handle allowing background tasks (recording, refine, file, migrate) to sync the
+/// single-writer SQLite index through `desk` and wait until both index and invalidations commit.
+#[derive(Clone)]
+pub(crate) struct IndexSync {
+    desk: Desk<Job>,
+    views: Arc<ViewEngine>,
+}
+
+impl IndexSync {
+    async fn run(&self, kind: SyncKind) {
+        let (tx, rx) = oneshot::channel();
+        if self.desk.send(Job::IndexSync { kind, done: tx }).await.is_ok() {
+            let _ = rx.await; // dropped: desk ended on shutdown
+        }
+    }
+
+    pub(crate) async fn recording_opened(&self, id: String) {
+        self.views.set_active_recording(Some(id.clone()));
+        self.run(SyncKind::RecordingOpened { id }).await;
+    }
+
+    pub(crate) async fn recording_sealed(&self, id: String) {
+        self.views.set_active_recording(None);
+        self.run(SyncKind::RecordingSealed { id }).await;
+    }
+
+    pub(crate) async fn refined(&self, id: String) {
+        self.views.set_active_refine(id.clone(), None);
+        self.run(SyncKind::Refined { id }).await;
+    }
+
+    pub(crate) async fn refine_failed(&self, id: String, failure: RefineFailure) {
+        self.views.set_active_refine(id.clone(), None);
+        self.run(SyncKind::RefineFailed { id, failure }).await;
+    }
+
+    pub(crate) async fn filing_updated(&self, id: String, state: String) {
+        self.run(SyncKind::FilingUpdated { id, state }).await;
+    }
+
+    pub(crate) async fn migrated(&self) {
+        self.run(SyncKind::Migrated).await;
+    }
+}
+
 enum Job {
     Boot,
     Settings { setup: Setup },
@@ -269,6 +327,7 @@ enum Job {
     BeginFile { id: String, calendar: Calendar, event: String, audio: bool },
     OwnKey { service: Service, key: Option<String>, busy: Vec<String> },
     Diagnose { spoken: Vec<String>, shown: Vec<String>, sound: Sound, captions: bool },
+    IndexSync { kind: SyncKind, done: oneshot::Sender<()> },
 }
 
 impl DeskJob for Job {
@@ -295,6 +354,7 @@ impl DeskJob for Job {
             Job::BeginFile { .. } => "file.begin",
             Job::OwnKey { .. } => "own_key",
             Job::Diagnose { .. } => "diagnose",
+            Job::IndexSync { .. } => "index.sync",
         }
     }
 }
@@ -348,6 +408,8 @@ struct DeskEnv {
     config: Arc<Config>,
     http: reqwest::Client,
     identity: Arc<Mutex<Identity>>,
+    index: Mutex<Option<Index>>,
+    views: Arc<ViewEngine>,
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
@@ -357,6 +419,15 @@ struct DeskEnv {
     last_diagnose_ms: AtomicU64,
 }
 
+impl DeskEnv {
+    fn with_index(&self, f: impl FnOnce(&mut Index)) {
+        let mut guard = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = guard.as_mut() {
+            f(index);
+        }
+    }
+}
+
 /// Everything the hub hands off: sequential `desk` jobs and separate supervised tasks on the
 /// `work` subtree.
 pub(crate) struct Work {
@@ -364,6 +435,8 @@ pub(crate) struct Work {
     http: reqwest::Client,
     results: Tx<Msg>,
     progress: Tx<Msg>,
+    progress_reg: Register<Progress>,
+    views: Arc<ViewEngine>,
     said: Voice,
     root: Tree,
     tree: Tree,
@@ -389,10 +462,12 @@ impl Work {
         progress: Tx<Msg>,
         said: Voice,
         root: Tree,
+        tree: Tree,
+        views: Arc<ViewEngine>,
+        progress_reg: Register<Progress>,
         frame: Reading<Frame>,
         water: Reading<Water>,
     ) -> Self {
-        let tree = root.child("work");
         let stats = tree.stats();
         let jobs_done = stats.counter("jobs.done");
         let jobs_failed = stats.counter("jobs.failed");
@@ -409,6 +484,8 @@ impl Work {
             config: config.clone(),
             http: http.clone(),
             identity: identity.clone(),
+            index: Mutex::new(None),
+            views: views.clone(),
             invite: invite.clone(),
             signing: signing.clone(),
             keep_hint: keep_hint.clone(),
@@ -644,6 +721,8 @@ impl Work {
             http,
             results,
             progress,
+            progress_reg,
+            views,
             said,
             root,
             tree,
@@ -659,6 +738,10 @@ impl Work {
             jobs_failed,
             search_stale,
         }
+    }
+
+    fn index_sync(&self) -> IndexSync {
+        IndexSync { desk: self.desk.clone(), views: self.views.clone() }
     }
 
     fn alloc_seq(&self) -> u64 {
@@ -762,6 +845,7 @@ impl Work {
     pub(crate) fn city(&self, address: String) {
         let http = self.http.clone();
         let results = self.results.clone();
+        let views = self.views.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
@@ -771,9 +855,11 @@ impl Work {
             let res = city::calendar(&http, &address).await;
             let ms = started.elapsed().as_millis() as u64;
             match &res {
-                Ok(_) => {
+                Ok(calendar) => {
                     info!("job.done", kind = "calendar", job = seq, code = "ok", ms = ms);
                     jobs_done.add(1);
+                    views.set_calendar(Some(calendar.clone()));
+                    views.invalidate(ViewKind::Calendar, None);
                 }
                 Err(end) => {
                     warn!("job.done", kind = "calendar", job = seq, code = code(*end), ms = ms);
@@ -978,6 +1064,7 @@ impl Work {
         let snap = snapshot(&self.identity);
         let shelf = snap.shelf?;
         let keys = snap.keys;
+        let index_sync = self.index_sync();
         let rec_start = recording::Start {
             id: id.clone(),
             about,
@@ -999,6 +1086,7 @@ impl Work {
             next_snap,
             root: self.root.clone(),
             results: self.results.clone(),
+            index_sync: index_sync.clone(),
         };
         let post = WriteCtx {
             id,
@@ -1007,6 +1095,9 @@ impl Work {
             config: self.config.clone(),
             results: self.results.clone(),
             progress: self.progress.clone(),
+            progress_reg: self.progress_reg.clone(),
+            views: self.views.clone(),
+            index_sync,
             said: self.said.clone(),
             work_tree: self.tree.clone(),
             root: self.root.clone(),
@@ -1039,6 +1130,9 @@ impl Work {
         let config = self.config.clone();
         let results = self.results.clone();
         let progress = self.progress.clone();
+        let progress_reg = self.progress_reg.clone();
+        let views = self.views.clone();
+        let index_sync = self.index_sync();
         let next_seq = self.next_seq.clone();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
@@ -1067,6 +1161,9 @@ impl Work {
                     config: config.clone(),
                     results: results.clone(),
                     progress: progress.clone(),
+                    progress_reg: progress_reg.clone(),
+                    views: views.clone(),
+                    index_sync: index_sync.clone(),
                     said: said.clone(),
                     work_tree: work_tree.clone(),
                     root: root.clone(),
@@ -1102,6 +1199,9 @@ impl Work {
             config: self.config.clone(),
             results: self.results.clone(),
             progress: self.progress.clone(),
+            progress_reg: self.progress_reg.clone(),
+            views: self.views.clone(),
+            index_sync: self.index_sync(),
             said: self.said.clone(),
             work_tree: self.tree.clone(),
             root: self.root.clone(),
@@ -1127,6 +1227,8 @@ impl Work {
         let filer = Filer { http: self.http.clone(), me, shelf, tapes: self.config.tapes() };
         let results = self.results.clone();
         let progress = self.progress.clone();
+        let progress_reg = self.progress_reg.clone();
+        let index_sync = self.index_sync();
         let tree = self.tree.clone();
         let bg = self.bg.clone();
         let seq = self.alloc_seq();
@@ -1135,9 +1237,12 @@ impl Work {
         self.tree.spawn("job.file", async move {
             let gate = FileGate { bg: &bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
             let said = city::file_job(&tree, &filer, &id, filing, gate, |w| {
+                set_file_progress(&progress_reg, Some(w.clone()), None);
                 let _ = progress.offer(Msg::Filing(w)); // dropped: the next one replaces it
             })
             .await;
+            index_sync.filing_updated(id.clone(), said.into()).await;
+            set_file_progress(&progress_reg, None, Some(&id));
             let _ = results.send(Msg::Filed(id, said)).await; // dropped: the hub has ended
         });
         Ok(())
@@ -1150,6 +1255,8 @@ impl Work {
         let data = self.config.data.clone();
         let results = self.results.clone();
         let progress = self.progress.clone();
+        let progress_reg = self.progress_reg.clone();
+        let index_sync = self.index_sync();
         let tree = self.tree.clone();
         let bg = self.bg.clone();
         let seq = self.alloc_seq();
@@ -1163,11 +1270,13 @@ impl Work {
             let waited_ms = wait_at.elapsed().as_millis() as u64;
             info!("job.start", kind = "move", job = seq, waited_ms = waited_ms);
             let started = std::time::Instant::now();
+            let reg_cb = progress_reg.clone();
             let outcome = tree
                 .blocking("job.move", move || {
                     let progress = |p: migrate::Progress| {
                         let writing =
                             Writing { id: p.id, step: p.step.into(), done: p.done, of: p.of };
+                        set_move_progress(&reg_cb, Some(writing.clone()));
                         let _ = progress.offer(Msg::Moving(writing)); // dropped: the next one replaces it
                     };
                     migrate::run((&old, &data), &shelf, &me, now, progress)
@@ -1187,6 +1296,7 @@ impl Work {
                 }
                 Err(_) => {
                     if tree.is_cancelled() {
+                        set_move_progress(&progress_reg, None);
                         return;
                     }
                     warn!("job.done", kind = "move", job = seq, code = "panic", ms = ms);
@@ -1194,6 +1304,10 @@ impl Work {
                     Err("panic")
                 }
             };
+            if moved.is_ok() {
+                index_sync.migrated().await;
+            }
+            set_move_progress(&progress_reg, None);
             let _ = results.send(Msg::Moved(moved)).await; // dropped: the hub has ended
         });
         true
@@ -1221,9 +1335,61 @@ fn snapshot(identity: &Mutex<Identity>) -> Snapshot {
     Snapshot { shelf: id.shelf(), ours: id.ours.clone(), keys: id.keys.clone() }
 }
 
+fn index_path(data: &Path, shelf_by: &str) -> PathBuf {
+    data.join("index").join(format!("{}.sqlite3", shelf_by.replace(':', "-")))
+}
+
+fn set_refine_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
+    reg.change(|cur| {
+        let next = match (&value, only_id) {
+            (Some(w), _) => Some(w.clone()),
+            (None, Some(target)) => {
+                if cur.refine.as_ref().is_some_and(|w| w.id == target) {
+                    None
+                } else {
+                    return None;
+                }
+            }
+            (None, None) => None,
+        };
+        if cur.refine == next {
+            return None;
+        }
+        Some(Progress { refine: next, ..cur.clone() })
+    });
+}
+
+fn set_file_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
+    reg.change(|cur| {
+        let next = match (&value, only_id) {
+            (Some(w), _) => Some(w.clone()),
+            (None, Some(target)) => {
+                if cur.file.as_ref().is_some_and(|w| w.id == target) {
+                    None
+                } else {
+                    return None;
+                }
+            }
+            (None, None) => None,
+        };
+        if cur.file == next {
+            return None;
+        }
+        Some(Progress { file: next, ..cur.clone() })
+    });
+}
+
+fn set_move_progress(reg: &Register<Progress>, value: Option<Writing>) {
+    reg.change(|cur| {
+        if cur.move_old == value {
+            return None;
+        }
+        Some(Progress { move_old: value.clone(), ..cur.clone() })
+    });
+}
+
 fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
     let config = &env.config;
-    let http = &env.http;
     let identity = &env.identity;
     match job {
         Job::Boot => run_boot(env),
@@ -1237,7 +1403,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::Sign { who, why, made, keep, busy } => {
             let has_person = who.person().is_some();
-            let out = run_sign(config, http, identity, who, why, made, keep, &busy)?;
+            let out = run_sign(env, who, why, made, keep, &busy)?;
             let start_claim = if has_person {
                 env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone()
             } else {
@@ -1249,16 +1415,7 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             cancel_signing(&env.signing);
             keys::set("identity", None).map_err(code)?;
             let local = keys::local().map(|(me, _)| me);
-            let out = run_sign(
-                config,
-                http,
-                identity,
-                Who::of(None, local),
-                "sign_out",
-                false,
-                keep,
-                &busy,
-            )?;
+            let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy)?;
             Ok(DeskOut::Signed { out, start_claim: None })
         }
         Job::Clip => {
@@ -1274,11 +1431,29 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::Refresh { rev, opened, retain, include_rooms } => {
             let snap = snapshot(identity);
-            run_refresh(config, &snap, rev, opened, retain, include_rooms).map(DeskOut::Refreshed)
+            run_refresh(env, &snap, rev, opened, retain, include_rooms).map(DeskOut::Refreshed)
         }
         Job::Change { id, change } => {
             let shelf = snapshot(identity).shelf?;
+            let is_title = matches!(change, Change::Title { .. });
+            let is_line = matches!(change, Change::Line { .. });
+            let is_note = matches!(change, Change::Note { .. });
             apply(&shelf, &id, change)?;
+            let tapes = config.tapes();
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+            if is_title {
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Search, None);
+            } else if is_line {
+                env.views.invalidate(ViewKind::Transcript, Some(id));
+                env.views.invalidate(ViewKind::Search, None);
+                env.views.invalidate(ViewKind::Library, None);
+            } else if is_note {
+                env.views.invalidate(ViewKind::Search, None);
+            }
             Ok(DeskOut::Changed)
         }
         Job::Note { id, op } => {
@@ -1298,6 +1473,12 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                     notes::remove(&shelf, &id, &key, now())?;
                 }
             }
+            let tapes = config.tapes();
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Recording, Some(id));
+            env.views.invalidate(ViewKind::Search, None);
             Ok(DeskOut::Changed)
         }
         Job::RefinePrepare { id } => {
@@ -1317,21 +1498,39 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             let from =
                 initial_refine_status(rec.about.take, audio, has_key, journal.failed.as_ref());
             let _ = write::clear_failure(&tape_dir); // dropped: write_job also clears failure before signing
+            env.with_index(|idx| {
+                let _ = idx.update_refine_error(&id, None); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
             Ok(DeskOut::RefineStart { id, from })
         }
         Job::Remove { id } => {
             let shelf = snapshot(identity).shelf?;
             shelf.put::<About>(&id, RECORDING, &[(id.clone(), None)], now()).map_err(fail)?;
+            env.with_index(|idx| {
+                let _ = idx.remove_recording(&id); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
             Ok(DeskOut::Changed)
         }
         Job::Restore { id } => {
             let shelf = snapshot(identity).shelf?;
             shelf.restore(&id, now()).map_err(fail)?;
+            let tapes = config.tapes();
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
             Ok(DeskOut::Changed)
         }
         Job::Term { said, written } => {
             let shelf = snapshot(identity).shelf?;
             glossary::put(&shelf, &said, written, now())?;
+            env.views.invalidate(ViewKind::Glossary, None);
             Ok(DeskOut::Changed)
         }
         Job::DestroyAudio { id, under_way } => {
@@ -1349,6 +1548,11 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 })
                 .collect();
             retain::destroy(&tapes, &entries, under_way.as_deref(), &id)?;
+            env.with_index(|idx| {
+                let _ = idx.update_audio(&id, false); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
             Ok(DeskOut::Changed)
         }
         Job::Export { id, exporter, languages, to } => {
@@ -1397,6 +1601,11 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Job::BeginFile { id, calendar, event, audio } => {
             let shelf = snapshot(identity).shelf?;
             let filing = city::begin(&shelf, &id, &calendar, &event, audio)?;
+            env.with_index(|idx| {
+                let _ = idx.update_filing(&id, ""); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+            env.views.invalidate(ViewKind::Outbound, None);
             Ok(DeskOut::FileReady { id, filing })
         }
         Job::OwnKey { service, key, busy } => {
@@ -1407,6 +1616,8 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
             let left = snap.keys.left();
             let has_soniox = snap.keys.from(Service::Soniox) != From::Nowhere;
+            env.views.set_has_soniox_key(has_soniox);
+            let mut cleared_any = false;
             if service == Service::Soniox
                 && had_own
                 && let Ok(shelf) = &snap.shelf
@@ -1424,9 +1635,17 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                             })
                         {
                             let _ = write::clear_failure(&dir); // dropped: best-effort retry unlock after entering own key
+                            env.with_index(|idx| {
+                                let _ = idx.update_refine_error(&rec.id, None); // dropped: index.sync logged error
+                            });
+                            cleared_any = true;
                         }
                     }
                 }
+            }
+            env.views.invalidate(ViewKind::Recording, None);
+            if cleared_any {
+                env.views.invalidate(ViewKind::Library, None);
             }
             let survey = if service == Service::Soniox && has_soniox {
                 Some(run_survey(config, &snap, &busy, false)?)
@@ -1437,6 +1656,66 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::Diagnose { spoken, shown, sound, captions } => {
             run_diagnose(env, spoken, shown, sound, captions)
+        }
+        Job::IndexSync { kind, done } => {
+            run_index_sync(env, kind);
+            let _ = done.send(()); // dropped: background caller was cancelled
+            Ok(DeskOut::Silent)
+        }
+    }
+}
+
+fn run_index_sync(env: &DeskEnv, kind: SyncKind) {
+    let snap = snapshot(&env.identity);
+    let Ok(shelf) = snap.shelf else { return };
+    let tapes = env.config.tapes();
+    match kind {
+        SyncKind::RecordingOpened { id } => {
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
+        }
+        SyncKind::RecordingSealed { id } => {
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
+            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+            env.views.invalidate(ViewKind::Transcript, Some(id));
+        }
+        SyncKind::Refined { id } => {
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
+            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+            env.views.invalidate(ViewKind::Transcript, Some(id));
+        }
+        SyncKind::RefineFailed { id, failure } => {
+            env.with_index(|idx| {
+                let _ = idx.update_refine_error(&id, Some(&failure)); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
+        }
+        SyncKind::FilingUpdated { id, state } => {
+            env.with_index(|idx| {
+                let _ = idx.update_filing(&id, &state); // dropped: index.sync logged error
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
+            env.views.invalidate(ViewKind::Outbound, None);
+        }
+        SyncKind::Migrated => {
+            env.with_index(|idx| {
+                let _ = idx.reconcile(&shelf, &tapes); // dropped: next boot reconciles if sqlite failed
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
         }
     }
 }
@@ -1633,8 +1912,7 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Who::Local(_) | Who::Person(_) => None,
     };
     let has_person = who.person().is_some();
-    let mut signed =
-        run_sign(&env.config, &env.http, &env.identity, who, "boot", made, setup.keep, &[])?;
+    let mut signed = run_sign(env, who, "boot", made, setup.keep, &[])?;
     let id_ms = t.elapsed().as_millis() as u64;
     if let Some(c) = who_err {
         warn!("boot.step", step = "identity", code = c, ms = id_ms);
@@ -1672,17 +1950,17 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
     Ok(DeskOut::Booted { out: BootOut { setup, signed }, start_create, start_claim })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_sign(
-    config: &Config,
-    http: &reqwest::Client,
-    identity: &Mutex<Identity>,
+    env: &DeskEnv,
     who: Who,
     why: &'static str,
     made: bool,
     keep: Option<u32>,
     busy: &[String],
 ) -> Result<SignedOut, &'static str> {
+    let config = &env.config;
+    let http = &env.http;
+    let identity = &env.identity;
     let mut say = Vec::new();
     let records = config.data.join("records");
     let make_shelf = |me: &Me| {
@@ -1713,8 +1991,11 @@ fn run_sign(
         guard.keys = keys;
     }
 
+    // Drop any previous identity's index handle before sweeping/reopening.
+    *env.index.lock().unwrap_or_else(PoisonError::into_inner) = None;
+
     let snap = snapshot(identity);
-    let refreshed = match run_refresh(config, &snap, 0, None, Some(keep), true) {
+    let refreshed = match run_refresh(env, &snap, 0, None, Some(keep), true) {
         Ok(refreshed) => refreshed,
         Err(c) => {
             say.push(c);
@@ -1731,6 +2012,27 @@ fn run_sign(
             }
         }
     };
+
+    let has_soniox = snap.keys.from(Service::Soniox) != From::Nowhere;
+    if let Ok(shelf) = &snap.shelf {
+        let path = index_path(&config.data, shelf.by());
+        let tapes = config.tapes();
+        let opened_path = match Index::open(&path, shelf, &tapes, env.root.stats()) {
+            Ok(idx) => {
+                *env.index.lock().unwrap_or_else(PoisonError::into_inner) = Some(idx);
+                Some(path)
+            }
+            Err(c) => {
+                say.push(c);
+                None
+            }
+        };
+        env.views.set_source(Some(shelf.clone()), opened_path, has_soniox, true);
+    } else {
+        env.views.set_source(None, None, false, true);
+    }
+    env.views.invalidate_all();
+
     let rooms = refreshed.rooms.clone().unwrap_or_default();
     let survey = match run_survey(config, &snap, busy, true) {
         Ok(survey) => survey,
@@ -1744,13 +2046,14 @@ fn run_sign(
 }
 
 fn run_refresh(
-    config: &Config,
+    env: &DeskEnv,
     snap: &Snapshot,
     rev: u64,
     opened: Option<String>,
     retain: Option<Option<u32>>,
     include_rooms: bool,
 ) -> Result<Refreshed, &'static str> {
+    let config = &env.config;
     let keys: Vec<(String, From)> =
         Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
     let left = snap.keys.left();
@@ -1780,9 +2083,18 @@ fn run_refresh(
                 audio: r.audio,
             })
             .collect();
-        let _ = retain::sweep(&tapes, keep, &mut entries, now())?; // dropped: P2-05 uses destroyed ids to sync index
+        let destroyed = retain::sweep(&tapes, keep, &mut entries, now())?;
         for (row, entry) in library.iter_mut().zip(entries) {
             row.audio = entry.audio;
+        }
+        if !destroyed.is_empty() {
+            env.with_index(|idx| {
+                for id in &destroyed {
+                    let _ = idx.update_audio(id, false); // dropped: index.sync logged error
+                }
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Recording, None);
         }
     }
     let read = opened.as_deref().map(|id| shelf.read(id)).transpose().map_err(fail)?;
@@ -2183,6 +2495,9 @@ struct WriteCtx {
     config: Arc<Config>,
     results: Tx<Msg>,
     progress: Tx<Msg>,
+    progress_reg: Register<Progress>,
+    views: Arc<ViewEngine>,
+    index_sync: IndexSync,
     said: Voice,
     work_tree: Tree,
     root: Tree,
@@ -2231,6 +2546,7 @@ impl WriteCtx {
                 if matches!(destroyed, Ok(Err(_))) {
                     self.said.say("tape.destroy");
                 }
+                self.index_sync.recording_sealed(self.id.clone()).await;
             }
             Ok(Some(about)) => {
                 let tape_dir = self.tape();
@@ -2239,6 +2555,7 @@ impl WriteCtx {
                     .blocking("tape.kept", move || tape::kept(&tape_dir))
                     .await
                     .unwrap_or(false);
+                self.index_sync.recording_sealed(self.id.clone()).await;
                 let sealed_row = Row {
                     id: self.id.clone(),
                     started: about.started,
@@ -2270,8 +2587,12 @@ impl WriteCtx {
                     write::Owed::No => {}
                 }
             }
-            Ok(None) => {} // removed meanwhile: the tape stays for a restore
-            Err(_) => {}
+            Ok(None) => {
+                self.index_sync.recording_sealed(self.id.clone()).await;
+            } // removed meanwhile: the tape stays for a restore
+            Err(_) => {
+                self.index_sync.recording_sealed(self.id.clone()).await;
+            }
         }
         let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
     }
@@ -2318,6 +2639,10 @@ impl WriteCtx {
                             take = about.take
                         );
                         *cur = next;
+                        let init = writing(&self.id, "closing");
+                        set_refine_progress(&self.progress_reg, Some(init), None);
+                        self.views
+                            .set_active_refine(self.id.clone(), Some(("closing".into(), 0, 0)));
                     }
                     let key = keys::derive("tape", &self.id)?;
                     let (soniox, openrouter) =
@@ -2329,8 +2654,11 @@ impl WriteCtx {
                         write::Plan { id, spoken, into, terms, topic, model, soniox, openrouter };
                     let progress = |step: &str, done: usize, of: usize| {
                         let (done, of) = (done as u32, of as u32);
-                        let msg = Msg::Writing(Writing { done, of, ..writing(&self.id, step) });
-                        let _ = self.progress.offer(msg); // dropped: the next one replaces it
+                        let w = Writing { done, of, ..writing(&self.id, step) };
+                        set_refine_progress(&self.progress_reg, Some(w.clone()), None);
+                        self.views
+                            .set_active_refine(self.id.clone(), Some((w.step.clone(), done, of)));
+                        let _ = self.progress.offer(Msg::Writing(w)); // dropped: the next one replaces it
                     };
                     let tape = (self.tape(), key);
                     match write::write(
@@ -2346,7 +2674,10 @@ impl WriteCtx {
                     {
                         End::Done => Ok(()),
                         End::Retry(c) => {
-                            let _ = self.progress.offer(Msg::Writing(writing(&self.id, c))); // dropped: the next one replaces it
+                            let w = writing(&self.id, c);
+                            set_refine_progress(&self.progress_reg, Some(w.clone()), None);
+                            self.views.set_active_refine(self.id.clone(), Some((c.into(), 0, 0)));
+                            let _ = self.progress.offer(Msg::Writing(w)); // dropped: the next one replaces it
                             Err(End::Retry(c))
                         }
                         end => Err(end),
@@ -2380,25 +2711,31 @@ impl WriteCtx {
             Ok(()) if entered.load(Ordering::Acquire) => {
                 let new_take =
                     self.shelf.about(&self.id).ok().flatten().map(|r| r.about.take).unwrap_or(0);
-                let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
-                let from = cur.code();
-                let next = refine_step(&cur, RefineEvent::Succeeded { take: new_take }, now());
-                info!(
-                    "refine.state",
-                    rec = Id(&self.id),
-                    from = from,
-                    to = next.code(),
-                    why = "",
-                    take = new_take
-                );
-                *cur = next;
+                {
+                    let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let from = cur.code();
+                    let next = refine_step(&cur, RefineEvent::Succeeded { take: new_take }, now());
+                    info!(
+                        "refine.state",
+                        rec = Id(&self.id),
+                        from = from,
+                        to = next.code(),
+                        why = "",
+                        take = new_take
+                    );
+                    *cur = next;
+                }
+                self.index_sync.refined(self.id.clone()).await;
             }
-            Ok(()) => {}
+            Ok(()) => {
+                self.views.set_active_refine(self.id.clone(), None);
+            }
             Err(end) => {
                 let raw = code(end);
+                let failed_at = now();
                 let mapped = if matches!(end, End::Fatal(_)) {
                     let mapped = write::refine_error_code(raw, self.keys.from(Service::Soniox));
-                    let _ = write::record_failure(&self.tape(), mapped, now()); // dropped: best-effort failure persistence beside audio
+                    let _ = write::record_failure(&self.tape(), mapped, failed_at); // dropped: best-effort failure persistence beside audio
                     mapped
                 } else {
                     raw
@@ -2406,7 +2743,7 @@ impl WriteCtx {
                 if entered.load(Ordering::Acquire) {
                     let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
                     let from = cur.code();
-                    let next = refine_step(&cur, RefineEvent::Failed { code: mapped }, now());
+                    let next = refine_step(&cur, RefineEvent::Failed { code: mapped }, failed_at);
                     warn!(
                         "refine.state",
                         rec = Id(&self.id),
@@ -2417,9 +2754,20 @@ impl WriteCtx {
                     );
                     *cur = next;
                 }
+                if matches!(end, End::Fatal(_)) {
+                    self.index_sync
+                        .refine_failed(
+                            self.id.clone(),
+                            RefineFailure { code: mapped.into(), at: failed_at },
+                        )
+                        .await;
+                } else {
+                    self.views.set_active_refine(self.id.clone(), None);
+                }
                 self.said.say(mapped);
             }
         }
+        set_refine_progress(&self.progress_reg, None, Some(&self.id));
     }
 }
 

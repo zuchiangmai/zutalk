@@ -1,10 +1,14 @@
+mod hub;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use zu::SecretKey;
 use zutalk_core::ai::write;
+use zutalk_core::app::proto::{Change, Command, NoteOp};
 use zutalk_core::capture::clock::{BLOCK, Block};
 use zutalk_core::capture::tape;
 use zutalk_core::knowledge::glossary;
@@ -861,4 +865,262 @@ async fn view_engine_executes_all_queries_and_cancels_superseded_search() {
     engine.set_hook(None);
     tree.cancel();
     tree.wait().await;
+}
+
+#[tokio::test]
+async fn core_query_reflects_recording_notes_changes_search_takes_and_invalidates() {
+    let _guard = hub::STORE.lock().await;
+    hub::store(true);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path();
+
+    // Seed two recordings on the signed-in shelf:
+    // 1. `rec_cmp` with take 0 + take 1 and valid audio (for Compare + DestroyAudio).
+    // 2. `rec_broken` with take 0 and a corrupt tape file (triggers local Refine failure without network).
+    let shelf = hub::shelf(data);
+    write_recording(
+        &shelf,
+        "rec_cmp",
+        NOW,
+        "Original Compare Title",
+        &["en"],
+        1,
+        &[
+            (0, vec![said(0, 2_000, "en", "draft wording here", &[])]),
+            (1, vec![said(0, 2_000, "en", "refined wording here", &[])]),
+        ],
+    );
+    hub::tape(data, "rec_cmp", 1);
+
+    // Seed `rec_broken` with `moved = true` so OwnKey's auto-survey leaves it alone and our
+    // explicit Command::Refine triggers `write_job` deterministically.
+    shelf
+        .put(
+            "rec_broken",
+            RECORDING,
+            &[(
+                "rec_broken".to_owned(),
+                Some(About {
+                    started: NOW + 10_000,
+                    length_ms: 1_000,
+                    title: "Broken Tape Draft".into(),
+                    preview: "broken tape line".into(),
+                    spoken: vec!["en".into()],
+                    shown: vec!["en".into()],
+                    source: "mic".into(),
+                    take: 0,
+                    moved: true,
+                }),
+            )],
+            NOW + 10_000,
+        )
+        .expect("write broken about");
+    let broken_dir = data.join("tape").join("rec_broken");
+    fs::create_dir_all(&broken_dir).expect("mkdir broken tape");
+    fs::write(broken_dir.join("00000.tape"), b"corrupt-audio-bytes").expect("write broken tape");
+
+    let mut app = hub::App::start(data);
+    app.until(|s| s.me.as_deref() == Some(hub::ME)).await;
+
+    // Import a short local WAV file -> sealed draft lands in index via IndexSync.
+    let wav_path = data.join("clip.wav");
+    hub::wav(&wav_path, 300);
+    let v_before_import = app.outlet.invalidated.now().1.next;
+    app.send(Command::Import { path: wav_path.to_string_lossy().into_owned() });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let imported_id = loop {
+        if let Ok(reply) = app
+            .core
+            .query(Query::LibraryRecent { filter: LibraryFilter::default(), limit: 10, offset: 0 })
+            .await
+            && let QueryValue::LibraryPage(page) = reply.value
+            && page.total == 3
+            && let Some(row) = page.rows.iter().find(|r| r.id != "rec_cmp" && r.id != "rec_broken")
+            && row.length_ms > 0
+        {
+            break row.id.clone();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for imported recording");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let v_after_import = app.outlet.invalidated.now().1.next;
+    assert!(v_after_import > v_before_import, "import must advance invalidation version");
+
+    // LibrarySummary reflects all 3 recordings.
+    let summary =
+        app.core.query(Query::LibrarySummary { tz_offset_min: 0 }).await.expect("summary");
+    assert!(matches!(summary.value, QueryValue::LibrarySummary(ref s) if s.total == 3));
+
+    // Command::Note -> invalidates Recording + Search and is queryable immediately after sync.
+    let v_before_note = app.outlet.invalidated.now().1.next;
+    app.send(Command::Note {
+        id: imported_id.clone(),
+        op: NoteOp::Add { at_ms: 250, text: "AlphaNoteToken".into(), anchor: None },
+    });
+    let mut inv_rx = app.outlet.invalidated.clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let v_after_note = loop {
+        let (_, inv) = inv_rx.now();
+        if inv.next > v_before_note
+            && inv.items.iter().any(|i| {
+                i.version > v_before_note
+                    && i.view == ViewKind::Recording
+                    && i.key.as_deref() == Some(imported_id.as_str())
+            })
+            && inv.items.iter().any(|i| i.version > v_before_note && i.view == ViewKind::Search)
+        {
+            break inv.next;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for note invalidation");
+        let _ = tokio::time::timeout(Duration::from_millis(200), inv_rx.next()).await;
+    };
+    assert!(v_after_note > v_before_note);
+
+    let rec_reply =
+        app.core.query(Query::Recording { id: imported_id.clone() }).await.expect("recording");
+    assert!(matches!(
+        rec_reply.value,
+        QueryValue::Recording(Some(ref view))
+            if view.notes.iter().any(|n| n.text == "AlphaNoteToken")
+    ));
+    let search_note = app
+        .core
+        .query(Query::Search { query: "AlphaNoteToken".into(), limit: 20 })
+        .await
+        .expect("search note");
+    assert!(matches!(
+        search_note.value,
+        QueryValue::Search(ref res)
+            if res.hits.iter().any(|h| h.recording_id == imported_id && h.kind == SearchHitKind::Note)
+    ));
+
+    // Command::Change(Title) -> invalidates Library + Search + Recording.
+    let v_before_title = app.outlet.invalidated.now().1.next;
+    app.send(Command::Change {
+        id: imported_id.clone(),
+        change: Change::Title { text: "RenamedQueryTitle".into() },
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, inv) = inv_rx.now();
+        if inv.next > v_before_title
+            && inv.items.iter().any(|i| i.version > v_before_title && i.view == ViewKind::Library)
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for title invalidation");
+        let _ = tokio::time::timeout(Duration::from_millis(200), inv_rx.next()).await;
+    }
+    let search_title = app
+        .core
+        .query(Query::Search { query: "RenamedQueryTitle".into(), limit: 20 })
+        .await
+        .expect("search title");
+    assert!(matches!(
+        search_title.value,
+        QueryValue::Search(ref res)
+            if res.hits.iter().any(|h| h.recording_id == imported_id && h.kind == SearchHitKind::Title)
+    ));
+
+    // Command::Term -> invalidates Glossary and returns term via Query::Glossary.
+    let v_before_term = app.outlet.invalidated.now().1.next;
+    app.send(Command::Term {
+        said: "Zuzalu".into(),
+        written: Some(BTreeMap::from([("zh".into(), "祖扎鲁".into())])),
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, inv) = inv_rx.now();
+        if inv.next > v_before_term
+            && inv.items.iter().any(|i| i.version > v_before_term && i.view == ViewKind::Glossary)
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for term invalidation");
+        let _ = tokio::time::timeout(Duration::from_millis(200), inv_rx.next()).await;
+    }
+    let glossary_reply = app.core.query(Query::Glossary).await.expect("glossary");
+    assert!(matches!(
+        glossary_reply.value,
+        QueryValue::Glossary(ref terms) if terms.iter().any(|t| t.said == "Zuzalu")
+    ));
+
+    // Query::Transcript + Query::Compare on the 2-take recording.
+    let tr = app
+        .core
+        .query(Query::Transcript { id: "rec_cmp".into(), take: Some(1), chunk: 0 })
+        .await
+        .expect("transcript");
+    assert!(matches!(
+        tr.value,
+        QueryValue::Transcript(ref c)
+            if c.total_lines == 1 && c.lines[0].1.line.text == "refined wording here"
+    ));
+    let cmp = app
+        .core
+        .query(Query::Compare { id: "rec_cmp".into(), take_a: 0, take_b: 1, chunk: 0 })
+        .await
+        .expect("compare");
+    assert!(matches!(
+        cmp.value,
+        QueryValue::Compare(ref c) if c.rows.len() == 1 && c.rows[0].changed
+    ));
+
+    // Command::DestroyAudio on `imported_id` and `rec_cmp` -> flips `row.audio` to false and
+    // keeps `imported_id` out of OwnKey's auto-survey.
+    app.send(Command::DestroyAudio { id: imported_id.clone() });
+    app.send(Command::DestroyAudio { id: "rec_cmp".into() });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(r1) = app.core.query(Query::Recording { id: imported_id.clone() }).await
+            && let Ok(r2) = app.core.query(Query::Recording { id: "rec_cmp".into() }).await
+            && matches!(r1.value, QueryValue::Recording(Some(ref v)) if !v.row.audio)
+            && matches!(r2.value, QueryValue::Recording(Some(ref v)) if !v.row.audio)
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for DestroyAudio");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Command::Refine on `rec_broken`: watch Outlet.progress for active refine progress, then
+    // verify the fatal local tape error persists into Query::Recording.
+    let seen_refine_active = Arc::new(AtomicBool::new(false));
+    let seen_refine_flag = seen_refine_active.clone();
+    let mut prog_rx = app.outlet.progress.clone();
+    let watch_progress = tokio::spawn(async move {
+        while let Some((_, prog)) = prog_rx.next().await {
+            if prog.refine.as_ref().is_some_and(|w| w.id == "rec_broken") {
+                seen_refine_flag.store(true, Ordering::Release);
+            }
+        }
+    });
+
+    app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-local-test".into()) });
+    app.until(|s| {
+        s.keys
+            .iter()
+            .any(|(name, from)| name == "soniox" && *from == zutalk_core::id::keys::From::Own)
+    })
+    .await;
+    app.send(Command::Refine { id: "rec_broken".into() });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(reply) = app.core.query(Query::Recording { id: "rec_broken".into() }).await
+            && let QueryValue::Recording(Some(ref view)) = reply.value
+            && matches!(view.refine, RefineStatus::Failed { ref code, .. } if code == "tape")
+            && app.outlet.progress.now().1.refine.is_none()
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for refine failure");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    watch_progress.abort();
+    assert!(
+        seen_refine_active.load(Ordering::Acquire),
+        "Outlet.progress must observe refine progress for rec_broken"
+    );
 }

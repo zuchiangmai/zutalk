@@ -8,13 +8,15 @@ use zutalk::pump::{self, Fan, SHELL_JOINS_MSGS, Sink};
 use zutalk::windows::CaptionWindow;
 use zutalk_core::app::hub::Outlet;
 use zutalk_core::app::proto::{
-    Event, Frame, Level as SoundLevel, Notices, Session, Signal, Stamped, State, Status,
+    Event, Frame, Invalidate, Invalidations, Level as SoundLevel, Notices, Progress, Session,
+    Signal, Stamped, State, Status, ViewKind, Writing,
 };
 use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::signal::Register;
 use zutalk_core::rt::stats::{Stats, Tally};
 use zutalk_core::rt::supervise::{Backoff, Tree};
 use zutalk_core::rt::water::Water;
+use zutalk_core::view::query::KEEP_INVALIDATIONS_EVENTS;
 use zutalk_log::Level;
 
 #[derive(Debug, Clone)]
@@ -64,6 +66,8 @@ struct Registers {
     frame: Register<Frame>,
     session: Register<Option<Session>>,
     level: Register<SoundLevel>,
+    progress: Register<Progress>,
+    invalidated: Register<Invalidations>,
     water: Register<Water>,
     stats: Register<Tally>,
     said: Register<Notices>,
@@ -75,6 +79,8 @@ impl Registers {
         let frame = Register::new(Frame::default());
         let session = Register::new(None);
         let level = Register::new(SoundLevel::default());
+        let progress = Register::new(Progress::default());
+        let invalidated = Register::new(Invalidations::default());
         let water = Register::new(Water::default());
         let stats = Register::new(Tally::default());
         let said = Register::new(Notices::default());
@@ -83,11 +89,22 @@ impl Registers {
             frame: frame.read(),
             session: session.read(),
             level: level.read(),
+            progress: progress.read(),
+            invalidated: invalidated.read(),
             water: water.read(),
             stats: stats.read(),
             said: said.read(),
         };
-        (Self { state, frame, session, level, water, stats, said }, outlet)
+        (Self { state, frame, session, level, progress, invalidated, water, stats, said }, outlet)
+    }
+
+    fn invalidate(&self, view: ViewKind, key: Option<String>) {
+        self.invalidated.change(|cur| {
+            let mut next = cur.clone();
+            let v = next.next + 1;
+            next.push(view, key.clone(), v);
+            Some(next)
+        });
     }
 
     fn say(&self, code: &str) {
@@ -653,4 +670,111 @@ async fn a_pump_that_dies_is_started_again_and_no_window_has_to_join_again() {
 
     shell.cancel();
     shell.wait().await;
+}
+
+// ---- 10. Progress replays to late joiners; invalidations broadcast without replay ----
+
+#[tokio::test(start_paused = true)]
+async fn progress_signal_is_replayed_to_late_joiners_and_invalidations_are_not() {
+    let stats = Stats::new();
+    let (regs, outlet) = Registers::new();
+    let (joins_tx, joins_rx) = queue::bounded::<(String, RecordingSink)>(
+        &stats,
+        "shell.joins",
+        SHELL_JOINS_MSGS,
+        Full::Wait,
+    );
+
+    let task = tokio::spawn(pump::run(outlet, joins_rx, stats, |_| {}, |_| CaptionWindow::Ok));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let early = RecordingSink::new();
+    joins_tx.send(("early".into(), early.clone())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let prog = Progress {
+        refine: Some(Writing { id: "rec-1".into(), step: "translating".into(), done: 2, of: 5 }),
+        file: None,
+        move_old: None,
+    };
+    regs.progress.set(prog.clone());
+    regs.invalidate(ViewKind::Recording, Some("rec-1".into()));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Early subscriber saw both Signal::Progress and Event::Invalidate.
+    let early_ev = early.take();
+    assert!(early_ev.iter().any(|e| matches!(
+        e,
+        Event::Signal(Stamped { seq: 1, signal: Signal::Progress(p) }) if **p == prog
+    )));
+    assert!(early_ev.iter().any(|e| matches!(
+        e,
+        Event::Invalidate(Invalidate { view: ViewKind::Recording, key: Some(k), version: 1 })
+            if k == "rec-1"
+    )));
+
+    // Late joiner gets Signal::Progress replayed, never past Event::Invalidate.
+    let late = RecordingSink::new();
+    joins_tx.send(("late".into(), late.clone())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let late_ev = late.take();
+    assert!(
+        late_ev.iter().any(|e| matches!(
+            e,
+            Event::Signal(Stamped { seq: 1, signal: Signal::Progress(p) }) if **p == prog
+        )),
+        "late joiner must receive replayed Progress: {late_ev:?}"
+    );
+    assert!(
+        !late_ev.iter().any(|e| matches!(e, Event::Invalidate(_))),
+        "late joiner must not receive replayed Invalidations: {late_ev:?}"
+    );
+
+    drop(joins_tx);
+    task.await.unwrap();
+}
+
+// ---- 11. Invalidation ring overflow falls back to coarse ViewKind::ALL invalidations ----
+
+#[tokio::test(start_paused = true)]
+async fn invalidation_overflow_falls_back_to_coarse_view_invalidations() {
+    let stats = Stats::new();
+    let (regs, outlet) = Registers::new();
+    let (joins_tx, joins_rx) = queue::bounded::<(String, RecordingSink)>(
+        &stats,
+        "shell.joins",
+        SHELL_JOINS_MSGS,
+        Full::Wait,
+    );
+
+    let task = tokio::spawn(pump::run(outlet, joins_rx, stats, |_| {}, |_| CaptionWindow::Ok));
+    let sink = RecordingSink::new();
+    joins_tx.send(("main".into(), sink.clone())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Synchronously burst more distinct keys than KEEP_INVALIDATIONS_EVENTS (64) before yielding.
+    let burst = KEEP_INVALIDATIONS_EVENTS + 12;
+    for i in 0..burst {
+        regs.invalidate(ViewKind::Recording, Some(format!("rec-{i}")));
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let invs: Vec<Invalidate> = sink
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Invalidate(inv) => Some(inv),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(invs.len(), ViewKind::ALL.len(), "expected one coarse invalidation per ViewKind");
+    for (got, expected_view) in invs.iter().zip(ViewKind::ALL) {
+        assert_eq!(got.view, expected_view);
+        assert_eq!(got.key, None);
+        assert_eq!(got.version, burst as u64);
+    }
+
+    drop(joins_tx);
+    task.await.unwrap();
 }
