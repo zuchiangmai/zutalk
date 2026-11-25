@@ -262,5 +262,12 @@
  "diagnose": "Export diagnostics",
  "theme.system": "System",
  "theme.light": "Light",
- "theme.dark": "Dark"
+ "theme.dark": "Dark",
+ "mark": "Mark",
+ "notes.private": "Not shared",
+ "notes.placeholder": "Jot a note",
+ "notes.submit": "Save note",
+ "notes.empty": "Press M to mark a moment, or type below",
+ "home.back_to_live": "Back to recording",
+ "home.keep": "Audio retention"
 }

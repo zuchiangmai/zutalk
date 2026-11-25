@@ -262,5 +262,12 @@
  "diagnose": "診断情報を書き出す",
  "theme.system": "システム",
  "theme.light": "ライト",
- "theme.dark": "ダーク"
+ "theme.dark": "ダーク",
+ "mark": "マーク",
+ "notes.private": "非公開",
+ "notes.placeholder": "メモを書く",
+ "notes.submit": "記録",
+ "notes.empty": "M キーでマーク、または下にメモを入力",
+ "home.back_to_live": "録音に戻る",
+ "home.keep": "音声の保存期間"
 }

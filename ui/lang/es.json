@@ -262,5 +262,12 @@
  "diagnose": "Exportar diagnóstico",
  "theme.system": "Sistema",
  "theme.light": "Claro",
- "theme.dark": "Oscuro"
+ "theme.dark": "Oscuro",
+ "mark": "Marcar",
+ "notes.private": "Privado",
+ "notes.placeholder": "Escribe una nota",
+ "notes.submit": "Guardar nota",
+ "notes.empty": "Pulsa M para marcar un momento o escribe abajo",
+ "home.back_to_live": "Volver a la grabación",
+ "home.keep": "Retención de audio"
 }

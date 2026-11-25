@@ -20,6 +20,8 @@ import {
   useSource,
   waterSource,
 } from '../bus';
+import { HomePage } from '../pages/HomePage';
+import { LivePage } from '../pages/LivePage';
 import { CommandPalette } from './CommandPalette';
 import { HealthOverlay } from './HealthOverlay';
 import { NoticeToast } from './NoticeToast';
@@ -99,17 +101,25 @@ export function Shell() {
       />
 
       <main className="main">
-        <TopBar
-          rooms={state?.rooms ?? []}
-          update={state?.update ?? null}
-          recording={session !== null}
-          onUpdate={() => void send({ do: 'Update' })}
-        />
+        {route.page !== 'live' && (
+          <TopBar
+            rooms={state?.rooms ?? []}
+            update={state?.update ?? null}
+            recording={session !== null}
+            onUpdate={() => void send({ do: 'Update' })}
+          />
+        )}
 
-        <section className="page" data-testid="route-view">
-          <h1 className="page-t">{route.page}</h1>
-          <p className="k">{state ? t('private.local') : t('code.starting')}</p>
-        </section>
+        {route.page === 'home' ? (
+          <HomePage />
+        ) : route.page === 'live' ? (
+          <LivePage />
+        ) : (
+          <section className="page" data-testid="route-view">
+            <h1 className="page-t">{route.page}</h1>
+            <p className="k">{state ? t('private.local') : t('code.starting')}</p>
+          </section>
+        )}
 
         <NoticeToast
           notices={notices}

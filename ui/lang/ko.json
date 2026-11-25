@@ -262,5 +262,12 @@
  "diagnose": "진단 내보내기",
  "theme.system": "시스템",
  "theme.light": "라이트",
- "theme.dark": "다크"
+ "theme.dark": "다크",
+ "mark": "표시",
+ "notes.private": "공유 안 됨",
+ "notes.placeholder": "메모 남기기",
+ "notes.submit": "저장",
+ "notes.empty": "M 키로 표시하거나 아래에 메모를 입력하세요",
+ "home.back_to_live": "녹음으로 돌아가기",
+ "home.keep": "오디오 보관"
 }

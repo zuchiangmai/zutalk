@@ -262,5 +262,12 @@
  "diagnose": "ส่งออกข้อมูลวินิจฉัย",
  "theme.system": "ตามระบบ",
  "theme.light": "สว่าง",
- "theme.dark": "มืด"
+ "theme.dark": "มืด",
+ "mark": "ทำเครื่องหมาย",
+ "notes.private": "ไม่แชร์ออกนอกเครื่อง",
+ "notes.placeholder": "จดบันทึกสั้น ๆ",
+ "notes.submit": "บันทึก",
+ "notes.empty": "กด M เพื่อทำเครื่องหมาย หรือพิมพ์ด้านล่าง",
+ "home.back_to_live": "กลับไปยังการบันทึก",
+ "home.keep": "ระยะเวลาเก็บเสียง"
 }

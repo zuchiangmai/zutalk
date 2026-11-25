@@ -262,5 +262,12 @@
  "diagnose": "Diagnose exportieren",
  "theme.system": "System",
  "theme.light": "Hell",
- "theme.dark": "Dunkel"
+ "theme.dark": "Dunkel",
+ "mark": "Markieren",
+ "notes.private": "Nicht geteilt",
+ "notes.placeholder": "Notiz schreiben",
+ "notes.submit": "Speichern",
+ "notes.empty": "M drücken zum Markieren oder unten tippen",
+ "home.back_to_live": "Zurück zur Aufnahme",
+ "home.keep": "Audio-Aufbewahrung"
 }

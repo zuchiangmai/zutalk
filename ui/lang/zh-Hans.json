@@ -262,5 +262,12 @@
  "diagnose": "导出诊断",
  "theme.system": "跟随系统",
  "theme.light": "浅色",
- "theme.dark": "深色"
+ "theme.dark": "深色",
+ "mark": "标记",
+ "notes.private": "不对外",
+ "notes.placeholder": "记一句",
+ "notes.submit": "记下",
+ "notes.empty": "按 M 随时标记，或在下方记一句",
+ "home.back_to_live": "回到正在进行的录音",
+ "home.keep": "音频留存"
 }

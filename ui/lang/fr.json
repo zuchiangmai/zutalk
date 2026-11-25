@@ -262,5 +262,12 @@
  "diagnose": "Exporter le diagnostic",
  "theme.system": "Système",
  "theme.light": "Clair",
- "theme.dark": "Sombre"
+ "theme.dark": "Sombre",
+ "mark": "Marquer",
+ "notes.private": "Non partagé",
+ "notes.placeholder": "Prendre une note",
+ "notes.submit": "Enregistrer",
+ "notes.empty": "Appuyez sur M pour marquer ou saisissez ci-dessous",
+ "home.back_to_live": "Retour à l’enregistrement",
+ "home.keep": "Conservation audio"
 }
