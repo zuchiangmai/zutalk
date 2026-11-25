@@ -290,5 +290,20 @@
  "reader.notes_empty": "아직 메모가 없습니다",
  "reader.edit_speaker": "화자 이름 바꾸기",
  "reader.cancel": "취소",
- "reader.loading": "불러오는 중…"
+ "reader.loading": "불러오는 중…",
+ "library.filter.filed": "제출됨",
+ "library.filter.draft": "실시간 초안",
+ "library.filter.audio": "오디오 있음",
+ "library.heatmap": "이번 달 녹음이 있는 날",
+ "library.load_more": "더 불러오기",
+ "library.all_months": "모든 월",
+ "settings.appearance": "화면 스타일",
+ "settings.diagnostics": "진단",
+ "settings.diagnose_tip": "로그와 카운터만 포함되며 대화 텍스트나 키는 포함되지 않습니다.",
+ "settings.overlay_toggle": "실행 상태 오버레이",
+ "settings.overlay_on": "표시됨",
+ "settings.overlay_off": "숨김",
+ "settings.key_placeholder": "API 키",
+ "settings.update_ready": "버전 {0} 준비됨",
+ "settings.recovery_unsaved": "아직 저장 안 됨"
 }

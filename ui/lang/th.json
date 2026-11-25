@@ -290,5 +290,20 @@
  "reader.notes_empty": "ยังไม่มีบันทึกย่อ",
  "reader.edit_speaker": "เปลี่ยนชื่อผู้พูด",
  "reader.cancel": "ยกเลิก",
- "reader.loading": "กำลังโหลด…"
+ "reader.loading": "กำลังโหลด…",
+ "library.filter.filed": "ส่งแล้ว",
+ "library.filter.draft": "ฉบับสด",
+ "library.filter.audio": "มีไฟล์เสียง",
+ "library.heatmap": "วันที่มีการบันทึกเสียงในเดือนนี้",
+ "library.load_more": "โหลดเพิ่ม",
+ "library.all_months": "ทุกเดือน",
+ "settings.appearance": "รูปลักษณ์",
+ "settings.diagnostics": "การวินิจฉัย",
+ "settings.diagnose_tip": "มีเฉพาะบันทึกการทำงานและตัวนับ ไม่มีข้อความบทสนทนาหรือคีย์",
+ "settings.overlay_toggle": "หน้าต่างสถานะการทำงาน",
+ "settings.overlay_on": "แสดงอยู่",
+ "settings.overlay_off": "ซ่อนอยู่",
+ "settings.key_placeholder": "คีย์ API",
+ "settings.update_ready": "เวอร์ชัน {0} พร้อมอัปเดตแล้ว",
+ "settings.recovery_unsaved": "ยังไม่ได้บันทึก"
 }

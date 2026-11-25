@@ -290,5 +290,20 @@
  "reader.notes_empty": "まだメモはありません",
  "reader.edit_speaker": "話者名を変更",
  "reader.cancel": "キャンセル",
- "reader.loading": "読み込み中…"
+ "reader.loading": "読み込み中…",
+ "library.filter.filed": "提出済み",
+ "library.filter.draft": "ライブ下書き",
+ "library.filter.audio": "音声あり",
+ "library.heatmap": "今月の録音日",
+ "library.load_more": "さらに読み込む",
+ "library.all_months": "すべての月",
+ "settings.appearance": "外観",
+ "settings.diagnostics": "診断",
+ "settings.diagnose_tip": "ログとカウンタのみを含み、会話テキストや鍵は含みません。",
+ "settings.overlay_toggle": "稼働状況オーバーレイ",
+ "settings.overlay_on": "表示中",
+ "settings.overlay_off": "非表示",
+ "settings.key_placeholder": "API キー",
+ "settings.update_ready": "バージョン {0} の準備ができました",
+ "settings.recovery_unsaved": "未保存"
 }

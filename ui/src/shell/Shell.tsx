@@ -14,16 +14,17 @@ import {
   setOverlay,
   stateSource,
   statsSource,
-  t,
   toggleOverlay,
   useQuery,
   useSource,
   waterSource,
 } from '../bus';
 import { HomePage } from '../pages/HomePage';
+import { LibraryPage } from '../pages/LibraryPage';
 import { LivePage } from '../pages/LivePage';
 import { ReaderPage } from '../pages/ReaderPage';
 import { ResultPage } from '../pages/ResultPage';
+import { SettingsPage } from '../pages/SettingsPage';
 import { CommandPalette } from './CommandPalette';
 import { HealthOverlay } from './HealthOverlay';
 import { NoticeToast } from './NoticeToast';
@@ -126,11 +127,10 @@ export function Shell() {
             compare={route.compare}
             lineKey={route.lineKey}
           />
+        ) : route.page === 'library' ? (
+          <LibraryPage initialMonth={route.month ?? null} />
         ) : (
-          <section className="page" data-testid="route-view">
-            <h1 className="page-t">{route.page}</h1>
-            <p className="k">{state ? t('private.local') : t('code.starting')}</p>
-          </section>
+          <SettingsPage />
         )}
 
         <NoticeToast

@@ -290,5 +290,20 @@
  "reader.notes_empty": "还没有笔记",
  "reader.edit_speaker": "改说话人名字",
  "reader.cancel": "取消",
- "reader.loading": "正在加载…"
+ "reader.loading": "正在加载…",
+ "library.filter.filed": "已交",
+ "library.filter.draft": "现场稿",
+ "library.filter.audio": "有音频",
+ "library.heatmap": "这个月哪几天有录音",
+ "library.load_more": "加载更多",
+ "library.all_months": "全部月份",
+ "settings.appearance": "外观",
+ "settings.diagnostics": "诊断与自检",
+ "settings.diagnose_tip": "仅含日志与计数器，不含对话文字与密钥。",
+ "settings.overlay_toggle": "运行状况浮层",
+ "settings.overlay_on": "已开启",
+ "settings.overlay_off": "已关闭",
+ "settings.key_placeholder": "密钥",
+ "settings.update_ready": "新版本 {0} 已就绪",
+ "settings.recovery_unsaved": "还没存"
 }

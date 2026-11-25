@@ -290,5 +290,20 @@
  "reader.notes_empty": "Noch keine Notizen",
  "reader.edit_speaker": "Sprecher umbenennen",
  "reader.cancel": "Abbrechen",
- "reader.loading": "Wird geladen…"
+ "reader.loading": "Wird geladen…",
+ "library.filter.filed": "Archiviert",
+ "library.filter.draft": "Live-Entwurf",
+ "library.filter.audio": "Mit Audio",
+ "library.heatmap": "Tage mit Aufnahmen in diesem Monat",
+ "library.load_more": "Mehr laden",
+ "library.all_months": "Alle Monate",
+ "settings.appearance": "Erscheinungsbild",
+ "settings.diagnostics": "Diagnose",
+ "settings.diagnose_tip": "Enthält nur Protokolle und Zähler — niemals Gesprächstexte oder Schlüssel.",
+ "settings.overlay_toggle": "Laufzeitstatus-Overlay",
+ "settings.overlay_on": "Sichtbar",
+ "settings.overlay_off": "Ausgeblendet",
+ "settings.key_placeholder": "API-Schlüssel",
+ "settings.update_ready": "Version {0} ist bereit",
+ "settings.recovery_unsaved": "Noch nicht gesichert"
 }

@@ -290,5 +290,20 @@
  "reader.notes_empty": "Aucune note pour le moment",
  "reader.edit_speaker": "Renommer l’intervenant",
  "reader.cancel": "Annuler",
- "reader.loading": "Chargement…"
+ "reader.loading": "Chargement…",
+ "library.filter.filed": "Déposés",
+ "library.filter.draft": "Brouillon en direct",
+ "library.filter.audio": "Avec audio",
+ "library.heatmap": "Jours avec enregistrements ce mois-ci",
+ "library.load_more": "Charger plus",
+ "library.all_months": "Tous les mois",
+ "settings.appearance": "Apparence",
+ "settings.diagnostics": "Diagnostics",
+ "settings.diagnose_tip": "Contient uniquement journaux et compteurs — jamais de texte de conversation ni de clés.",
+ "settings.overlay_toggle": "Superposition d’état d’exécution",
+ "settings.overlay_on": "Affichée",
+ "settings.overlay_off": "Masquée",
+ "settings.key_placeholder": "Clé API",
+ "settings.update_ready": "La version {0} est prête",
+ "settings.recovery_unsaved": "Pas encore enregistrée"
 }

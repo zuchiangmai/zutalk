@@ -290,5 +290,20 @@
  "reader.notes_empty": "No notes yet",
  "reader.edit_speaker": "Rename speaker",
  "reader.cancel": "Cancel",
- "reader.loading": "Loading…"
+ "reader.loading": "Loading…",
+ "library.filter.filed": "Filed",
+ "library.filter.draft": "Live draft",
+ "library.filter.audio": "Has audio",
+ "library.heatmap": "Days with recordings this month",
+ "library.load_more": "Load more",
+ "library.all_months": "All months",
+ "settings.appearance": "Appearance",
+ "settings.diagnostics": "Diagnostics",
+ "settings.diagnose_tip": "Includes logs and counters only — never conversation text or keys.",
+ "settings.overlay_toggle": "Runtime health overlay",
+ "settings.overlay_on": "Shown",
+ "settings.overlay_off": "Hidden",
+ "settings.key_placeholder": "API key",
+ "settings.update_ready": "Version {0} is ready",
+ "settings.recovery_unsaved": "Not saved yet"
 }
