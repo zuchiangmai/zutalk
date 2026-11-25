@@ -188,6 +188,9 @@ describe('LiveView statuses, LiveNotes anchor locking, M hotkey, and Stop', () =
     id: 'live-rec-1',
     started: 1_760_000_000_000,
     status,
+    outbound: false,
+    viewers: 0,
+    event_title: null,
   });
 
   const makeFrame = (t_audio: number, tailText: string): Frame => ({
@@ -223,7 +226,7 @@ describe('LiveView statuses, LiveNotes anchor locking, M hotkey, and Stop', () =
         notes={[]}
         elapsedMs={65_000}
         captionsOpen={false}
-        rooms={[]}
+        host={{ is: 'Idle' }}
         update={null}
         onPause={onPause}
         onResume={onResume}
@@ -245,7 +248,7 @@ describe('LiveView statuses, LiveNotes anchor locking, M hotkey, and Stop', () =
           notes={[]}
           elapsedMs={65_000}
           captionsOpen={false}
-          rooms={[]}
+          host={{ is: 'Idle' }}
           update={null}
           onPause={onPause}
           onResume={onResume}
@@ -275,7 +278,7 @@ describe('LiveView statuses, LiveNotes anchor locking, M hotkey, and Stop', () =
       notes: [],
       elapsedMs: 12_000,
       captionsOpen: false,
-      rooms: [],
+      host: { is: 'Idle' as const },
       update: null,
       initialNotesOpen: true,
       onPause: vi.fn(),

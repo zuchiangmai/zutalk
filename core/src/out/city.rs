@@ -7,11 +7,10 @@
 //! signed, and a file is taken only when a record names it.
 
 use crate::ai::write::wav_header;
-use crate::app::proto::Writing;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape::{self, Pass};
 use crate::id::keys::{self, Me};
-use crate::record::shelf::{FILING, LINE, RECORDING, Recording, SPEAKER, Shelf};
+use crate::record::shelf::{FILING, Recording, Shelf};
 use crate::rt::queue::{self, Full};
 use crate::rt::stats::Counter;
 use crate::rt::supervise::{End, Tree, again};
@@ -27,7 +26,32 @@ use ts_rs::TS;
 use zu::{Blob, Cid, Codec, Held, Path, Query, Record, Value};
 use zutalk_log::{info, warn};
 
-const EVENT: &str = "ev/event"; // a city's events: records of this type meant for it
+/// Record types delivered to a city archive (`DECISIONS.md` #6).
+/// Kept in one table so aligning with archive v0.3 (`tape/*` vs `talk/*`) is a one-table change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveTypes {
+    pub event: &'static str,
+    pub recording: &'static str,
+    pub line: &'static str,
+    pub speaker: &'static str,
+}
+
+/// Current city-archive record types (`DECISIONS.md` #6).
+pub const ARCHIVE_TYPES: ArchiveTypes = ArchiveTypes {
+    event: "ev/event",
+    recording: "talk/recording",
+    line: "talk/line",
+    speaker: "talk/speaker",
+};
+
+/// Progress step emitted while filing a recording to a city archive (`layers.sh`: keeps `out`
+/// independent of `app::proto`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilingStep {
+    pub step: String,
+    pub done: u32,
+    pub of: u32,
+}
 /// Audio goes as WAV files of this many ms each, well under what a host takes as one file.
 const PART: u32 = 5 * 60_000;
 const BATCH: usize = 200; // records given to a host in one request
@@ -113,14 +137,14 @@ pub fn records(
     about["event"] = json!(filing.event);
     let Value::Map(mut head) = value(about)? else { return Err(zu::Error::Json) };
     head.insert("audio".into(), Value::List(audio.iter().map(part).collect()));
-    let mut bodies = vec![(RECORDING, filing.key.clone(), Value::Map(head))];
+    let mut bodies = vec![(ARCHIVE_TYPES.recording, filing.key.clone(), Value::Map(head))];
     for (own, said) in &recording.lines {
         let said = serde_json::to_value(said).map_err(|_| zu::Error::Json)?;
-        bodies.push((LINE, key(own), value(said)?));
+        bodies.push((ARCHIVE_TYPES.line, key(own), value(said)?));
     }
     for (label, name) in &recording.speakers {
         let own = format!("{}.{label}", recording.id);
-        bodies.push((SPEAKER, key(&own), value(json!({ "text": name }))?));
+        bodies.push((ARCHIVE_TYPES.speaker, key(&own), value(json!({ "text": name }))?));
     }
     let mut held = Held::default();
     for (n, (ty, key, body)) in (0..).zip(bodies) {
@@ -156,7 +180,7 @@ pub async fn calendar(http: &Client, address: &str) -> Result<Calendar, End> {
     let origin = origin(address).map_err(End::Fatal)?;
     let did = get(http, &format!("{origin}/.well-known/zu-did")).await?;
     let did = String::from_utf8_lossy(&did).trim().to_owned();
-    let (mut query, mut events) = (Query::across(EVENT, Some(&did)), Vec::new());
+    let (mut query, mut events) = (Query::across(ARCHIVE_TYPES.event, Some(&did)), Vec::new());
     for _ in 0..50 {
         let url = query.url(&origin).map_err(|_| End::Fatal("city.unknown"))?;
         let (held, next) =
@@ -234,7 +258,7 @@ pub async fn file(
     filer: &Filer,
     id: &str,
     filing: Filing,
-    tell: impl Fn(Writing) + Sync,
+    tell: impl Fn(FilingStep) + Sync,
 ) -> &'static str {
     file_inner(tree, filer, id, filing, None, tell).await
 }
@@ -247,7 +271,7 @@ pub(crate) async fn file_job(
     id: &str,
     filing: Filing,
     gate: FileGate<'_>,
-    tell: impl Fn(Writing) + Sync,
+    tell: impl Fn(FilingStep) + Sync,
 ) -> &'static str {
     file_inner(tree, filer, id, filing, Some(gate), tell).await
 }
@@ -258,11 +282,11 @@ async fn file_inner(
     id: &str,
     mut filing: Filing,
     gate: Option<FileGate<'_>>,
-    tell: impl Fn(Writing) + Sync,
+    tell: impl Fn(FilingStep) + Sync,
 ) -> &'static str {
     let (signed, sent) = (OnceCell::new(), AtomicUsize::new(0));
     let step = |step: &str, done: usize, of: usize| {
-        tell(Writing { id: id.into(), step: step.into(), done: done as u32, of: of as u32 })
+        tell(FilingStep { step: step.into(), done: done as u32, of: of as u32 })
     };
     let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
     let (signed, sent, step, wanted, slot_ref) = (&signed, &sent, &step, &filing, &slot);

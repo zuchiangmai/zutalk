@@ -1,4 +1,4 @@
-import type { Open } from '$proto/Open';
+import type { Said } from '$proto/Said';
 import en from '../../lang/en.json';
 import { createCell, type Source } from './source';
 
@@ -78,7 +78,10 @@ export function formatMonth(ym: string, lang = langCell.getSnapshot()): string {
 }
 
 /** A recording as plain text: each line under who said it and when, then the translations in `langs`. */
-export const text = (o: Pick<Open, 'lines' | 'speakers'>, langs: string[]) =>
+export const text = (
+  o: { lines: readonly [string, Said][]; speakers: Record<string, string> },
+  langs: string[],
+) =>
   o.lines
     .map(([, l]) => {
       const who = o.speakers[l.speaker] || (l.speaker && t('speaker', l.speaker));

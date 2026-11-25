@@ -13,7 +13,7 @@ use zutalk_core::app::proto::{Command, Setup as Next};
 use zutalk_core::id::keys;
 use zutalk_core::knowledge::glossary::{self, Term};
 use zutalk_core::live::lane::{self, Setup, Stream};
-use zutalk_core::record::shelf::{SHARE, Share, Shelf};
+use zutalk_core::record::shelf::Shelf;
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const NOW: i64 = 1_800_000_000_000;
@@ -84,9 +84,8 @@ fn a_term_is_one_record_however_it_is_typed_and_goes_when_it_is_taken_out() {
     glossary::put(&shelf, "zuzalu", None, NOW + 2).expect("taken out");
     assert_eq!(glossary::read(&shelf).expect("it reads").len(), 1);
     assert_eq!(glossary::put(&shelf, " ", Some(BTreeMap::new()), NOW), Err("term.empty"));
-    // It is the person's, kept apart: no recording, and no room.
-    let rooms = shelf.kept::<Share>(SHARE).expect("rooms");
-    assert!(shelf.list().expect("a list").is_empty() && rooms.is_empty());
+    // It is the person's, kept apart: no recording.
+    assert!(shelf.list().expect("a list").is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

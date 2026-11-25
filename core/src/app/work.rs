@@ -6,9 +6,7 @@
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{
-    Change, From, LocalShelf, NoteOp, Open, Progress, Quota, Room, Row, Setup, Sound, Writing,
-};
+use crate::app::proto::{Change, From, LocalShelf, NoteOp, Progress, Quota, Setup, Sound, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -20,11 +18,9 @@ use crate::live::frame::Frame;
 use crate::live::lines::Line;
 use crate::out::city::{self, FileGate, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
-use crate::out::room::{self, Write};
+use crate::out::host::{self, HOST_ARM_POLL_MS, HOST_KEEPALIVE_MS, HOST_SLOT_MS, Write};
 use crate::record::notes;
-use crate::record::shelf::{
-    About, FILING, LINE, NOTE, RECORDING, Recording, SHARE, SPEAKER, Share, Shelf, TERM, Words,
-};
+use crate::record::shelf::{About, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, Words};
 use crate::record::takes::{
     RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
 };
@@ -41,17 +37,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 use zutalk_log::{Id, info, warn};
 
 const WHOLE: &str = "stt-async-v6";
-/// A live room is written at most this often (DESIGN.md, rooms). Origin to be traced.
-const SLOT_MS: u64 = 250;
 /// Jobs buffered for the desk worker: a burst of clicks or edits is dozens of jobs; full means
 /// disk is stuck and the person must be told (`P1.md` §3.7).
 pub const DESK_QUEUE_JOBS: usize = 64;
@@ -181,13 +175,12 @@ impl<J: DeskJob> Desk<J> {
     }
 }
 
-/// Lightweight snapshot of bounded small-state fields (`keys`, `left`, `quota`, `rooms`) read on `desk`.
+/// Lightweight snapshot of bounded small-state fields (`keys`, `left`, `quota`) read on `desk`.
 pub(crate) struct Refreshed {
     pub rev: u64,
     pub keys: Vec<(String, From)>,
     pub left: Option<u64>,
     pub quota: Option<Quota>,
-    pub rooms: Option<Vec<Room>>,
 }
 
 /// Unfinished background work surveyed on `desk` (`recover` + `resume`).
@@ -204,7 +197,6 @@ pub(crate) struct SignedOut {
     pub rotation_unsaved: bool,
     pub local_shelf: LocalShelf,
     pub refreshed: Refreshed,
-    pub rooms: Vec<Room>,
     pub survey: Survey,
     pub say: Vec<&'static str>,
 }
@@ -354,7 +346,6 @@ enum Job {
     Refresh {
         rev: u64,
         retain: Option<Option<u32>>,
-        include_rooms: bool,
     },
     Change {
         id: String,
@@ -386,18 +377,6 @@ enum Job {
         exporter: &'static str,
         languages: Vec<String>,
         to: String,
-    },
-    SharePrepare {
-        recording: Option<String>,
-    },
-    PutShare {
-        id: String,
-        share: Option<Share>,
-        reply: oneshot::Sender<Result<(), &'static str>>,
-    },
-    UnsharePrepare {
-        id: String,
-        recording: Option<String>,
     },
     BeginFile {
         id: String,
@@ -441,9 +420,6 @@ impl DeskJob for Job {
             Job::Term { .. } => "term",
             Job::DestroyAudio { .. } => "destroy",
             Job::Export { .. } => "export",
-            Job::SharePrepare { .. } => "share.prepare",
-            Job::PutShare { .. } => "share.put",
-            Job::UnsharePrepare { .. } => "unshare.prepare",
             Job::BeginFile { .. } => "file.begin",
             Job::OwnKey { .. } => "own_key",
             Job::Diagnose { .. } => "diagnose",
@@ -461,29 +437,17 @@ enum DeskOut {
         out: BootOut,
         start_create: bool,
         start_claim: Option<Secret>,
+        recover_host: Option<String>,
     },
     Signed {
         out: SignedOut,
         start_claim: Option<Secret>,
+        recover_host: Option<String>,
     },
     Refreshed(Refreshed),
     ExportWrite {
         to: PathBuf,
         text: String,
-    },
-    ShareNet {
-        ours: Ours,
-        id: String,
-        key: [u8; 32],
-        recording: Option<String>,
-        pages: Vec<Vec<u8>>,
-    },
-    UnshareNet {
-        ours: Ours,
-        id: String,
-        key: [u8; 32],
-        share: Share,
-        rooms: Vec<Room>,
     },
     FileReady {
         id: String,
@@ -525,6 +489,17 @@ impl DeskEnv {
     }
 }
 
+/// In-memory active hosted room session: the 32-byte key lives only here (`Zeroizing`) and is
+/// never written to disk (`PLAN.md` §5.5, `P5.md` §3.3).
+struct ActiveHost {
+    host_gen: u64,
+    room_id: String,
+    ours: Ours,
+    live_flag: Arc<AtomicBool>,
+    live_notify: Arc<Notify>,
+    cancel: CancellationToken,
+}
+
 /// Everything the hub hands off: sequential `desk` jobs and separate supervised tasks on the
 /// `work` subtree.
 pub(crate) struct Work {
@@ -545,7 +520,9 @@ pub(crate) struct Work {
     desk: Desk<Job>,
     bg: Arc<Semaphore>,
     next_seq: Arc<AtomicU64>,
-    slot: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    host_live: Arc<Mutex<Option<ActiveHost>>>,
+    host_busy: Register<bool>,
+    host_ops: Arc<AtomicUsize>,
     jobs_done: Counter,
     jobs_failed: Counter,
 }
@@ -563,6 +540,7 @@ impl Work {
         progress_reg: Register<Progress>,
         frame: Reading<Frame>,
         water: Reading<Water>,
+        host_busy: Register<bool>,
     ) -> Self {
         let stats = tree.stats();
         let jobs_done = stats.counter("jobs.done");
@@ -576,7 +554,8 @@ impl Work {
         let pending_signin: Arc<Mutex<Option<PendingSignIn>>> = Arc::new(Mutex::new(None));
         let confirm_gen = Arc::new(AtomicU64::new(0));
         let keep_hint: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-        let slot: Arc<Mutex<Option<(String, CancellationToken)>>> = Arc::new(Mutex::new(None));
+        let host_live: Arc<Mutex<Option<ActiveHost>>> = Arc::new(Mutex::new(None));
+        let host_ops = Arc::new(AtomicUsize::new(0));
 
         let run_env = Arc::new(DeskEnv {
             config: config.clone(),
@@ -603,9 +582,7 @@ impl Work {
         let deliver_seq = next_seq.clone();
         let deliver_done = jobs_done.clone();
         let deliver_failed = jobs_failed.clone();
-        let deliver_slot = slot.clone();
-        let deliver_frame = frame.clone();
-        let deliver_said = said.clone();
+        let deliver_host_live = host_live.clone();
         let deliver_id = identity.clone();
         let deliver_invite = invite.clone();
         let deliver_signing = signing.clone();
@@ -627,9 +604,7 @@ impl Work {
                 let next_seq = deliver_seq.clone();
                 let jobs_done = deliver_done.clone();
                 let jobs_failed = deliver_failed.clone();
-                let slot = deliver_slot.clone();
-                let frame = deliver_frame.clone();
-                let said = deliver_said.clone();
+                let host_live = deliver_host_live.clone();
                 let identity = deliver_id.clone();
                 let invite = deliver_invite.clone();
                 let signing = deliver_signing.clone();
@@ -648,24 +623,24 @@ impl Work {
                         Ok(DeskOut::RotationSaved) => {
                             let _ = results.send(Msg::RotationSaved).await; // dropped: the hub has ended
                         }
-                        Ok(DeskOut::Booted { out, start_create, start_claim }) => {
-                            let live = out
-                                .signed
-                                .rooms
-                                .iter()
-                                .find(|r| r.recording.is_none())
-                                .map(|r| r.id.clone());
+                        Ok(DeskOut::Booted { out, start_create, start_claim, recover_host }) => {
                             let snap = snapshot(&identity);
-                            sync_slot_inner(
-                                &tree,
-                                &slot,
-                                live,
-                                snap.ours.clone(),
-                                &frame,
-                                &said,
-                                &next_seq,
-                                &jobs_done,
-                            );
+                            if let (Some(ours), Some(stale_id)) = (snap.ours.clone(), recover_host)
+                                && host_live
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .is_none()
+                            {
+                                spawn_host_recover(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    config.data.clone(),
+                                    ours,
+                                    stale_id,
+                                );
+                            }
                             if start_create {
                                 let desk = desk_holder
                                     .lock()
@@ -724,23 +699,24 @@ impl Work {
                             }
                             let _ = results.send(Msg::Booted(out)).await; // dropped: the hub has ended
                         }
-                        Ok(DeskOut::Signed { out, start_claim }) => {
-                            let live = out
-                                .rooms
-                                .iter()
-                                .find(|r| r.recording.is_none())
-                                .map(|r| r.id.clone());
+                        Ok(DeskOut::Signed { out, start_claim, recover_host }) => {
                             let snap = snapshot(&identity);
-                            sync_slot_inner(
-                                &tree,
-                                &slot,
-                                live,
-                                snap.ours.clone(),
-                                &frame,
-                                &said,
-                                &next_seq,
-                                &jobs_done,
-                            );
+                            if let (Some(ours), Some(stale_id)) = (snap.ours.clone(), recover_host)
+                                && host_live
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .is_none()
+                            {
+                                spawn_host_recover(
+                                    &tree,
+                                    &next_seq,
+                                    &jobs_done,
+                                    &jobs_failed,
+                                    config.data.clone(),
+                                    ours,
+                                    stale_id,
+                                );
+                            }
                             if let Some(token) = start_claim {
                                 spawn_claim_net(
                                     &tree,
@@ -781,16 +757,6 @@ impl Work {
                             let _ = results.send(Msg::Signed(Ok(out))).await; // dropped: the hub has ended
                         }
                         Ok(DeskOut::Refreshed(refreshed)) => {
-                            if let Some(ref rooms) = refreshed.rooms {
-                                let live = rooms
-                                    .iter()
-                                    .find(|r| r.recording.is_none())
-                                    .map(|r| r.id.clone());
-                                let ours = snapshot(&identity).ours;
-                                sync_slot_inner(
-                                    &tree, &slot, live, ours, &frame, &said, &next_seq, &jobs_done,
-                                );
-                            }
                             let _ = results.send(Msg::Refreshed(Ok(refreshed))).await; // dropped: the hub has ended
                         }
                         Ok(DeskOut::ExportWrite { to, text }) => {
@@ -803,56 +769,6 @@ impl Work {
                                 to,
                                 text,
                             );
-                        }
-                        Ok(DeskOut::ShareNet { ours, id, key, recording, pages }) => {
-                            let desk =
-                                desk_holder.lock().unwrap_or_else(PoisonError::into_inner).clone();
-                            if let Some(desk) = desk {
-                                spawn_share_net(
-                                    &tree,
-                                    &next_seq,
-                                    &jobs_done,
-                                    &jobs_failed,
-                                    desk,
-                                    results,
-                                    ours,
-                                    id,
-                                    key,
-                                    recording,
-                                    pages,
-                                );
-                            }
-                        }
-                        Ok(DeskOut::UnshareNet { ours, id, key, share, rooms }) => {
-                            let live =
-                                rooms.iter().find(|r| r.recording.is_none()).map(|r| r.id.clone());
-                            sync_slot_inner(
-                                &tree,
-                                &slot,
-                                live,
-                                Some(ours.clone()),
-                                &frame,
-                                &said,
-                                &next_seq,
-                                &jobs_done,
-                            );
-                            let _ = results.send(Msg::Rooms(rooms)).await; // dropped: the hub has ended
-                            let desk =
-                                desk_holder.lock().unwrap_or_else(PoisonError::into_inner).clone();
-                            if let Some(desk) = desk {
-                                spawn_unshare_net(
-                                    &tree,
-                                    &next_seq,
-                                    &jobs_done,
-                                    &jobs_failed,
-                                    desk,
-                                    results,
-                                    ours,
-                                    id,
-                                    key,
-                                    share,
-                                );
-                            }
                         }
                         Ok(DeskOut::FileReady { id, filing }) => {
                             let _ = results.send(Msg::FilingReady(id, filing)).await; // dropped: the hub has ended
@@ -907,7 +823,9 @@ impl Work {
             desk,
             bg,
             next_seq,
-            slot,
+            host_live,
+            host_busy,
+            host_ops,
             jobs_done,
             jobs_failed,
         }
@@ -1217,9 +1135,8 @@ impl Work {
         &self,
         rev: u64,
         retain: Option<Option<u32>>,
-        include_rooms: bool,
     ) -> Result<(), &'static str> {
-        self.desk.offer(Job::Refresh { rev, retain, include_rooms }).map(|_| ())
+        self.desk.offer(Job::Refresh { rev, retain }).map(|_| ())
     }
 
     pub(crate) fn change(&self, id: String, change: Change) -> Result<(), &'static str> {
@@ -1268,16 +1185,181 @@ impl Work {
         self.desk.offer(Job::Export { id, exporter, languages, to }).map(|_| ())
     }
 
-    pub(crate) fn share(&self, recording: Option<String>) -> Result<(), &'static str> {
-        self.desk.offer(Job::SharePrepare { recording }).map(|_| ())
+    /// Creates an ephemeral live room with a fresh random 32-byte key held only in RAM, writes
+    /// only the room id to `<data>/host.lock`, calls `make`, and starts `host.slot` on success.
+    pub(crate) fn host_make(&self, host_gen: u64) -> Result<(), &'static str> {
+        let ours = snapshot(&self.identity).ours.ok_or("sign_in.first")?;
+        let room_id = keys::fresh().map_err(code)?;
+        let key = Zeroizing::new(keys::random::<32>().map_err(code)?);
+        let cancel = CancellationToken::new();
+        let live_flag = Arc::new(AtomicBool::new(false));
+        let live_notify = Arc::new(Notify::new());
+        let active = ActiveHost {
+            host_gen,
+            room_id: room_id.clone(),
+            ours: ours.clone(),
+            live_flag: live_flag.clone(),
+            live_notify: live_notify.clone(),
+            cancel: cancel.clone(),
+        };
+        {
+            let mut guard = self.host_live.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(prev) = guard.replace(active) {
+                prev.cancel.cancel();
+            }
+        }
+        self.host_ops.fetch_add(1, Ordering::AcqRel);
+        self.host_busy.set(true);
+
+        let tree = self.tree.clone();
+        let data = self.config.data.clone();
+        let frame = self.frame.clone();
+        let voice = self.said.clone();
+        let results = self.results.clone();
+        let host_live = self.host_live.clone();
+        let host_busy = self.host_busy.clone();
+        let host_ops = self.host_ops.clone();
+        let next_seq = self.next_seq.clone();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        let seq = self.alloc_seq();
+
+        self.tree.spawn("net.host_make", async move {
+            info!("job.start", kind = "host.make", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let lock_data = data.clone();
+            let lock_id = room_id.clone();
+            let lock_res =
+                tree.blocking("host.lock", move || host::write_lock(&lock_data, &lock_id)).await;
+            let locked = match lock_res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(c)) => Err(c),
+                Err(_) => Err("disk"),
+            };
+            if let Err(c) = locked {
+                let ms = started.elapsed().as_millis() as u64;
+                warn!("job.done", kind = "host.make", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
+                clear_active_if_gen(&host_live, host_gen);
+                finish_host_op(&host_ops, &host_live, &host_busy);
+                let _ = results.send(Msg::HostFailed { host_gen, code: c }).await; // dropped: the hub has ended
+                return;
+            }
+
+            let made = host::write(&ours, &room_id, None, Write::Make).await;
+            let ms = started.elapsed().as_millis() as u64;
+
+            if cancel.is_cancelled() {
+                if made.is_ok() {
+                    let gone = host::write(&ours, &room_id, None, Write::Gone).await;
+                    if gone.is_ok() || matches!(gone, Err(End::Fatal("room.gone"))) {
+                        let clear_data = data.clone();
+                        let res =
+                            tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await;
+                        let _ = res; // dropped: best-effort lock cleanup after cancel
+                    }
+                } else {
+                    let clear_data = data.clone();
+                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: best-effort lock cleanup after failed make
+                }
+                info!("job.done", kind = "host.make", job = seq, code = "cancelled", ms = ms);
+                clear_active_if_gen(&host_live, host_gen);
+                finish_host_op(&host_ops, &host_live, &host_busy);
+                return;
+            }
+
+            match made {
+                Ok(_) => {
+                    let link = host::link(&ours.server, &room_id, &key);
+                    spawn_host_slot(
+                        &tree,
+                        &next_seq,
+                        &jobs_done,
+                        host_gen,
+                        ours,
+                        room_id,
+                        key,
+                        live_flag,
+                        live_notify,
+                        cancel,
+                        frame,
+                        voice,
+                        results.clone(),
+                    );
+                    info!("job.done", kind = "host.make", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                    finish_host_op(&host_ops, &host_live, &host_busy);
+                    let _ = results.send(Msg::HostReady { host_gen, link }).await; // dropped: the hub has ended
+                }
+                Err(end) => {
+                    let c = code(end);
+                    let clear_data = data.clone();
+                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: best-effort lock cleanup after failed make
+                    warn!("job.done", kind = "host.make", job = seq, code = c, ms = ms);
+                    jobs_failed.add(1);
+                    clear_active_if_gen(&host_live, host_gen);
+                    finish_host_op(&host_ops, &host_live, &host_busy);
+                    let _ = results.send(Msg::HostFailed { host_gen, code: c }).await; // dropped: the hub has ended
+                }
+            }
+        });
+        Ok(())
     }
 
-    pub(crate) fn unshare(
-        &self,
-        id: String,
-        recording: Option<String>,
-    ) -> Result<(), &'static str> {
-        self.desk.offer(Job::UnsharePrepare { id, recording }).map(|_| ())
+    /// Switches the active hosted room between armed polling and live caption publishing.
+    pub(crate) fn host_live(&self, live: bool) {
+        let guard = self.host_live.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(active) = guard.as_ref() {
+            active.live_flag.store(live, Ordering::Release);
+            if live {
+                active.live_notify.notify_one();
+            }
+        }
+    }
+
+    /// Cancels `host.slot`, sends `gone` using the room's original `Ours` snapshot, and clears
+    /// `host.lock` once confirmed. Returns `true` if a room teardown task was started.
+    pub(crate) fn host_stop_room(&self) -> bool {
+        let active = self.host_live.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let Some(active) = active else {
+            return false;
+        };
+        active.cancel.cancel();
+        self.host_ops.fetch_add(1, Ordering::AcqRel);
+        self.host_busy.set(true);
+
+        let tree = self.tree.clone();
+        let data = self.config.data.clone();
+        let results = self.results.clone();
+        let host_live = self.host_live.clone();
+        let host_busy = self.host_busy.clone();
+        let host_ops = self.host_ops.clone();
+        let jobs_done = self.jobs_done.clone();
+        let jobs_failed = self.jobs_failed.clone();
+        let seq = self.alloc_seq();
+
+        self.tree.spawn("net.host_gone", async move {
+            info!("job.start", kind = "host.gone", job = seq, waited_ms = 0u64);
+            let started = std::time::Instant::now();
+            let gone = host::write(&active.ours, &active.room_id, None, Write::Gone).await;
+            let ms = started.elapsed().as_millis() as u64;
+            match gone {
+                Ok(_) | Err(End::Fatal("room.gone")) => {
+                    let clear_data = data.clone();
+                    let _ = tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: lock cleanup after confirmed gone
+                    info!("job.done", kind = "host.gone", job = seq, code = "ok", ms = ms);
+                    jobs_done.add(1);
+                }
+                Err(end) => {
+                    let c = code(end);
+                    warn!("job.done", kind = "host.gone", job = seq, code = c, ms = ms);
+                    jobs_failed.add(1);
+                }
+            }
+            finish_host_op(&host_ops, &host_live, &host_busy);
+            let _ = results.send(Msg::HostStopped).await; // dropped: the hub has ended
+        });
+        true
     }
 
     pub(crate) fn begin_file(
@@ -1306,21 +1388,6 @@ impl Work {
         captions: bool,
     ) -> Result<(), &'static str> {
         self.desk.offer(Job::Diagnose { spoken, shown, sound, captions }).map(|_| ())
-    }
-
-    /// Starts a live room's slot task or stops the previous one on the `work` subtree.
-    pub(crate) fn sync_slot(&self, live: Option<String>) {
-        let ours = snapshot(&self.identity).ours;
-        sync_slot_inner(
-            &self.tree,
-            &self.slot,
-            live,
-            ours,
-            &self.frame,
-            &self.said,
-            &self.next_seq,
-            &self.jobs_done,
-        );
     }
 
     /// Starts a recording task on the root tree with `Work`'s current shelf and key chain,
@@ -1519,7 +1586,9 @@ impl Work {
         self.tree.spawn("job.file", async move {
             set_file_progress(&progress_reg, Some(writing(&id, "filing")), None);
             let gate = FileGate { bg: &bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
-            let said = city::file_job(&tree, &filer, &id, filing, gate, |w| {
+            let file_id = id.clone();
+            let said = city::file_job(&tree, &filer, &id, filing, gate, |s| {
+                let w = Writing { id: file_id.clone(), step: s.step, done: s.done, of: s.of };
                 set_file_progress(&progress_reg, Some(w), None);
             })
             .await;
@@ -1696,7 +1765,8 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             } else {
                 None
             };
-            Ok(DeskOut::Signed { out, start_claim })
+            let recover_host = if has_person { host::read_lock(&config.data) } else { None };
+            Ok(DeskOut::Signed { out, start_claim, recover_host })
         }
         Job::ConfirmSignIn { auth_gen, keep, busy } => {
             env.confirm_gen.store(auth_gen, Ordering::Release);
@@ -1709,14 +1779,15 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             let (me, handle) = pending.commit().map_err(code)?;
             let out = run_sign(env, Who::Person(me), "sign_in", false, keep, &busy, Some(handle))?;
             let start_claim = env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            Ok(DeskOut::Signed { out, start_claim })
+            let recover_host = host::read_lock(&config.data);
+            Ok(DeskOut::Signed { out, start_claim, recover_host })
         }
         Job::SignOut { keep, busy } => {
             cancel_signing(&env.signing, &env.pending_signin);
             keys::set("identity", None).map_err(code)?;
             let local = keys::local().map(|(me, _)| me);
             let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
-            Ok(DeskOut::Signed { out, start_claim: None })
+            Ok(DeskOut::Signed { out, start_claim: None, recover_host: None })
         }
         Job::DiscardLocal => {
             let person_did = {
@@ -1796,9 +1867,9 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
             }
             Ok(DeskOut::RotationSaved)
         }
-        Job::Refresh { rev, retain, include_rooms } => {
+        Job::Refresh { rev, retain } => {
             let snap = snapshot(identity);
-            run_refresh(env, &snap, rev, retain, include_rooms).map(DeskOut::Refreshed)
+            run_refresh(env, &snap, rev, retain).map(DeskOut::Refreshed)
         }
         Job::Change { id, change } => {
             let shelf = snapshot(identity).shelf?;
@@ -1937,36 +2008,6 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 to.set_extension(exporter.ext);
             }
             Ok(DeskOut::ExportWrite { to, text })
-        }
-        Job::SharePrepare { recording } => {
-            let snap = snapshot(identity);
-            let ours = snap.ours.ok_or("sign_in.first")?;
-            let shelf = snap.shelf?;
-            let opened = recording.as_deref().map(|id| shelf.read(id)).transpose().map_err(fail)?;
-            let opened = opened.map(|read| read.ok_or("recording.gone")).transpose()?;
-            let tapes = config.tapes();
-            let pages = opened.map(|rec| room::pages(&open(rec, &tapes))).transpose();
-            let pages = pages.map_err(code)?.unwrap_or_default();
-            let id = keys::fresh().map_err(code)?;
-            let key = keys::derive("room", &id).map_err(code)?;
-            Ok(DeskOut::ShareNet { ours, id, key, recording, pages })
-        }
-        Job::PutShare { id, share, reply } => {
-            let res = snapshot(identity)
-                .shelf
-                .and_then(|shelf| shelf.put("", SHARE, &[(id, share)], now()).map_err(fail));
-            let _ = reply.send(res); // dropped: net task was cancelled
-            res.map(|()| DeskOut::Silent)
-        }
-        Job::UnsharePrepare { id, recording } => {
-            let snap = snapshot(identity);
-            let ours = snap.ours.ok_or("sign_in.first")?;
-            let shelf = snap.shelf?;
-            let share = Share { recording };
-            let key = keys::derive("room", &id).map_err(code)?;
-            shelf.put::<Share>("", SHARE, &[(id.clone(), None)], now()).map_err(fail)?;
-            let rooms = read_rooms(config, Some(&shelf))?;
-            Ok(DeskOut::UnshareNet { ours, id, key, share, rooms })
         }
         Job::BeginFile { id, event, audio } => {
             let calendar = env.views.calendar().ok_or("city.none")?;
@@ -2386,7 +2427,8 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
     boot_say.extend(signed.say);
     signed.say = boot_say;
 
-    Ok(DeskOut::Booted { out: BootOut { setup, signed }, start_create, start_claim })
+    let recover_host = if has_person { host::read_lock(&env.config.data) } else { None };
+    Ok(DeskOut::Booted { out: BootOut { setup, signed }, start_create, start_claim, recover_host })
 }
 
 fn run_sign(
@@ -2490,7 +2532,7 @@ fn run_sign(
         snap.shelf.as_ref().ok().and_then(|s| glossary::read(s).ok()).unwrap_or_default();
     *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = cached_terms;
 
-    let refreshed = match run_refresh(env, &snap, 0, Some(keep), true) {
+    let refreshed = match run_refresh(env, &snap, 0, Some(keep)) {
         Ok(refreshed) => refreshed,
         Err(c) => {
             say.push(c);
@@ -2499,7 +2541,6 @@ fn run_sign(
                 keys: Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect(),
                 left: snap.keys.left(),
                 quota: snap.keys.quota(),
-                rooms: Some(Vec::new()),
             }
         }
     };
@@ -2524,7 +2565,6 @@ fn run_sign(
     }
     env.views.invalidate_all();
 
-    let rooms = refreshed.rooms.clone().unwrap_or_default();
     let survey = match run_survey(config, &snap, busy, true) {
         Ok(survey) => survey,
         Err(c) => {
@@ -2533,7 +2573,7 @@ fn run_sign(
         }
     };
 
-    Ok(SignedOut { me, handle, rotation_unsaved, local_shelf, refreshed, rooms, survey, say })
+    Ok(SignedOut { me, handle, rotation_unsaved, local_shelf, refreshed, survey, say })
 }
 
 fn run_refresh(
@@ -2541,7 +2581,6 @@ fn run_refresh(
     snap: &Snapshot,
     rev: u64,
     retain: Option<Option<u32>>,
-    include_rooms: bool,
 ) -> Result<Refreshed, &'static str> {
     let config = &env.config;
     let keys: Vec<(String, From)> =
@@ -2549,13 +2588,7 @@ fn run_refresh(
     let left = snap.keys.left();
     let quota = snap.keys.quota();
     let Ok(shelf) = &snap.shelf else {
-        return Ok(Refreshed {
-            rev,
-            keys,
-            left,
-            quota,
-            rooms: include_rooms.then_some(Vec::new()),
-        });
+        return Ok(Refreshed { rev, keys, left, quota });
     };
     if let Some(keep) = retain {
         let tapes = config.tapes();
@@ -2581,18 +2614,7 @@ fn run_refresh(
             env.views.invalidate(ViewKind::Recording, None);
         }
     }
-    let rooms = if include_rooms { Some(read_rooms(config, Some(shelf))?) } else { None };
-    Ok(Refreshed { rev, keys, left, quota, rooms })
-}
-
-fn read_rooms(config: &Config, shelf: Option<&Shelf>) -> Result<Vec<Room>, &'static str> {
-    let shares = shelf.map(|shelf| shelf.kept(SHARE)).transpose().map_err(fail)?;
-    let server = &config.server;
-    let to_room = |(id, share): (String, Share)| -> Result<Room, &'static str> {
-        let link = room::link(server, &id, &keys::derive("room", &id).map_err(code)?);
-        Ok(Room { id, recording: share.recording, link })
-    };
-    shares.into_iter().flatten().map(to_room).collect()
+    Ok(Refreshed { rev, keys, left, quota })
 }
 
 fn run_survey(
@@ -2606,26 +2628,25 @@ fn run_survey(
     };
     let tapes = config.tapes();
     let has_key = snap.keys.from(Service::Soniox) != From::Nowhere;
-    let rows: Vec<Row> = shelf.list().map_err(fail)?.iter().map(|r| row(r, &tapes)).collect();
+    let recordings = shelf.list().map_err(fail)?;
     let (mut writes, mut skipped, mut why) = (Vec::new(), 0usize, "");
-    for r in &rows {
+    for r in &recordings {
         if busy.iter().any(|id| id == &r.id) {
             continue;
         }
+        let draft = r.about.take == 0;
+        let audio = tape::kept(&tapes.join(&r.id));
         // Skip drafts that stopped with a persistent fatal refinement error until the user
         // supplies a new key or retries manually (`P2.md` §3.3.2).
-        if r.draft
-            && r.audio
+        if draft
+            && audio
             && write::Journal::load(&tapes.join(&r.id)).is_ok_and(|j| j.failed.is_some())
         {
             continue;
         }
         // Nothing is written again without its audio, nor for one moved from 0.8: it keeps the
         // transcript it had there, or the lack of one, and its sound is not sent anywhere.
-        let moved = r.draft
-            && r.audio
-            && shelf.about(&r.id).ok().flatten().is_none_or(|rec| rec.about.moved);
-        match write::owed(r.draft, r.audio, moved, has_key) {
+        match write::owed(draft, audio, r.about.moved, has_key) {
             write::Owed::Yes => writes.push(r.id.clone()),
             write::Owed::Waits(reason) => {
                 skipped += 1;
@@ -2888,164 +2909,183 @@ fn spawn_export_write(
     });
 }
 
+fn clear_active_if_gen(host_live: &Mutex<Option<ActiveHost>>, host_gen: u64) {
+    let mut guard = host_live.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.as_ref().is_some_and(|a| a.host_gen == host_gen) {
+        *guard = None;
+    }
+}
+
+fn finish_host_op(
+    host_ops: &AtomicUsize,
+    host_live: &Mutex<Option<ActiveHost>>,
+    host_busy: &Register<bool>,
+) {
+    if host_ops.fetch_sub(1, Ordering::AcqRel) == 1
+        && host_live.lock().unwrap_or_else(PoisonError::into_inner).is_none()
+    {
+        host_busy.set(false);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn spawn_share_net(
+fn spawn_host_recover(
     tree: &Tree,
     next_seq: &Arc<AtomicU64>,
     jobs_done: &Counter,
     jobs_failed: &Counter,
-    desk: Desk<Job>,
-    results: Tx<Msg>,
+    data: PathBuf,
     ours: Ours,
-    id: String,
-    key: [u8; 32],
-    recording: Option<String>,
-    pages: Vec<Vec<u8>>,
+    room_id: String,
+) {
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let run_tree = tree.clone();
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("net.host_recover", async move {
+        info!("job.start", kind = "host.recover", job = seq, waited_ms = 0u64);
+        let started = std::time::Instant::now();
+        let outcome = host::write(&ours, &room_id, None, Write::Gone).await;
+        let ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok(_) => {
+                let clear_data = data.clone();
+                let _ = run_tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: lock cleared after crash recovery
+                info!("host.recover", code = "ok");
+                info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+            }
+            Err(End::Fatal("room.gone")) => {
+                let clear_data = data.clone();
+                let _ = run_tree.blocking("host.lock", move || host::clear_lock(&clear_data)).await; // dropped: room already gone on server
+                info!("host.recover", code = "gone");
+                info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+            }
+            Err(end) => {
+                let c = code(end);
+                warn!("host.recover", code = c);
+                warn!("job.done", kind = "host.recover", job = seq, code = c, ms = ms);
+                jobs_failed.add(1);
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_host_slot(
+    tree: &Tree,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    host_gen: u64,
+    ours: Ours,
+    room_id: String,
+    key: Zeroizing<[u8; 32]>,
+    live_flag: Arc<AtomicBool>,
+    live_notify: Arc<Notify>,
+    cancel: CancellationToken,
+    frame: Reading<Frame>,
+    voice: Voice,
+    results: Tx<Msg>,
 ) {
     let seq = next_seq.fetch_add(1, Ordering::Relaxed);
     let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.share", async move {
-        info!("job.start", kind = "share", job = seq, waited_ms = 0u64);
+    tree.spawn("host.slot", async move {
+        info!("job.start", kind = "host.slot", job = seq, waited_ms = 0u64);
         let started = std::time::Instant::now();
-        let shared: Result<(), &'static str> = async {
-            room::write(&ours, &id, &key, Write::Make).await.map_err(code)?;
-            let (tx, rx) = oneshot::channel();
-            desk.send(Job::PutShare {
-                id: id.clone(),
-                share: Some(Share { recording }),
-                reply: tx,
-            })
-            .await?;
-            rx.await.map_err(|_| "shelf")??;
-            for page in pages {
-                room::write(&ours, &id, &key, Write::Log(&page)).await.map_err(code)?;
-            }
-            Ok(())
-        }
+        host_slot_loop(
+            host_gen,
+            ours,
+            room_id,
+            key,
+            live_flag,
+            live_notify,
+            cancel,
+            frame,
+            voice,
+            results,
+        )
         .await;
         let ms = started.elapsed().as_millis() as u64;
-        match shared {
-            Ok(()) => {
-                info!("job.done", kind = "share", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Err(c) => {
-                warn!("job.done", kind = "share", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-            }
-        }
-        let _ = results.send(Msg::Shared(shared)).await; // dropped: the hub has ended
+        info!("job.done", kind = "host.slot", job = seq, code = "ok", ms = ms);
+        jobs_done.add(1);
     });
 }
 
+/// Publishes the live room slot: polls waiting viewers every `HOST_ARM_POLL_MS` while armed,
+/// then pushes sealed `Frame.columns` at most every `HOST_SLOT_MS` while recording with
+/// `HOST_KEEPALIVE_MS` keepalives during silence or pause (`P5.md` §3.3).
 #[allow(clippy::too_many_arguments)]
-fn spawn_unshare_net(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    desk: Desk<Job>,
-    results: Tx<Msg>,
+async fn host_slot_loop(
+    host_gen: u64,
     ours: Ours,
-    id: String,
-    key: [u8; 32],
-    share: Share,
+    room_id: String,
+    key: Zeroizing<[u8; 32]>,
+    live_flag: Arc<AtomicBool>,
+    live_notify: Arc<Notify>,
+    cancel: CancellationToken,
+    mut live: Reading<Frame>,
+    voice: Voice,
+    results: Tx<Msg>,
 ) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.unshare", async move {
-        info!("job.start", kind = "unshare", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let gone = match room::write(&ours, &id, &key, Write::Gone).await {
-            Ok(()) | Err(End::Fatal("room.gone")) => Ok(()),
-            Err(end) => {
-                let (tx, rx) = oneshot::channel();
-                let sent = desk.send(Job::PutShare { id, share: Some(share), reply: tx }).await;
-                let back = match sent {
-                    Ok(_) => rx.await.map_err(|_| "shelf").and_then(|r| r),
-                    Err(c) => Err(c),
-                };
-                back.and(Err(code(end)))
-            }
-        };
-        let ms = started.elapsed().as_millis() as u64;
-        match gone {
-            Ok(()) => {
-                info!("job.done", kind = "unshare", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Err(c) => {
-                warn!("job.done", kind = "unshare", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
+    let mut said: Option<End> = None;
+
+    // Phase 1: Armed — poll viewer count & keep room alive under the 120 s server TTL until
+    // recording begins or the room is cancelled.
+    while !live_flag.load(Ordering::Acquire) {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = live_notify.notified() => break,
+            () = tokio::time::sleep(Duration::from_millis(HOST_ARM_POLL_MS)) => {
+                match host::write(&ours, &room_id, Some(&key), Write::Slot(None)).await {
+                    Ok(viewers) => {
+                        said = None;
+                        let _ = results.send(Msg::HostViewers { host_gen, viewers }).await; // dropped: the hub has ended
+                    }
+                    Err(end) => {
+                        if said != Some(end) {
+                            voice.say(code(end));
+                            said = Some(end);
+                        }
+                    }
+                }
             }
         }
-        let _ = results.send(Msg::Shared(gone)).await; // dropped: the hub has ended
-    });
-}
+    }
 
-#[allow(clippy::too_many_arguments)]
-fn sync_slot_inner(
-    tree: &Tree,
-    slot_cell: &Mutex<Option<(String, CancellationToken)>>,
-    live: Option<String>,
-    ours: Option<Ours>,
-    frame: &Reading<Frame>,
-    voice: &Voice,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-) {
-    let mut guard = slot_cell.lock().unwrap_or_else(PoisonError::into_inner);
-    if guard.as_ref().map(|(id, _)| id) == live.as_ref() {
-        return;
-    }
-    if let Some((_, old_cancel)) = guard.take() {
-        old_cancel.cancel();
-    }
-    if let (Some(id), Some(ours)) = (live, ours) {
-        let cancel = CancellationToken::new();
-        let run_cancel = cancel.clone();
-        let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-        let live_rx = frame.clone();
-        let voice = voice.clone();
-        let jobs_done = jobs_done.clone();
-        let slot_id = id.clone();
-        tree.spawn("slot", async move {
-            info!("job.start", kind = "slot", job = seq, waited_ms = 0u64);
-            let started = std::time::Instant::now();
-            tokio::select! {
-                () = run_cancel.cancelled() => {}
-                () = slot_loop(ours, slot_id, live_rx, voice) => {}
-            }
-            let ms = started.elapsed().as_millis() as u64;
-            info!("job.done", kind = "slot", job = seq, code = "ok", ms = ms);
-            jobs_done.add(1);
-        });
-        *guard = Some((id, cancel));
-    }
-}
-
-/// Keeps a live room's slot showing what the captions show: the latest, at most every
-/// `SLOT_MS`, and nothing between recordings. Its trouble is said once, when it changes.
-async fn slot_loop(ours: Ours, id: String, mut live: Reading<Frame>, voice: Voice) {
-    let key = match keys::derive("room", &id) {
-        Ok(key) => key,
-        Err(end) => return voice.say(code(end)),
-    };
-    let mut said = None;
+    // Phase 2: Live — push sealed caption columns at most every HOST_SLOT_MS, keeping the room
+    // alive during silence/pause every HOST_KEEPALIVE_MS.
     let (_, mut current) = live.now();
     loop {
+        if cancel.is_cancelled() {
+            return;
+        }
         let bytes =
             serde_json::to_vec(&current.columns).ok().filter(|_| !current.columns.is_empty());
-        let wrote = room::write(&ours, &id, &key, Write::Slot(bytes.as_deref())).await.err();
-        if wrote != said {
-            wrote.into_iter().for_each(|end| voice.say(code(end)));
-            said = wrote;
+        match host::write(&ours, &room_id, Some(&key), Write::Slot(bytes.as_deref())).await {
+            Ok(viewers) => {
+                said = None;
+                let _ = results.send(Msg::HostViewers { host_gen, viewers }).await; // dropped: the hub has ended
+            }
+            Err(end) => {
+                if said != Some(end) {
+                    voice.say(code(end));
+                    said = Some(end);
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(SLOT_MS)).await;
-        let Some((_, next)) = live.next().await else { break };
-        current = next;
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_millis(HOST_SLOT_MS)) => {}
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            next = live.next() => {
+                let Some((_, next_frame)) = next else { return };
+                current = next_frame;
+            }
+            () = tokio::time::sleep(Duration::from_millis(HOST_KEEPALIVE_MS)) => {}
+        }
     }
 }
 
@@ -3352,17 +3392,6 @@ fn now() -> i64 {
 
 fn writing(id: &str, step: &str) -> Writing {
     Writing { id: id.into(), step: step.into(), done: 0, of: 0 }
-}
-
-fn row(recording: &Recording, tapes: &Path) -> Row {
-    let About { started, length_ms, title, preview, spoken, take, .. } = recording.about.clone();
-    let (id, audio) = (recording.id.clone(), tape::kept(&tapes.join(&recording.id)));
-    Row { id, started, length_ms, title, preview, spoken, draft: take == 0, audio }
-}
-
-fn open(recording: Recording, tapes: &Path) -> Open {
-    let (row, lines) = (row(&recording, tapes), recording.lines);
-    Open { row, lines, speakers: recording.speakers, note: recording.note, filed: None }
 }
 
 /// One change a person makes: one more record at the path it changes.

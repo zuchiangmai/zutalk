@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "Werden zuerst verwendet, wenn gesetzt",
  "settings.local_adopted": "{0} lokale Aufnahmen wurden in deine Identität übernommen. Die lokale Sicherung bleibt zum Rückgängigmachen erhalten.",
  "settings.local_discard": "Lokale Sicherung entfernen",
- "settings.local_discard_confirm": "Entfernen bestätigen"
+ "settings.local_discard_confirm": "Entfernen bestätigen",
+ "code.host.stopped": "Übertragung an das Publikum beendet",
+ "code.host.busy": "Vorheriger Live-Raum wird noch geschlossen",
+ "code.host.cancelled": "Moderation abgebrochen"
 }

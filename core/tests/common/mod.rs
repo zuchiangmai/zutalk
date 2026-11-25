@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use wiremock::MockServer;
 use zu::{Cid, Codec, Doc, SecretKey, Value};
-use zutalk_core::out::room;
+use zutalk_core::out::host;
 use zutalk_server::{BoxFuture, Config, Directory, Invites, Minted, Refusal, Server, Upstream};
 
 /// `did:zu:made-up-n` has the key `[n; 32]`; any other DID has the key `[5; 32]`.
@@ -124,7 +124,7 @@ impl Viewer {
                     continue;
                 }
                 let frame = (data != "-").then(|| BASE64_STANDARD.decode(data).unwrap());
-                let plain = frame.map(|frame| room::open(&self.key, &frame)).transpose();
+                let plain = frame.map(|frame| host::open(&self.key, &frame)).transpose();
                 return Some((event, plain.map_err(drop)));
             }
             let chunk = tokio::time::timeout(Duration::from_secs(10), self.answer.chunk());

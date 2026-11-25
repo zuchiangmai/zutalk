@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "Used first when set",
  "settings.local_adopted": "{0} local recordings were copied to your identity. The local backup is kept in case you need to undo.",
  "settings.local_discard": "Remove local backup",
- "settings.local_discard_confirm": "Confirm remove backup"
+ "settings.local_discard_confirm": "Confirm remove backup",
+ "code.host.stopped": "Stopped sending captions to the audience",
+ "code.host.busy": "Finishing the previous live room",
+ "code.host.cancelled": "Hosting cancelled"
 }

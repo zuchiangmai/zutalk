@@ -5,7 +5,6 @@ import type { Column } from '$proto/Column';
 import type { Command } from '$proto/Command';
 import type { Event } from '$proto/Event';
 import type { Frame } from '$proto/Frame';
-import type { Open } from '$proto/Open';
 import { EMPTY } from '../dev/mock';
 import { type Bus, resetChannel, startBus } from '../src/bus/channel';
 import { ui } from '../src/bus/words';
@@ -156,10 +155,10 @@ describe('CaptionsWindow zero-query isolation', () => {
 });
 
 describe('ViewerView', () => {
-  it('filters multi-language columns to a single language and renders room.gone status', () => {
+  it('filters multi-language columns to a single language and renders room.gone ended screen', () => {
     const columns = makeColumns(false);
     const { container, rerender } = render(
-      <ViewerView live={columns} open={null} endCode={null} theme="dark" />,
+      <ViewerView live={columns} endCode={null} theme="dark" />,
     );
 
     expect(container.querySelectorAll('.cap-col')).toHaveLength(3);
@@ -169,48 +168,10 @@ describe('ViewerView', () => {
     expect(container.querySelectorAll('.cap-col')).toHaveLength(1);
     expect(screen.getByText('city in memory')).toBeTruthy();
 
-    // Switch to ended room state (room.gone)
-    rerender(<ViewerView live={[]} open={null} endCode="room.gone" theme="dark" />);
+    // Switch to ended room state (room.gone): immediately hides live text and shows ended copy
+    rerender(<ViewerView live={[]} endCode="room.gone" theme="dark" />);
     const statusEl = screen.getByRole('status');
     expect(statusEl.textContent).toContain('Captions ended');
     expect(statusEl.textContent).toContain('This link has ended');
-  });
-
-  it('renders shared recording log when open payload arrives', () => {
-    const openRec: Open = {
-      row: {
-        id: 'shared-1',
-        started: 1_760_000_000_000,
-        length_ms: 120_000,
-        title: 'Shared talk',
-        preview: 'Hello everyone',
-        spoken: ['en'],
-        draft: false,
-        audio: false,
-      },
-      speakers: { '1': 'Speaker A' },
-      lines: [
-        [
-          'k0',
-          {
-            t0: 0,
-            t1: 3_000,
-            speaker: '1',
-            language: 'en',
-            text: 'Hello everyone',
-            translations: { zh: '大家好' },
-            via: {},
-            incomplete: false,
-          },
-        ],
-      ],
-      note: '',
-      filed: null,
-    };
-
-    render(<ViewerView live={[]} open={openRec} endCode={null} theme="light" />);
-    expect(screen.getByText('Shared talk')).toBeTruthy();
-    expect(screen.getByText('Hello everyone')).toBeTruthy();
-    expect(screen.getByText('大家好')).toBeTruthy();
   });
 });

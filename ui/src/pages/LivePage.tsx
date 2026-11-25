@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { Frame } from '$proto/Frame';
+import type { HostState } from '$proto/HostState';
 import type { Level } from '$proto/Level';
 import type { Note } from '$proto/Note';
-import type { Room } from '$proto/Room';
 import type { Session } from '$proto/Session';
 import {
   clock,
@@ -73,7 +73,7 @@ export type LiveViewProps = {
   notes: readonly Note[];
   elapsedMs: number;
   captionsOpen: boolean;
-  rooms: readonly Room[];
+  host: HostState;
   update: string | null;
   initialNotesOpen?: boolean;
   onPause: () => void;
@@ -94,7 +94,7 @@ export function LiveView({
   notes,
   elapsedMs,
   captionsOpen,
-  rooms,
+  host,
   update,
   initialNotesOpen = false,
   onPause,
@@ -159,7 +159,7 @@ export function LiveView({
 
   return (
     <div className={`main${paused ? ' paused' : ''}`} style={{ flex: 1 }}>
-      <TopBar rooms={rooms} update={update} recording onUpdate={onUpdate}>
+      <TopBar host={host} update={update} recording onUpdate={onUpdate}>
         <Pill
           quiet={!notesOpen}
           active={notesOpen}
@@ -329,7 +329,7 @@ export function LivePage() {
       notes={recQuery.data?.notes ?? []}
       elapsedMs={elapsedMs}
       captionsOpen={state?.captions ?? false}
-      rooms={state?.rooms ?? []}
+      host={state?.host ?? { is: 'Idle' }}
       update={state?.update ?? null}
       onPause={() => void send({ do: 'Pause' })}
       onResume={() => void send({ do: 'Resume' })}

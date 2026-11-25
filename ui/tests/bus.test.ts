@@ -95,13 +95,27 @@ describe('bus channel and state semantics', () => {
     expect(frameSource.getSnapshot()?.columns).toBe(fifth);
 
     // Session's sequence is independent of Frame's.
-    const session: Session = { id: 'rec-4', started: 1_760_000_000_000, status: { is: 'Recording' } };
+    const session: Session = {
+      id: 'rec-4',
+      started: 1_760_000_000_000,
+      status: { is: 'Recording' },
+      outbound: false,
+      viewers: 0,
+      event_title: null,
+    };
     take({ kind: 'Signal', is: { seq: 4, signal: { of: 'Session', is: session } } });
     expect(sessionSource.getSnapshot()).toBe(session);
   });
 
   it('keeps Session, Progress, and Stats untouched by State replacement', () => {
-    const session: Session = { id: 'rec-5', started: 1_760_000_005_000, status: { is: 'Paused' } };
+    const session: Session = {
+      id: 'rec-5',
+      started: 1_760_000_005_000,
+      status: { is: 'Paused' },
+      outbound: false,
+      viewers: 0,
+      event_title: null,
+    };
     take({ kind: 'Signal', is: { seq: 5, signal: { of: 'Session', is: session } } });
     expect(sessionSource.getSnapshot()).toBe(session);
     expect(routeSource.getSnapshot()).toEqual({ page: 'live' });

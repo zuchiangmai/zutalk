@@ -82,7 +82,9 @@ export function CaptionsWindow() {
   useSource(langSource);
 
   const mode: Mode = state?.setup.mode ?? 'Audience';
-  const outbound = (state?.rooms.length ?? 0) > 0;
+  const host = state?.host;
+  const outbound =
+    (host?.is === 'Armed' && host.captions) || (host?.is === 'Live' && host.outbound) || false;
 
   const handleToggleMode = () => {
     if (!state) return;

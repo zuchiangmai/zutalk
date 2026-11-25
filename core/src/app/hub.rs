@@ -8,8 +8,8 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    AuthFlow, Change, Command, Device, From, Level as SoundLevel, LocalShelf, Quota, Room, Session,
-    Sound, State, Status,
+    AuthFlow, Change, Command, Device, From, HostState, Level as SoundLevel, LocalShelf, Quota,
+    Session, Sound, State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -22,6 +22,7 @@ use crate::live::frame::{Frame, MAX_COLUMNS};
 use crate::live::lane::{self, Mode};
 use crate::out::city::{Calendar, Filing};
 use crate::out::export::EXPORTERS;
+use crate::out::host::{HostStepEvent, host_step};
 use crate::record::shelf::About;
 use crate::record::takes::RefineStatus;
 use crate::rt::queue::Rx;
@@ -116,8 +117,10 @@ pub(crate) enum Msg {
     InstallFailed(&'static str),
     Refreshed(Result<Refreshed, &'static str>),
     DeskFailed(&'static str),
-    Rooms(Vec<Room>),
-    Shared(Result<(), &'static str>),
+    HostReady { host_gen: u64, link: String },
+    HostFailed { host_gen: u64, code: &'static str },
+    HostViewers { host_gen: u64, viewers: u32 },
+    HostStopped,
     Looked(Result<String, &'static str>),
     City(Result<Calendar, End>),
     FilingReady(String, Filing),
@@ -150,8 +153,10 @@ impl Msg {
             Msg::InstallFailed(_) => "InstallFailed",
             Msg::Refreshed(_) => "Refreshed",
             Msg::DeskFailed(_) => "DeskFailed",
-            Msg::Rooms(_) => "Rooms",
-            Msg::Shared(_) => "Shared",
+            Msg::HostReady { .. } => "HostReady",
+            Msg::HostFailed { .. } => "HostFailed",
+            Msg::HostViewers { .. } => "HostViewers",
+            Msg::HostStopped => "HostStopped",
             Msg::Looked(_) => "Looked",
             Msg::City(_) => "City",
             Msg::FilingReady(_, _) => "FilingReady",
@@ -200,8 +205,8 @@ pub(crate) struct Hub {
     refresh_in_flight: Option<u64>,
     refresh_synced: u64,
     need_retain: bool,
-    need_rooms: bool,
     auth_gen: u64,
+    host_gen: u64,
 }
 
 impl Hub {
@@ -259,8 +264,8 @@ impl Hub {
             refresh_in_flight: None,
             refresh_synced: 0,
             need_retain: false,
-            need_rooms: false,
             auth_gen: 0,
+            host_gen: 0,
         }
     }
 
@@ -272,6 +277,12 @@ impl Hub {
     fn bump_auth_gen(&mut self) -> u64 {
         self.auth_gen = self.next_auth_gen();
         self.auth_gen
+    }
+
+    fn bump_host_gen(&mut self) -> u64 {
+        let next = self.host_gen.wrapping_add(1);
+        self.host_gen = if next == 0 { 1 } else { next };
+        self.host_gen
     }
 
     pub(crate) async fn run(mut self, mut mail: Rx<Msg>) {
@@ -326,6 +337,38 @@ impl Hub {
         }
     }
 
+    fn set_host(&mut self, event: HostStepEvent, why: &'static str) {
+        let is_fail = matches!(event, HostStepEvent::RoomFailed);
+        let from_code = self.state.host.code();
+        let from_outbound = self.state.host.is_outbound();
+        let next = host_step(&self.state.host, event);
+        let to_code = next.code();
+        let to_outbound = next.is_outbound();
+        let viewers = next.viewers();
+        if from_code != to_code || from_outbound != to_outbound {
+            if is_fail {
+                warn!(
+                    "host.state",
+                    from = from_code,
+                    to = to_code,
+                    why = why,
+                    outbound = to_outbound,
+                    viewers = viewers,
+                );
+            } else {
+                info!(
+                    "host.state",
+                    from = from_code,
+                    to = to_code,
+                    why = why,
+                    outbound = to_outbound,
+                    viewers = viewers,
+                );
+            }
+        }
+        self.state.host = next;
+    }
+
     fn publish(&mut self) {
         if self.boot == Boot::Starting {
             return;
@@ -349,11 +392,9 @@ impl Hub {
     fn maybe_refresh(&mut self) {
         if let Some(rev) = next_refresh(self.dirty, self.refresh_in_flight, self.refresh_synced) {
             let retain = self.need_retain.then_some(self.state.setup.keep);
-            let include_rooms = self.need_rooms;
-            if self.work.refresh(rev, retain, include_rooms).is_ok() {
+            if self.work.refresh(rev, retain).is_ok() {
                 self.refresh_in_flight = Some(rev);
                 self.need_retain = false;
-                self.need_rooms = false;
             }
         }
     }
@@ -367,9 +408,6 @@ impl Hub {
             }
         } else {
             self.state.quota = None;
-        }
-        if let Some(rooms) = refreshed.rooms {
-            self.state.rooms = rooms;
         }
     }
 
@@ -404,9 +442,6 @@ impl Hub {
         self.state.rotation_unsaved = out.rotation_unsaved;
         self.state.local_shelf = out.local_shelf;
         self.apply_refreshed(out.refreshed);
-        self.state.rooms = out.rooms;
-        let live = self.state.rooms.iter().find(|r| r.recording.is_none()).map(|r| r.id.clone());
-        self.work.sync_slot(live);
         self.apply_survey(out.survey);
         self.migrate();
     }
@@ -503,11 +538,36 @@ impl Hub {
                 self.maybe_refresh();
                 return Err(c);
             }
-            Msg::Rooms(rooms) => self.state.rooms = rooms,
-            Msg::Shared(done) => {
-                self.need_rooms = true;
-                self.mark_dirty();
-                done?;
+            Msg::HostReady { host_gen, link } => {
+                if host_gen != self.host_gen {
+                    let _ = link; // dropped: stale host room superseded or cancelled
+                } else {
+                    self.set_host(HostStepEvent::RoomMade { link }, "ready");
+                }
+            }
+            Msg::HostFailed { host_gen, code } => {
+                if host_gen != self.host_gen {
+                    let _ = code; // dropped: stale host room superseded or cancelled
+                } else {
+                    self.set_host(HostStepEvent::RoomFailed, code);
+                    return Err(code);
+                }
+            }
+            Msg::HostViewers { host_gen, viewers } => {
+                if host_gen != self.host_gen {
+                    let _ = viewers; // dropped: stale host room superseded or cancelled
+                } else {
+                    self.set_host(HostStepEvent::Viewers(viewers), "viewers");
+                    if self.recording.is_some() && self.state.host.is_outbound() {
+                        self.session_reg.change(|cur| {
+                            let s = cur.as_ref()?;
+                            (s.viewers != viewers).then(|| Some(Session { viewers, ..s.clone() }))
+                        });
+                    }
+                }
+            }
+            Msg::HostStopped => {
+                self.set_host(HostStepEvent::Stopped, "stopped");
             }
             Msg::Looked(found) => self.state.update = Some(found?),
             Msg::City(Ok(_)) => {}
@@ -595,16 +655,57 @@ impl Hub {
                 let exporter = EXPORTERS.iter().find(|e| e.id == exporter).ok_or("export.which")?;
                 self.work.export(id, exporter.id, languages, to)?;
             }
-            Command::Share { recording } => {
-                if self.state.rooms.iter().any(|room| room.recording == recording) {
-                    return Ok(());
+            Command::HostArm { event, captions } => {
+                if self.recording.is_some() {
+                    return Err("recording.under_way");
                 }
-                self.work.share(recording)?;
+                if matches!(self.state.host, HostState::Stopping) {
+                    return Err("host.busy");
+                }
+                let had_room = matches!(
+                    self.state.host,
+                    HostState::Arming { .. } | HostState::Armed { captions: true, .. }
+                );
+                if !had_room && captions {
+                    let host_gen = self.bump_host_gen();
+                    self.work.host_make(host_gen)?;
+                    self.set_host(HostStepEvent::Arm { event, captions: true }, "arm");
+                } else if had_room && !captions {
+                    self.bump_host_gen();
+                    let _ = self.work.host_stop_room(); // dropped: room teardown runs asynchronously while staying armed without captions
+                    self.set_host(HostStepEvent::Arm { event, captions: false }, "captions.off");
+                } else {
+                    self.set_host(HostStepEvent::Arm { event, captions }, "arm");
+                }
             }
-            Command::Unshare { room } => {
-                let existing = self.state.rooms.iter().find(|r| r.id == room).ok_or("room.gone")?;
-                let recording = existing.recording.clone();
-                self.work.unshare(room, recording)?;
+            Command::HostCancel => {
+                self.bump_host_gen();
+                let wait_gone = self.work.host_stop_room();
+                self.set_host(HostStepEvent::Cancel { wait_gone }, "host.cancelled");
+                if self.recording.is_some() {
+                    self.session_reg.change(|cur| {
+                        let s = cur.as_ref()?;
+                        (s.outbound || s.viewers != 0)
+                            .then(|| Some(Session { outbound: false, viewers: 0, ..s.clone() }))
+                    });
+                }
+            }
+            Command::StopOutbound => {
+                if self.state.host.is_outbound()
+                    || matches!(self.state.host, HostState::Arming { .. })
+                {
+                    self.bump_host_gen();
+                    let _ = self.work.host_stop_room(); // dropped: room teardown runs asynchronously while recording continues
+                    self.set_host(HostStepEvent::StopOutbound, "host.stopped");
+                    if self.recording.is_some() {
+                        self.session_reg.change(|cur| {
+                            let s = cur.as_ref()?;
+                            (s.outbound || s.viewers != 0)
+                                .then(|| Some(Session { outbound: false, viewers: 0, ..s.clone() }))
+                        });
+                    }
+                    self.said.say("host.stopped");
+                }
             }
             Command::SignIn => {
                 if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
@@ -660,6 +761,18 @@ impl Hub {
                 self.work.discard_local()?;
             }
             Command::SignOut => {
+                if self.state.host.is_active() {
+                    self.bump_host_gen();
+                    let wait_gone = self.work.host_stop_room();
+                    self.set_host(HostStepEvent::Cancel { wait_gone }, "sign_out");
+                    if self.recording.is_some() {
+                        self.session_reg.change(|cur| {
+                            let s = cur.as_ref()?;
+                            (s.outbound || s.viewers != 0)
+                                .then(|| Some(Session { outbound: false, viewers: 0, ..s.clone() }))
+                        });
+                    }
+                }
                 self.bump_auth_gen();
                 self.set_auth(AuthEvent::Cancelled, "sign_out");
                 self.state.handle = None;
@@ -787,7 +900,24 @@ impl Hub {
             self.screen.clone(),
             self.next_snap.clone(),
         )?;
-        self.session_reg.set(Some(Session { id: id.clone(), started, status: initial }));
+        let (outbound, viewers, event_title) = if !file && self.state.host.is_active() {
+            self.set_host(HostStepEvent::RecordingStarted, "start");
+            let outbound = self.state.host.is_outbound();
+            if outbound {
+                self.work.host_live(true);
+            }
+            (outbound, self.state.host.viewers(), self.state.host.event().map(|e| e.title.clone()))
+        } else {
+            (false, 0, None)
+        };
+        self.session_reg.set(Some(Session {
+            id: id.clone(),
+            started,
+            status: initial,
+            outbound,
+            viewers,
+            event_title,
+        }));
         self.recording = Some((id, mode, reconnect));
         Ok(())
     }
@@ -810,6 +940,11 @@ impl Hub {
             self.level_reg.set(SoundLevel::default());
             self.water_reg.change(|current| (*current != Water::default()).then(Water::default));
             self.refining.insert(id);
+            if self.state.host.is_active() {
+                self.bump_host_gen();
+                let wait_gone = self.work.host_stop_room();
+                self.set_host(HostStepEvent::RecordingStopped { wait_gone }, "stop");
+            }
         }
     }
 

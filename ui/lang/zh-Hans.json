@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "设置后优先使用自己的密钥",
  "settings.local_adopted": "已从本机身份领回 {0} 场录音。本机备份暂时保留，以便需要时撤销。",
  "settings.local_discard": "清除本机备份",
- "settings.local_discard_confirm": "确认清除本机备份"
+ "settings.local_discard_confirm": "确认清除本机备份",
+ "code.host.stopped": "已停止对外，本机仍在录音",
+ "code.host.busy": "正在收尾上一场直播房间",
+ "code.host.cancelled": "已取消主持"
 }

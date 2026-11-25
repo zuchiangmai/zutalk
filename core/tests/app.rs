@@ -121,9 +121,9 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
             },
             false,
         ),
-        (Command::Share { recording: None }, true),
-        (Command::Share { recording: Some("id".into()) }, true),
-        (Command::Unshare { room: "r1".into() }, true),
+        (Command::HostArm { event: None, captions: true }, true),
+        (Command::HostCancel, false),
+        (Command::StopOutbound, false),
         (Command::SignIn, false),
         (Command::ConfirmSignIn, false),
         (Command::CancelSignIn, false),
@@ -501,9 +501,7 @@ async fn what_needs_a_person_says_so_and_writes_nothing() {
     app.wait_progress(|p| p.refine.is_none()).await;
 
     for cmd in [
-        Command::Share { recording: None },
-        Command::Share { recording: Some(id.clone()) },
-        Command::Unshare { room: "r1".into() },
+        Command::HostArm { event: None, captions: true },
         Command::File { id: id.clone(), event: "e1".into(), audio: true },
     ] {
         app.send(cmd);
@@ -513,7 +511,7 @@ async fn what_needs_a_person_says_so_and_writes_nothing() {
     let dirs = record_dirs(dir.path());
     assert_eq!(dirs.len(), 1);
     let local_dir = dir.path().join("records").join(&dirs[0]);
-    assert!(!local_dir.join("shares.jsonl").exists());
+    assert!(!dir.path().join("host.lock").exists());
     assert!(!local_dir.join("filings.jsonl").exists());
 }
 
@@ -595,7 +593,7 @@ async fn nobody_signed_in_nothing_is_asked_of_our_server() {
         languages: vec![],
         to: out.to_string_lossy().into(),
     });
-    app.send(Command::Share { recording: None });
+    app.send(Command::HostArm { event: None, captions: true });
     app.notice("sign_in.first").await;
     wait_export(&app).await;
     assert!(out.exists());
@@ -835,11 +833,18 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
     app.until(|_| true).await;
     let setup = Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() };
     app.send(Command::Setup { setup });
-    // A room for the live captions: a link with the key after `#`, and nothing in it yet.
-    app.send(Command::Share { recording: None });
-    let live = app.until(|state| state.rooms.len() == 1).await.rooms[0].clone();
-    assert!(live.recording.is_none() && live.link.starts_with(&format!("{server}/r/")));
-    let mut viewer = Viewer::open(&live.link).await;
+    // A hosted live room: a link with the key after `#`, and nothing in it yet.
+    app.send(Command::HostArm { event: None, captions: true });
+    let state = app
+        .until(|state| {
+            matches!(state.host, zutalk_core::app::proto::HostState::Armed { link: Some(_), .. })
+        })
+        .await;
+    let zutalk_core::app::proto::HostState::Armed { link: Some(live_link), .. } = state.host else {
+        panic!("expected Armed host with link");
+    };
+    assert!(live_link.starts_with(&format!("{server}/r/")));
+    let mut viewer = Viewer::open(&live_link).await;
     viewer.until(|event, plain| (event == "slot" && plain.is_none()).then_some(())).await;
     app.send(Command::Start);
     let id = app.session(|s| s.is_some()).await.map(|s| s.id).unwrap();
@@ -881,13 +886,11 @@ async fn a_room_carries_the_live_captions_or_a_recording_and_the_draft_is_kept_l
         assert!(tokio::time::Instant::now() < deadline, "draft line did not land");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // Stopping recording automatically closes the hosted live room and notifies viewers.
     app.send(Command::Stop);
-    viewer.until(|event, plain| (event == "slot" && plain.is_none()).then_some(())).await;
-    // Taken away: whoever was watching is told, and the live room is removed.
-    app.send(Command::Unshare { room: live.id.clone() });
     viewer.until(|event, _| (event == "gone").then_some(())).await;
-    let state = app.until(|state| state.rooms.is_empty()).await;
-    assert!(state.rooms.is_empty());
+    let state = app.until(|state| state.host == zutalk_core::app::proto::HostState::Idle).await;
+    assert_eq!(state.host, zutalk_core::app::proto::HostState::Idle);
 }
 
 #[tokio::test(flavor = "multi_thread")]

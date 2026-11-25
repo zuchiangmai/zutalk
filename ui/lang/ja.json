@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "設定時は自分のキーを優先",
  "settings.local_adopted": "ローカル録音 {0} 件をこの ID に引き継ぎました。元に戻せるようローカルの控えを残しています。",
  "settings.local_discard": "ローカルの控えを削除",
- "settings.local_discard_confirm": "削除を確定"
+ "settings.local_discard_confirm": "削除を確定",
+ "code.host.stopped": "観客への字幕配信を停止しました",
+ "code.host.busy": "前のライブルームを終了しています",
+ "code.host.cancelled": "司会をキャンセルしました"
 }

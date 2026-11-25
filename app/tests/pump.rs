@@ -133,6 +133,9 @@ fn session_event(seq: u64, id: &str) -> Event {
             id: id.into(),
             started: 1_000,
             status: Status::Recording,
+            outbound: false,
+            viewers: 0,
+            event_title: None,
         }))),
     })
 }
@@ -341,7 +344,14 @@ async fn a_window_that_joins_late_gets_the_state_and_every_signals_latest() {
     // Pre-populate State and all 5 signals before the window joins.
     regs.state.set(State { captions: false, ..State::default() });
     regs.frame.set(Frame { t_audio: 100, columns: Vec::new() });
-    regs.session.set(Some(Session { id: "s1".into(), started: 10, status: Status::Recording }));
+    regs.session.set(Some(Session {
+        id: "s1".into(),
+        started: 10,
+        status: Status::Recording,
+        outbound: false,
+        viewers: 0,
+        event_title: None,
+    }));
     regs.level.set(SoundLevel { peak: 500, rms: 200 });
     let mut water = Water::default();
     water.now_ms = 1000;

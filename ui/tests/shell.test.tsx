@@ -173,7 +173,14 @@ describe('Sidebar', () => {
       <Sidebar
         recent={rows}
         summary={summary}
-        session={{ id: 'live-1', started: now - 30_000, status: { is: 'Recording' } }}
+        session={{
+          id: 'live-1',
+          started: now - 30_000,
+          status: { is: 'Recording' },
+          outbound: false,
+          viewers: 0,
+          event_title: null,
+        }}
         liveElapsedMs={30_000}
         spokenLanguages={['zh', 'en']}
         route={{ page: 'live' }}

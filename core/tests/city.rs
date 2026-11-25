@@ -478,3 +478,59 @@ async fn reading_the_tape_is_a_named_task_and_its_queue_is_counted() {
     );
     assert_eq!(seen.refused(), 0);
 }
+
+#[test]
+fn archive_types_table_matches_packed_records() {
+    assert_eq!(city::ARCHIVE_TYPES.event, "ev/event");
+    assert_eq!(city::ARCHIVE_TYPES.recording, "talk/recording");
+    assert_eq!(city::ARCHIVE_TYPES.line, "talk/line");
+    assert_eq!(city::ARCHIVE_TYPES.speaker, "talk/speaker");
+
+    let data = tempfile::tempdir().unwrap();
+    let me = Me { did: ME.into(), key: Arc::new(key(ME)) };
+    let shelf = shelf(data.path());
+    let id = format!("{NOW:011x}00000099");
+    let about = About {
+        started: NOW,
+        length_ms: 1_000,
+        title: "Archive check".into(),
+        take: 1,
+        ..About::default()
+    };
+    shelf.put(&id, RECORDING, &[(id.clone(), Some(about))], NOW).unwrap();
+    let line = Line {
+        t0: 0,
+        t1: 500,
+        speaker: "1".into(),
+        language: "en".into(),
+        text: "Hi".into(),
+        ..Line::default()
+    };
+    shelf
+        .put(
+            &id,
+            LINE,
+            &[(format!("{id}.1.00000"), Some(Said { line, via: BTreeMap::new() }))],
+            NOW,
+        )
+        .unwrap();
+    shelf
+        .put(&id, SPEAKER, &[(format!("{id}.1"), Some(Words { text: "Host".into() }))], NOW)
+        .unwrap();
+    let rec = shelf.read(&id).unwrap().unwrap();
+    let filing = Filing {
+        city: "city.example".into(),
+        did: CITY.into(),
+        event: format!("{ORGANIZER}/ev/event/e1"),
+        title: "Check".into(),
+        audio: false,
+        key: "c".repeat(32),
+        state: String::new(),
+    };
+    let held = city::records(&me, &filing, &rec, &[], NOW).unwrap();
+    let types: Vec<&str> = held.records.iter().map(|r| r.path.ty.as_str()).collect();
+    assert_eq!(
+        types,
+        vec![city::ARCHIVE_TYPES.recording, city::ARCHIVE_TYPES.line, city::ARCHIVE_TYPES.speaker,]
+    );
+}

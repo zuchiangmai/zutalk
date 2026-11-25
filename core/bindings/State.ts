@@ -2,13 +2,13 @@
 import type { AuthFlow } from "./AuthFlow";
 import type { Device } from "./Device";
 import type { From } from "./From";
+import type { HostState } from "./HostState";
 import type { LocalShelf } from "./LocalShelf";
 import type { Quota } from "./Quota";
-import type { Room } from "./Room";
 import type { Setup } from "./Setup";
 
 /**
  * Bounded app state sent whole whenever it changes (`PLAN.md` §2.4, `P2.md` §3.6.1).
  * Anything that grows with recordings or history is fetched through [`Query`], never held here.
  */
-export type State = { me: string | null, auth: AuthFlow, handle: string | null, rotation_unsaved: boolean, update: string | null, keys: Array<[string, From]>, left: number | null, quota: Quota | null, setup: Setup, devices: Array<Device>, languages: Array<string>, exporters: Array<string>, rooms: Array<Room>, unmoved: Array<[string, string]>, local_shelf: LocalShelf, captions: boolean, };
+export type State = { me: string | null, auth: AuthFlow, handle: string | null, rotation_unsaved: boolean, update: string | null, keys: Array<[string, From]>, left: number | null, quota: Quota | null, setup: Setup, devices: Array<Device>, languages: Array<string>, exporters: Array<string>, host: HostState, unmoved: Array<[string, string]>, local_shelf: LocalShelf, captions: boolean, };

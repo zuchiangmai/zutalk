@@ -4,9 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use zu::{Pack, SecretKey};
 use zutalk_core::live::lines::Line;
-use zutalk_core::record::shelf::{
-    About, LINE, NOTE, RECORDING, SHARE, SPEAKER, Said, Share, Shelf, Words,
-};
+use zutalk_core::record::shelf::{About, LINE, NOTE, RECORDING, SPEAKER, Said, Shelf, Words};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const ID: &str = "kx7q2m5v4tbn3hpw";
@@ -243,18 +241,4 @@ fn a_writer_follows_what_a_path_says_like_one_change_at_a_time() {
     assert!(held.records[1].at > held.records[0].at);
     shelf.put(ID, RECORDING, &[(ID.to_string(), Some(about(NOW, 0)))], NOW).unwrap();
     assert_eq!(shelf.about(ID).unwrap().unwrap().note, "second");
-}
-
-#[test]
-fn the_rooms_a_person_has_are_records_beside_the_recordings() {
-    let dir = tempfile::tempdir().unwrap();
-    let shelf = shelf(dir.path());
-    write(&shelf, ID, NOW, 1, &meeting());
-    let (live, one) = (Share { recording: None }, Share { recording: Some(ID.into()) });
-    shelf.put("", SHARE, &[("a".repeat(32), Some(live.clone()))], NOW).unwrap();
-    shelf.put("", SHARE, &[("b".repeat(32), Some(one))], NOW).unwrap();
-    shelf.put::<Share>("", SHARE, &[("b".repeat(32), None)], NOW + 1).unwrap();
-    assert_eq!(shelf.kept::<Share>(SHARE).unwrap(), [("a".repeat(32), live)]);
-    // They are not a recording.
-    assert_eq!(shelf.list().unwrap().len(), 1);
 }

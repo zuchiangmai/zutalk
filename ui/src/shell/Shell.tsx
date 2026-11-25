@@ -110,7 +110,7 @@ export function Shell() {
       <main className="main">
         {route.page !== 'live' && (
           <TopBar
-            rooms={state?.rooms ?? []}
+            host={state?.host ?? { is: 'Idle' }}
             update={state?.update ?? null}
             recording={session !== null}
             onUpdate={() => void send({ do: 'Update' })}

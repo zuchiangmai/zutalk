@@ -26,8 +26,6 @@ app: rt capture live id record knowledge ai out view
 # grows is new code breaking the rule; one that falls (or a row no longer true) must be lowered
 # or removed here.
 debt='
-out/city.rs crate::app::proto 1 P5
-out/room.rs crate::app::proto 1 P5
 '
 
 layers=$(printf '%s\n' "$allowed" | awk -F: 'NF { print $1 }')

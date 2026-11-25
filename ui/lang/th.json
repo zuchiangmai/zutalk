@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "ใช้ก่อนเมื่อตั้งค่าไว้",
  "settings.local_adopted": "คัดลอกการบันทึกในเครื่อง {0} รายการมายังตัวตนของคุณแล้ว ระบบยังเก็บสำรองไว้เผื่อต้องการย้อนกลับ",
  "settings.local_discard": "ลบข้อมูลสำรองในเครื่อง",
- "settings.local_discard_confirm": "ยืนยันการลบข้อมูลสำรอง"
+ "settings.local_discard_confirm": "ยืนยันการลบข้อมูลสำรอง",
+ "code.host.stopped": "หยุดส่งคำบรรยายให้ผู้ชมแล้ว",
+ "code.host.busy": "กำลังปิดห้องถ่ายทอดสดก่อนหน้า",
+ "code.host.cancelled": "ยกเลิกการเป็นผู้ดำเนินรายการแล้ว"
 }

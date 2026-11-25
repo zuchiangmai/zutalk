@@ -253,7 +253,20 @@ describe('I8 UI scale & fault visibility acceptance', () => {
       act(() => {
         emit({
           kind: 'Signal',
-          is: { seq: 1, signal: { of: 'Session', is: { id: 'burst-1', started: Date.now(), status: { is: 'Recording' } } } },
+          is: {
+            seq: 1,
+            signal: {
+              of: 'Session',
+              is: {
+                id: 'burst-1',
+                started: Date.now(),
+                status: { is: 'Recording' },
+                outbound: false,
+                viewers: 0,
+                event_title: null,
+              },
+            },
+          },
         });
         flushOneFrame(16);
       });
@@ -402,7 +415,14 @@ describe('I8 UI scale & fault visibility acceptance', () => {
             seq: 1,
             signal: {
               of: 'Session',
-              is: { id: 'fault-rec', started: Date.now(), status: { is: 'AudioOnly', why: 'captions.no_key' } },
+              is: {
+                id: 'fault-rec',
+                started: Date.now(),
+                status: { is: 'AudioOnly', why: 'captions.no_key' },
+                outbound: false,
+                viewers: 0,
+                event_title: null,
+              },
             },
           },
         });

@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "Se usan primero si están configuradas",
  "settings.local_adopted": "Se copiaron {0} grabaciones locales a tu identidad. La copia local se conserva por si necesitas deshacerlo.",
  "settings.local_discard": "Eliminar copia local",
- "settings.local_discard_confirm": "Confirmar eliminación"
+ "settings.local_discard_confirm": "Confirmar eliminación",
+ "code.host.stopped": "Se dejó de enviar subtítulos al público",
+ "code.host.busy": "Cerrando la sala en vivo anterior",
+ "code.host.cancelled": "Presentación cancelada"
 }

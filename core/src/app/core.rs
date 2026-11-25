@@ -5,8 +5,8 @@
 
 use crate::app::hub::{HUB_MAIL_MSGS, Hub, Msg};
 use crate::app::proto::{
-    Device, Invalidations, Level as SoundLevel, Notices, Progress, Query, QueryReply, Session,
-    State,
+    Device, HostState, Invalidations, Level as SoundLevel, Notices, Progress, Query, QueryReply,
+    Session, State,
 };
 use crate::app::work::Work;
 use crate::capture::audio::{self, Capture, Hear, Hearing};
@@ -181,6 +181,8 @@ pub struct Core {
     stats: Stats,
     root: Tree,
     frame: Register<Frame>,
+    state_reading: Reading<State>,
+    host_busy: Reading<bool>,
     shell: Arc<Gauge>,
     screen: Arc<Gauge>,
     views: Arc<ViewEngine>,
@@ -202,6 +204,7 @@ impl Core {
         let work_tree = root.child("work");
         let config = Arc::new(config);
         let state_reg = Register::new(State::default());
+        let host_busy_reg = Register::new(false);
         let frame_reg = Register::new(Frame::default());
         let session_reg = Register::new(None);
         let level_reg = Register::new(SoundLevel::default());
@@ -213,8 +216,10 @@ impl Core {
         let shell = Arc::new(Gauge::new());
         let screen = Arc::new(Gauge::new());
         let (said, said_reading) = Voice::new(&stats);
+        let state_reading = state_reg.read();
+        let host_busy = host_busy_reg.read();
         let outlet = Outlet {
-            state: state_reg.read(),
+            state: state_reading.clone(),
             frame: frame_reg.read(),
             session: session_reg.read(),
             level: level_reg.read(),
@@ -236,6 +241,7 @@ impl Core {
             progress_reg,
             frame_reg.read(),
             water_reg.read(),
+            host_busy_reg,
         );
         work.boot();
         let hub = Hub::new(
@@ -260,6 +266,8 @@ impl Core {
                 stats,
                 root,
                 frame: frame_reg,
+                state_reading,
+                host_busy,
                 shell,
                 screen,
                 views,
@@ -316,5 +324,51 @@ impl Core {
     /// Snapshot of all tasks and blocking calls currently running on this core's tree.
     pub fn running(&self) -> Vec<Running> {
         self.root.running()
+    }
+
+    /// Whether an ephemeral hosted room is active or being torn down (lock-free, safe from shell).
+    pub fn is_hosting(&self) -> bool {
+        let state = self.state_reading.now().1;
+        state.host.is_outbound()
+            || matches!(state.host, HostState::Arming { .. } | HostState::Stopping)
+            || *self.host_busy.now().1
+    }
+
+    /// Waits up to `max_ms` for any active outbound room to finish sending `gone` and clear
+    /// `host.lock` (`P5.md` §3.4).
+    pub async fn wait_host_idle(&self, max_ms: u64) {
+        if !self.is_hosting() {
+            return;
+        }
+        let mut state_rx = self.state_reading.clone();
+        let mut busy_rx = self.host_busy.clone();
+        let wait_ms = max_ms;
+        let waited = tokio::time::timeout(Duration::from_millis(wait_ms), async move {
+            loop {
+                let hosting = {
+                    let s = state_rx.now().1;
+                    s.host.is_outbound()
+                        || matches!(s.host, HostState::Arming { .. } | HostState::Stopping)
+                        || *busy_rx.now().1
+                };
+                if !hosting {
+                    break;
+                }
+                tokio::select! {
+                    res = state_rx.next() => {
+                        if res.is_none() {
+                            break;
+                        }
+                    }
+                    res = busy_rx.next() => {
+                        if res.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        let _ = waited; // dropped: clean-exit wait budget elapsed; server TTL and host.lock cover the rest
     }
 }

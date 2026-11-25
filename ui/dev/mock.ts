@@ -51,7 +51,7 @@ export const EMPTY: State = {
   devices: [],
   languages: ['en', 'fr', 'es', 'de', 'zh', 'ja', 'ko', 'th'],
   exporters: ['markdown', 'srt', 'vtt'],
-  rooms: [],
+  host: { is: 'Idle' },
   unmoved: [],
   local_shelf: { recordings: 0, adopted: false },
   captions: false,
@@ -336,7 +336,26 @@ export function mockBus(recording = false): Bus {
   const handlers: { [D in Command['do']]: (c: Extract<Command, { do: D }>) => void } = {
     Start: () => {
       const id = `s${Date.now()}`;
-      session = { id, started: Date.now(), status: { is: 'Connecting' } };
+      const outbound = s.host.is === 'Armed' && s.host.captions && s.host.link !== null;
+      const viewers = s.host.is === 'Armed' && outbound ? s.host.viewers : 0;
+      const eventTitle = s.host.is === 'Armed' ? (s.host.event?.title ?? null) : null;
+      if (s.host.is === 'Armed') {
+        s.host = {
+          is: 'Live',
+          event: s.host.event,
+          outbound,
+          link: outbound ? s.host.link : null,
+          viewers,
+        };
+      }
+      session = {
+        id,
+        started: Date.now(),
+        status: { is: 'Connecting' },
+        outbound,
+        viewers,
+        event_title: eventTitle,
+      };
       // Create live placeholder recording so live notes can persist against session.id.
       const liveRow = makeRow(id, session.started, 0, '', s.setup.spoken.length ? s.setup.spoken : ['en'], {
         draft: true,
@@ -362,6 +381,7 @@ export function mockBus(recording = false): Bus {
         recs.unshift(buildRec(r, { refined: false }));
       }
       session = null;
+      if (s.host.is !== 'Idle') s.host = { is: 'Idle' };
       emitSession();
       emitFrame([]);
       emitLevel({ rms: 0, peak: 0 });
@@ -436,12 +456,48 @@ export function mockBus(recording = false): Bus {
       }
     },
     Export: () => on({ kind: 'Notice', is: 'copied' }),
-    Share: (c) => {
-      const id = Math.random().toString(16).slice(2).padEnd(32, '0');
-      later(600, () => s.rooms.push({ id, recording: c.recording, link: `${globalThis.location?.origin ?? 'http://localhost'}/r/live#${KEY}` }));
+    HostArm: (c) => {
+      if (!s.me) {
+        on({ kind: 'Notice', is: 'sign_in.first' });
+        return;
+      }
+      if (!c.captions) {
+        s.host = { is: 'Armed', event: c.event, captions: false, link: null, viewers: 0 };
+        return;
+      }
+      s.host = { is: 'Arming', event: c.event, captions: true };
+      later(400, () => {
+        if (s.host.is === 'Arming') {
+          s.host = {
+            is: 'Armed',
+            event: s.host.event,
+            captions: true,
+            link: `${globalThis.location?.origin ?? 'http://localhost'}/r/live#${KEY}`,
+            viewers: 2,
+          };
+        }
+      });
     },
-    Unshare: (c) => {
-      s.rooms = s.rooms.filter((r) => r.id !== c.room);
+    HostCancel: () => {
+      s.host = { is: 'Idle' };
+      if (session) {
+        session.outbound = false;
+        session.viewers = 0;
+        emitSession();
+      }
+    },
+    StopOutbound: () => {
+      if (s.host.is === 'Live') {
+        s.host = { is: 'Live', event: s.host.event, outbound: false, link: null, viewers: 0 };
+      } else if (s.host.is === 'Armed' || s.host.is === 'Arming') {
+        s.host = { is: 'Armed', event: s.host.event, captions: false, link: null, viewers: 0 };
+      }
+      if (session) {
+        session.outbound = false;
+        session.viewers = 0;
+        emitSession();
+      }
+      on({ kind: 'Notice', is: 'host.stopped' });
     },
     SignIn: () => {
       s.auth = {

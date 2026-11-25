@@ -1,5 +1,4 @@
 import type { Column } from '$proto/Column';
-import type { Open } from '$proto/Open';
 import { say } from '../bus/channel';
 import { createCell, type Source } from '../bus/source';
 
@@ -20,26 +19,24 @@ export async function openFrame<T>(key: CryptoKey, data: string): Promise<T> {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
-const roomOpenCell = createCell<Open | null>(null);
 const roomLiveCell = createCell<Column[]>([]);
 const roomEndCell = createCell<string | null>(null);
 
-export const roomOpenSource: Source<Open | null> = roomOpenCell;
 export const roomLiveSource: Source<Column[]> = roomLiveCell;
 export const roomEndSource: Source<string | null> = roomEndCell;
 
 export function resetRoom(): void {
-  roomOpenCell.set(null);
   roomLiveCell.set([]);
   roomEndCell.set(null);
 }
 
-/** Reads a room with the key from its link, frame by frame in order, and only listens. What
- * cannot be read is said once, as a code: the room's end, a key that does not open it. */
+/** Reads an ephemeral slot-only live room with the key from its link fragment. On `gone` it
+ * immediately clears live text and shows the ended screen (`P5.md` §3.6). */
 export function read(events: string, fragment: string): () => void {
   resetRoom();
   const source = new EventSource(events);
   const end = (code: string) => {
+    roomLiveCell.set([]);
     roomEndCell.set(code);
     say(code);
     source.close();
@@ -60,13 +57,6 @@ export function read(events: string, fragment: string): () => void {
   source.addEventListener(
     'slot',
     frame<Column[]>((live) => roomLiveCell.set(live ?? [])),
-  );
-  source.addEventListener(
-    'log',
-    frame<Open>((page) => {
-      if (!page) return;
-      roomOpenCell.update((prev) => (prev ? { ...prev, lines: [...prev.lines, ...page.lines] } : page));
-    }),
   );
   source.addEventListener('gone', () => end('room.gone'));
   source.onerror = () => {

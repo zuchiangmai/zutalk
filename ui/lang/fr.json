@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "Utilisées en priorité si définies",
  "settings.local_adopted": "{0} enregistrements locaux ont été copiés vers votre identité. La sauvegarde locale est conservée pour pouvoir annuler.",
  "settings.local_discard": "Supprimer la sauvegarde locale",
- "settings.local_discard_confirm": "Confirmer la suppression"
+ "settings.local_discard_confirm": "Confirmer la suppression",
+ "code.host.stopped": "Envoi des sous-titres au public arrêté",
+ "code.host.busy": "Fermeture de la salle en direct précédente",
+ "code.host.cancelled": "Animation annulée"
 }

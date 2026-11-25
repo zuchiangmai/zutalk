@@ -7,10 +7,9 @@ pub use crate::id::identity::AuthFlow;
 pub use crate::id::keys::From;
 pub use crate::id::quota::{Quota, ServiceQuota};
 pub use crate::live::frame::{Caption, Column, Frame, Status};
-use crate::out::city::Filing;
+pub use crate::out::host::{HostEvent, HostState};
 pub use crate::record::adopt::LocalShelf;
 pub use crate::record::notes::Note;
-use crate::record::shelf::Said;
 pub use crate::record::takes::{RefineFailure, RefineStatus, TakeInfo};
 use crate::rt::stats::Tally;
 use crate::rt::water::Water;
@@ -45,10 +44,10 @@ pub struct State {
     pub devices: Vec<Device>,
     pub languages: Vec<String>, // the ones there are rules for
     pub exporters: Vec<String>,
-    pub rooms: Vec<Room>,
+    pub host: HostState, // bounded in-memory hosting state (at most one live room)
     pub unmoved: Vec<(String, String)>, // what 0.8 handed over that did not move: title, why
-    pub local_shelf: LocalShelf,        // bounded summary of the device-local shelf
-    pub captions: bool,                 // the captions window is on screen
+    pub local_shelf: LocalShelf, // bounded summary of the device-local shelf
+    pub captions: bool,  // the captions window is on screen
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -104,6 +103,9 @@ pub struct Session {
     #[ts(type = "number")]
     pub started: i64,
     pub status: Status,
+    pub outbound: bool,
+    pub viewers: u32,
+    pub event_title: Option<String>,
 }
 
 /// Peak and RMS amplitude of the latest 100 ms audio block, or zero while paused or idle.
@@ -145,42 +147,6 @@ pub struct Notices {
 impl Notices {
     /// Most notice codes retained at once: the interface shows no more at one time (`P1.md` §3.3).
     pub const KEEP_CODES: usize = 16;
-}
-
-/// A recording in a list. A draft's text is still the live one.
-/// Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-#[ts(export)]
-pub struct Row {
-    pub id: String,
-    #[ts(type = "number")]
-    pub started: i64,
-    pub length_ms: u32,
-    pub title: String,
-    pub preview: String,
-    pub spoken: Vec<String>,
-    pub draft: bool,
-    pub audio: bool, // still on this device
-}
-
-/// A recording being read: each line with the key it is corrected by.
-/// Kept exported for single-recording room sharing (`out/room.rs`, `Viewer.svelte`) until P5.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-#[ts(export)]
-pub struct Open {
-    pub row: Row,
-    pub lines: Vec<(String, Said)>,
-    pub speakers: BTreeMap<String, String>,
-    pub note: String,
-    pub filed: Option<Filing>, // where it went to a city, and how that went
-}
-
-/// A room others can read: one recording, or the live captions. Its key is after `#`.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-pub struct Room {
-    pub id: String,
-    pub recording: Option<String>,
-    pub link: String,
 }
 
 /// One signal value stamped with the monotonic sequence number of its own signal kind (`P1.md` §3.3).
@@ -265,8 +231,9 @@ pub enum Command {
     Remove { id: String },
     Restore { id: String },
     Export { id: String, exporter: String, languages: Vec<String>, to: String },
-    Share { recording: Option<String> },
-    Unshare { room: String },
+    HostArm { event: Option<HostEvent>, captions: bool },
+    HostCancel,
+    StopOutbound,
     SignIn,
     ConfirmSignIn,
     CancelSignIn,
@@ -315,10 +282,11 @@ impl std::fmt::Debug for Command {
                 .field("languages", languages)
                 .field("to", to)
                 .finish(),
-            Command::Share { recording } => {
-                f.debug_struct("Share").field("recording", recording).finish()
+            Command::HostArm { event, captions } => {
+                f.debug_struct("HostArm").field("event", event).field("captions", captions).finish()
             }
-            Command::Unshare { room } => f.debug_struct("Unshare").field("room", room).finish(),
+            Command::HostCancel => f.write_str("HostCancel"),
+            Command::StopOutbound => f.write_str("StopOutbound"),
             Command::SignIn => f.write_str("SignIn"),
             Command::ConfirmSignIn => f.write_str("ConfirmSignIn"),
             Command::CancelSignIn => f.write_str("CancelSignIn"),
@@ -374,8 +342,9 @@ impl Command {
             Command::Remove { .. } => "Remove",
             Command::Restore { .. } => "Restore",
             Command::Export { .. } => "Export",
-            Command::Share { .. } => "Share",
-            Command::Unshare { .. } => "Unshare",
+            Command::HostArm { .. } => "HostArm",
+            Command::HostCancel => "HostCancel",
+            Command::StopOutbound => "StopOutbound",
             Command::SignIn => "SignIn",
             Command::ConfirmSignIn => "ConfirmSignIn",
             Command::CancelSignIn => "CancelSignIn",
@@ -401,8 +370,7 @@ impl Command {
     /// explicitly so any future command must state whether it requires a signed-in person.
     pub fn needs_person(&self) -> bool {
         match self {
-            Command::Share { .. }
-            | Command::Unshare { .. }
+            Command::HostArm { .. }
             | Command::File { .. }
             | Command::RefreshQuota
             | Command::DiscardLocal => true,
@@ -419,6 +387,8 @@ impl Command {
             | Command::Remove { .. }
             | Command::Restore { .. }
             | Command::Export { .. }
+            | Command::HostCancel
+            | Command::StopOutbound
             | Command::SignIn
             | Command::ConfirmSignIn
             | Command::CancelSignIn

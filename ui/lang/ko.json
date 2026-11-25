@@ -369,5 +369,8 @@
  "settings.own_keys_precedence": "설정 시 내 키를 우선 사용",
  "settings.local_adopted": "로컬 녹음 {0}건을 내 신원으로 가져왔습니다. 되돌릴 수 있도록 로컬 백업을 유지하고 있습니다.",
  "settings.local_discard": "로컬 백업 삭제",
- "settings.local_discard_confirm": "백업 삭제 확인"
+ "settings.local_discard_confirm": "백업 삭제 확인",
+ "code.host.stopped": "관객 자막 송출을 중지했습니다",
+ "code.host.busy": "이전 라이브 방을 정리하고 있습니다",
+ "code.host.cancelled": "진행이 취소되었습니다"
 }

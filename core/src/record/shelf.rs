@@ -21,7 +21,6 @@ pub const RECORDING: &str = "talk/recording"; // key: <id>
 pub const LINE: &str = "talk/line"; // key: <id>.<take>.<number>
 pub const SPEAKER: &str = "talk/speaker"; // key: <id>.<label>
 pub const NOTE: &str = "talk/note"; // key: <id>
-pub const SHARE: &str = "talk/share"; // key: a room's id; kept apart from the recordings
 pub const TERM: &str = "talk/term"; // key: drawn from how the term is said; kept apart too
 pub const FILING: &str = "talk/filing"; // key: <id>; where it went to a city, kept apart too
 
@@ -73,12 +72,6 @@ pub struct Recording {
     pub speakers: BTreeMap<String, String>,
     pub note: String,
     pub notes: Vec<Note>,
-}
-
-/// What a room carries: one recording, or the live captions.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Share {
-    pub recording: Option<String>,
 }
 
 pub struct Shelf {
@@ -295,11 +288,10 @@ impl Shelf {
     }
 
     /// Lines are many and the rest is little, so each has a pack: a list reads the little.
-    /// What is the person's, not a recording's (their rooms, glossary, filings), has its own.
+    /// What is the person's, not a recording's (their glossary, filings), has its own.
     fn pack(&self, id: &str, ty: &str) -> PathBuf {
         match ty {
             LINE => self.root.join(id).join("lines.jsonl"),
-            SHARE => self.root.join("shares.jsonl"),
             TERM => self.root.join("terms.jsonl"),
             FILING => self.root.join("filings.jsonl"),
             _ => self.root.join(id).join("about.jsonl"),
