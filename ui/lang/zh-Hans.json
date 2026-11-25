@@ -305,5 +305,10 @@
  "settings.overlay_off": "已关闭",
  "settings.key_placeholder": "密钥",
  "settings.update_ready": "新版本 {0} 已就绪",
- "settings.recovery_unsaved": "还没存"
+ "settings.recovery_unsaved": "还没存",
+ "captions.close": "关闭字幕窗",
+ "captions.layout": "切换字幕版面",
+ "viewer.live": "现场字幕",
+ "viewer.ended": "字幕结束了",
+ "viewer.all_langs": "全部"
 }

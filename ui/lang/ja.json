@@ -305,5 +305,10 @@
  "settings.overlay_off": "非表示",
  "settings.key_placeholder": "API キー",
  "settings.update_ready": "バージョン {0} の準備ができました",
- "settings.recovery_unsaved": "未保存"
+ "settings.recovery_unsaved": "未保存",
+ "captions.close": "字幕ウィンドウを閉じる",
+ "captions.layout": "字幕レイアウトを切り替え",
+ "viewer.live": "ライブ字幕",
+ "viewer.ended": "字幕が終了しました",
+ "viewer.all_langs": "すべて"
 }

@@ -305,5 +305,10 @@
  "settings.overlay_off": "ซ่อนอยู่",
  "settings.key_placeholder": "คีย์ API",
  "settings.update_ready": "เวอร์ชัน {0} พร้อมอัปเดตแล้ว",
- "settings.recovery_unsaved": "ยังไม่ได้บันทึก"
+ "settings.recovery_unsaved": "ยังไม่ได้บันทึก",
+ "captions.close": "ปิดหน้าต่างคำบรรยาย",
+ "captions.layout": "สลับรูปแบบคำบรรยาย",
+ "viewer.live": "คำบรรยายสด",
+ "viewer.ended": "คำบรรยายจบลงแล้ว",
+ "viewer.all_langs": "ทั้งหมด"
 }

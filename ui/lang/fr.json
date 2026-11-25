@@ -305,5 +305,10 @@
  "settings.overlay_off": "Masquée",
  "settings.key_placeholder": "Clé API",
  "settings.update_ready": "La version {0} est prête",
- "settings.recovery_unsaved": "Pas encore enregistrée"
+ "settings.recovery_unsaved": "Pas encore enregistrée",
+ "captions.close": "Fermer la fenêtre de sous-titres",
+ "captions.layout": "Changer la disposition des sous-titres",
+ "viewer.live": "Sous-titres en direct",
+ "viewer.ended": "Sous-titres terminés",
+ "viewer.all_langs": "Toutes"
 }

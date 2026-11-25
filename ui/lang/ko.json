@@ -305,5 +305,10 @@
  "settings.overlay_off": "숨김",
  "settings.key_placeholder": "API 키",
  "settings.update_ready": "버전 {0} 준비됨",
- "settings.recovery_unsaved": "아직 저장 안 됨"
+ "settings.recovery_unsaved": "아직 저장 안 됨",
+ "captions.close": "자막 창 닫기",
+ "captions.layout": "자막 레이아웃 전환",
+ "viewer.live": "실시간 자막",
+ "viewer.ended": "자막이 종료되었습니다",
+ "viewer.all_langs": "전체"
 }

@@ -305,5 +305,10 @@
  "settings.overlay_off": "Hidden",
  "settings.key_placeholder": "API key",
  "settings.update_ready": "Version {0} is ready",
- "settings.recovery_unsaved": "Not saved yet"
+ "settings.recovery_unsaved": "Not saved yet",
+ "captions.close": "Close caption window",
+ "captions.layout": "Switch caption layout",
+ "viewer.live": "Live captions",
+ "viewer.ended": "Captions ended",
+ "viewer.all_langs": "All"
 }

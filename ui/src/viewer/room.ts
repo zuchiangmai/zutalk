@@ -22,13 +22,16 @@ export async function openFrame<T>(key: CryptoKey, data: string): Promise<T> {
 
 const roomOpenCell = createCell<Open | null>(null);
 const roomLiveCell = createCell<Column[]>([]);
+const roomEndCell = createCell<string | null>(null);
 
 export const roomOpenSource: Source<Open | null> = roomOpenCell;
 export const roomLiveSource: Source<Column[]> = roomLiveCell;
+export const roomEndSource: Source<string | null> = roomEndCell;
 
 export function resetRoom(): void {
   roomOpenCell.set(null);
   roomLiveCell.set([]);
+  roomEndCell.set(null);
 }
 
 /** Reads a room with the key from its link, frame by frame in order, and only listens. What
@@ -37,6 +40,7 @@ export function read(events: string, fragment: string): () => void {
   resetRoom();
   const source = new EventSource(events);
   const end = (code: string) => {
+    roomEndCell.set(code);
     say(code);
     source.close();
   };

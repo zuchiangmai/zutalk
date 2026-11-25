@@ -305,5 +305,10 @@
  "settings.overlay_off": "Ausgeblendet",
  "settings.key_placeholder": "API-Schlüssel",
  "settings.update_ready": "Version {0} ist bereit",
- "settings.recovery_unsaved": "Noch nicht gesichert"
+ "settings.recovery_unsaved": "Noch nicht gesichert",
+ "captions.close": "Untertitelfenster schließen",
+ "captions.layout": "Untertitellayout wechseln",
+ "viewer.live": "Live-Untertitel",
+ "viewer.ended": "Untertitel beendet",
+ "viewer.all_langs": "Alle"
 }

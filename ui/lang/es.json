@@ -305,5 +305,10 @@
  "settings.overlay_off": "Oculto",
  "settings.key_placeholder": "Clave API",
  "settings.update_ready": "La versión {0} está lista",
- "settings.recovery_unsaved": "Aún sin guardar"
+ "settings.recovery_unsaved": "Aún sin guardar",
+ "captions.close": "Cerrar ventana de subtítulos",
+ "captions.layout": "Cambiar diseño de subtítulos",
+ "viewer.live": "Subtítulos en vivo",
+ "viewer.ended": "Subtítulos finalizados",
+ "viewer.all_langs": "Todos"
 }
