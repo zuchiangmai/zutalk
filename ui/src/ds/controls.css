@@ -1916,3 +1916,246 @@ mark.find {
   gap: 14px;
   margin-top: 18px;
 }
+
+/* ---- caption scenes panel & 16:10 live preview (`CaptionScenes.dc.html`) ---- */
+.scenes-layout {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px 28px;
+  padding: 20px 28px 40px;
+  background: var(--wash);
+}
+.scenes-preview {
+  flex: 999 1 480px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.scenes-controls {
+  flex: 1 1 300px;
+  max-width: 400px;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.scenes-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 20px;
+}
+.screen {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--sunk);
+}
+.slide {
+  position: absolute;
+  inset: 8% 10% 32%;
+  display: flex;
+  flex-direction: column;
+  gap: 6%;
+  padding: 6% 7%;
+  border-radius: 10px;
+  background: var(--raise);
+  box-shadow: var(--shadow-sm);
+}
+.slide i {
+  display: block;
+  height: 8%;
+  border-radius: 4px;
+  background: var(--line2);
+}
+.capwin {
+  position: absolute;
+  container-type: size;
+  display: flex;
+  gap: 4%;
+  padding: 2.4% 3.4%;
+  overflow: hidden;
+  border-radius: 16px;
+  color: #fff;
+  background: rgba(1, 42, 31, var(--a, 0.86));
+  --sum: 37;
+  --maxw: 21;
+  --cnt: 2;
+  --l: 2;
+  --k: 1;
+  transition: background 0.2s, opacity 0.35s;
+}
+.capwin.light {
+  color: #0a0a0a;
+  background: rgba(255, 255, 255, var(--a, 0.86));
+}
+.capwin .col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 0.3em;
+  font-family: var(--f-read);
+  line-height: 1.4;
+  font-size: calc(clamp(10px, 2.2vw, 18px) * var(--k));
+}
+.capwin.rows {
+  flex-direction: column;
+  gap: 4%;
+}
+.capwin.sans .col {
+  font-family: var(--f-ui);
+}
+.capwin .lg {
+  font: 600 max(8px, 0.45em) / 1 var(--f-ui);
+  letter-spacing: 0.06em;
+  opacity: 0.62;
+}
+.capwin .roll {
+  display: flex;
+  align-items: flex-end;
+  height: calc(var(--l) * 1.4em);
+  margin: 0;
+  overflow: hidden;
+}
+.capwin .roll > span {
+  display: block;
+}
+.capwin .o {
+  opacity: 0.55;
+}
+.capwin.sc-self {
+  right: 4%;
+  bottom: 6%;
+  width: 52%;
+  height: 27%;
+}
+.capwin.sc-band {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 25%;
+  border-radius: 0;
+}
+.capwin.sc-band.top {
+  top: 0;
+  bottom: auto;
+}
+.capwin.sc-stage {
+  inset: 0;
+  border-radius: 0;
+  padding: 5% 7%;
+}
+.capwin.sc-facing {
+  left: 20%;
+  top: 10%;
+  width: 60%;
+  height: 80%;
+  padding: 0;
+  flex-direction: column;
+}
+.capwin.sc-facing .col {
+  padding: 4% 7%;
+}
+.capwin.sc-facing .col:first-child {
+  transform: rotate(180deg);
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* ---- standalone 4-scene caption window & facing layout (`CaptionsFacing.dc.html`) ---- */
+.cap-win {
+  transition: opacity 0.45s var(--e-out);
+}
+.cap-win[data-quiet='true'] {
+  opacity: 0.08;
+}
+.cap-win.light {
+  color: #0a0a0a;
+}
+.cap-win.light .caps .cap-tail {
+  color: #0a0a0a;
+}
+.cap-win.light .caps .cap-old {
+  color: rgba(10, 10, 10, 0.52);
+}
+.cap-win.sans .caps .cap-tail,
+.cap-win.sans .caps .cap-old,
+.cap-win.sans .facing-tail,
+.cap-win.sans .facing-old {
+  font-family: var(--f-ui);
+}
+.cap-win.rows .caps {
+  grid-auto-flow: row;
+}
+.cap-win .caps .cap-tail {
+  font-size: calc(24px * var(--cap-scale, 1));
+}
+.cap-win .caps .cap-old {
+  font-size: calc(19px * var(--cap-scale, 1));
+}
+.cap-facing {
+  padding: 0;
+}
+.facing-half {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 18px 36px 24px;
+  min-height: 0;
+}
+.facing-half[data-rotated='180'] {
+  transform: rotate(180deg);
+}
+.facing-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  flex: none;
+  padding: 0 20px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.facing-old {
+  margin: 0;
+  font: 400 calc(18px * var(--cap-scale, 1)) / 1.45 var(--f-read);
+  color: var(--ink3);
+}
+.facing-tail {
+  margin: 0;
+  font: 400 calc(30px * var(--cap-scale, 1)) / 1.4 var(--f-read);
+  color: inherit;
+}
+
+/* ---- mobile single-language viewer focus (`ViewerLive.dc.html`) ---- */
+.viewer-shell {
+  max-width: 100%;
+}
+.viewer-focus {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 0 20px 40px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 42%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 42%);
+}
+.viewer-old {
+  margin: 0;
+  font: 400 20px / 1.5 var(--f-read);
+  color: var(--ink3);
+}
+.viewer-tail {
+  margin: 0;
+  min-height: 4.3em;
+  font: 400 31px / 1.42 var(--f-read);
+  color: var(--ink);
+}

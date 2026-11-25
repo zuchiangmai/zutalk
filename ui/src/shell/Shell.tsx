@@ -21,6 +21,7 @@ import {
   useSource,
   waterSource,
 } from '../bus';
+import { CaptionScenesPage } from '../pages/CaptionScenesPanel';
 import { HomePage } from '../pages/HomePage';
 import { HostPage } from '../pages/HostPage';
 import { IdentitySheet } from '../pages/IdentitySheet';
@@ -111,7 +112,10 @@ export function Shell() {
       />
 
       <main className="main">
-        {route.page !== 'live' && route.page !== 'host' && route.page !== 'outbound' && (
+        {route.page !== 'live' &&
+          route.page !== 'host' &&
+          route.page !== 'outbound' &&
+          route.page !== 'captions' && (
           <TopBar
             host={state?.host ?? { is: 'Idle' }}
             session={session}
@@ -153,6 +157,8 @@ export function Shell() {
           <LibraryPage initialMonth={route.month ?? null} />
         ) : route.page === 'outbound' ? (
           <OutboundPage />
+        ) : route.page === 'captions' ? (
+          <CaptionScenesPage />
         ) : (
           <SettingsPage />
         )}

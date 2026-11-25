@@ -2,6 +2,36 @@ import type { Column } from '$proto/Column';
 import { say } from '../bus/channel';
 import { createCell, type Source } from '../bus/source';
 
+/** Explicit viewer connection & slot lifecycle state machine (`P5.md` §3.6). */
+export type ViewerStatus = 'connecting' | 'waiting' | 'live' | 'ended' | 'error';
+
+export type ViewerStatusEvent =
+  | { is: 'Reset' }
+  | { is: 'SlotEmpty' }
+  | { is: 'SlotLive' }
+  | { is: 'Gone' }
+  | { is: 'BadKey' }
+  | { is: 'RoomFull' }
+  | { is: 'Offline' };
+
+/** Pure transition function for the audience mobile viewer (`P5-05`). */
+export function viewerStatusStep(status: ViewerStatus, event: ViewerStatusEvent): ViewerStatus {
+  switch (event.is) {
+    case 'Reset':
+      return 'connecting';
+    case 'Gone':
+      return 'ended';
+    case 'BadKey':
+    case 'RoomFull':
+    case 'Offline':
+      return 'error';
+    case 'SlotEmpty':
+      return status === 'ended' || status === 'error' ? status : 'waiting';
+    case 'SlotLive':
+      return status === 'ended' || status === 'error' ? status : 'live';
+  }
+}
+
 const bytes = (b64: string) =>
   Uint8Array.from(atob(b64.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 
@@ -15,19 +45,26 @@ export async function roomKey(fragment: string) {
 /** A frame is base64 of nonce(12) ‖ ciphertext ‖ tag; what it seals is JSON. */
 export async function openFrame<T>(key: CryptoKey, data: string): Promise<T> {
   const b = bytes(data);
-  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, key, b.slice(12));
+  const plain = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b.slice(0, 12) },
+    key,
+    b.slice(12),
+  );
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
 const roomLiveCell = createCell<Column[]>([]);
 const roomEndCell = createCell<string | null>(null);
+const roomStatusCell = createCell<ViewerStatus>('connecting');
 
 export const roomLiveSource: Source<Column[]> = roomLiveCell;
 export const roomEndSource: Source<string | null> = roomEndCell;
+export const roomStatusSource: Source<ViewerStatus> = roomStatusCell;
 
 export function resetRoom(): void {
   roomLiveCell.set([]);
   roomEndCell.set(null);
+  roomStatusCell.set('connecting');
 }
 
 /** Reads an ephemeral slot-only live room with the key from its link fragment. On `gone` it
@@ -35,38 +72,59 @@ export function resetRoom(): void {
 export function read(events: string, fragment: string): () => void {
   resetRoom();
   const source = new EventSource(events);
-  const end = (code: string) => {
+  const finish = (code: string, event: ViewerStatusEvent) => {
     roomLiveCell.set([]);
     roomEndCell.set(code);
+    roomStatusCell.update((prev) => viewerStatusStep(prev, event));
     say(code);
     source.close();
   };
   let queue = roomKey(fragment);
-  queue.catch(() => end('room.bad'));
+  queue.catch(() => finish('room.bad', { is: 'BadKey' }));
   const frame = <T>(then: (it: T | null) => void) => (m: MessageEvent<string>) => {
     queue = queue
       .then(async (key) => {
-        then(m.data === '-' ? null : await openFrame<T>(key, m.data));
+        then(m.data === '-' || m.data === '' ? null : await openFrame<T>(key, m.data));
         return key;
       })
       .catch((err) => {
-        end('room.bad');
+        finish('room.bad', { is: 'BadKey' });
         throw err;
       });
   };
   source.addEventListener(
     'slot',
-    frame<Column[]>((live) => roomLiveCell.set(live ?? [])),
+    frame<Column[]>((live) => {
+      const cols = live ?? [];
+      roomLiveCell.set(cols);
+      roomStatusCell.update((prev) =>
+        viewerStatusStep(prev, cols.length > 0 ? { is: 'SlotLive' } : { is: 'SlotEmpty' }),
+      );
+    }),
   );
-  source.addEventListener('gone', () => end('room.gone'));
+  source.addEventListener('gone', () => finish('room.gone', { is: 'Gone' }));
   source.onerror = () => {
     if (source.readyState !== EventSource.CLOSED) return;
     fetch(events)
-      .then((r) => r.json())
-      .then(
-        (r: { error?: string }) => end(r.error === 'viewers' ? 'room.viewers' : 'room.gone'),
-        () => end('offline'),
-      );
+      .then(async (r) => {
+        if (r.status === 404) {
+          finish('room.gone', { is: 'Gone' });
+          return;
+        }
+        if (r.status === 429) {
+          finish('room.viewers', { is: 'RoomFull' });
+          return;
+        }
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
+        if (body.error === 'viewers') {
+          finish('room.viewers', { is: 'RoomFull' });
+        } else if (body.error === 'room') {
+          finish('room.gone', { is: 'Gone' });
+        } else {
+          finish('offline', { is: 'Offline' });
+        }
+      })
+      .catch(() => finish('offline', { is: 'Offline' }));
   };
   return () => source.close();
 }

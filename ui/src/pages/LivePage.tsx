@@ -89,6 +89,7 @@ export type LiveViewProps = {
   onUpdate: () => void;
   onStopOutbound?: () => void;
   onCopyHostLink?: (link: string) => void;
+  onOpenCaptionSettings?: () => void;
 };
 
 /** Pure props Live recording view with multi-column captions, real Level meter, M hotkey, and LiveNotes rail. */
@@ -112,6 +113,7 @@ export function LiveView({
   onUpdate,
   onStopOutbound,
   onCopyHostLink,
+  onOpenCaptionSettings,
 }: LiveViewProps) {
   const [notesOpen, setNotesOpen] = useState(initialNotesOpen);
   const [draft, setDraft] = useState('');
@@ -197,6 +199,16 @@ export function LiveView({
           <Icon name="captions" size="s" />
           {t('captions')}
         </Pill>
+        {onOpenCaptionSettings && (
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={t('captions.settings')}
+            onClick={onOpenCaptionSettings}
+          >
+            <Icon name="settings" size="s" />
+          </button>
+        )}
       </TopBar>
 
       <div className="split">
@@ -401,6 +413,7 @@ export function LivePage() {
       }
       onUpdate={() => void send({ do: 'Update' })}
       onStopOutbound={() => void send({ do: 'StopOutbound' })}
+      onOpenCaptionSettings={() => go({ page: 'captions' })}
       onCopyHostLink={(link) => {
         if (globalThis.navigator?.clipboard?.writeText) {
           void globalThis.navigator.clipboard.writeText(link).then(

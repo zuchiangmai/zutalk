@@ -82,6 +82,7 @@ export type SettingsViewProps = {
   onToggleOverlay: () => void;
   onUpdate: () => void;
   onOpenOutbound?: () => void;
+  onOpenCaptions?: () => void;
 };
 
 /** Pure presentational Settings page (Settings.dc.html + P4 identity, daily quota, and local adoption). */
@@ -106,6 +107,7 @@ export function SettingsView({
   onToggleOverlay,
   onUpdate,
   onOpenOutbound,
+  onOpenCaptions,
 }: SettingsViewProps) {
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
   const [termSaid, setTermSaid] = useState('');
@@ -410,6 +412,20 @@ export function SettingsView({
         ))}
       </section>
 
+      {/* Caption window scenes */}
+      {onOpenCaptions && (
+        <section className="group">
+          <h2 className="h">{t('captions')}</h2>
+          <div className="line">
+            <span className="grow k">{t('captions.settings_tip')}</span>
+            <Pill onClick={onOpenCaptions}>
+              {t('captions.settings')}
+              <Icon name="chevron-right" size="s" />
+            </Pill>
+          </div>
+        </section>
+      )}
+
       {/* Outbound overview */}
       {onOpenOutbound && (
         <section className="group">
@@ -492,6 +508,7 @@ export function SettingsPage() {
       onToggleOverlay={() => setOverlay(!overlayOpen)}
       onUpdate={() => void send({ do: 'Update' })}
       onOpenOutbound={() => go({ page: 'outbound' })}
+      onOpenCaptions={() => go({ page: 'captions' })}
     />
   );
 }
