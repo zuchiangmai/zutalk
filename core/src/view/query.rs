@@ -10,7 +10,7 @@ use crate::knowledge::glossary::Term;
 use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic, TopicSummary};
 use crate::out::city::{Calendar, Filing};
 use crate::record::notes::Note;
-use crate::record::shelf::{FILING, Shelf};
+use crate::record::shelf::{FILING, Shelf, TitleCandidate};
 use crate::record::takes::{self, RefineStatus, TakeInfo};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::{Counter, Spread};
@@ -129,6 +129,8 @@ pub struct RecordingView {
     pub note: String,
     pub filed: Option<Filing>,
     pub refine: RefineStatus,
+    pub topics: Vec<String>,
+    pub title_candidates: Vec<TitleCandidate>,
 }
 
 /// One recording's outbound city-filing record returned by [`Query::Outbound`].
@@ -696,6 +698,9 @@ fn execute_blocking(
                 started: rec.about.started,
                 length_ms: rec.about.length_ms,
                 title: rec.about.title.clone(),
+                title_by: rec.about.title_by,
+                tags: rec.about.tags.clone(),
+                topics: rec.about.topics.clone(),
                 preview: rec.about.preview.clone(),
                 spoken: rec.about.spoken.clone(),
                 draft: rec.about.take == 0,
@@ -714,6 +719,8 @@ fn execute_blocking(
                 note: rec.note,
                 filed,
                 refine,
+                topics: rec.about.topics,
+                title_candidates: rec.about.title_candidates,
             };
             Ok((QueryValue::Recording(Some(Box::new(view))), 1))
         }

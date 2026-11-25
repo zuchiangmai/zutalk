@@ -2,6 +2,6 @@
 import type { Writing } from "./Writing";
 
 /**
- * Latest progress of each bounded background job class (`P2.md` §3.6.1).
+ * Latest progress of each bounded background job class (`P2.md` §3.6.1, `PLAN.md` §2.3).
  */
-export type Progress = { refine: Writing | null, file: Writing | null, move_old: Writing | null, };
+export type Progress = { refine: Writing | null, file: Writing | null, move_old: Writing | null, title: Writing | null, };

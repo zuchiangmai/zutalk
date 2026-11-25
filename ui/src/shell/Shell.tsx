@@ -42,6 +42,7 @@ const EMPTY_FILTER: LibraryFilter = {
   audio_only: false,
   filed_only: false,
   language: null,
+  tag: null,
 };
 
 /** Elapsed-time tick for the sidebar live indicator (P3.md §3.4). */

@@ -11,6 +11,7 @@ pub use crate::live::frame::{Caption, Column, Frame, Status};
 pub use crate::out::host::{HostEvent, HostState};
 pub use crate::record::adopt::LocalShelf;
 pub use crate::record::notes::Note;
+pub use crate::record::shelf::{ContentTag, TitleBy, TitleCandidate};
 pub use crate::record::takes::{RefineFailure, RefineStatus, TakeInfo};
 use crate::rt::stats::Tally;
 use crate::rt::water::Water;
@@ -59,13 +60,14 @@ pub struct Writing {
     pub of: u32,
 }
 
-/// Latest progress of each bounded background job class (`P2.md` §3.6.1).
+/// Latest progress of each bounded background job class (`P2.md` §3.6.1, `PLAN.md` §2.3).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]
 pub struct Progress {
     pub refine: Option<Writing>,
     pub file: Option<Writing>,
     pub move_old: Option<Writing>,
+    pub title: Option<Writing>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -503,6 +505,8 @@ pub enum Command {
     RemoveTopic { id: String },
     ImportTopicFile { id: String, path: String },
     RememberTerm { topic_id: String, said: String, written: BTreeMap<String, String> },
+    GenerateTitle { id: String },
+    PickTitle { id: String, title: String, by: TitleBy },
     City { address: String },
     File { id: String, event: String, audio: bool },
     Diagnose,
@@ -584,6 +588,15 @@ impl std::fmt::Debug for Command {
                 .field("topic_id", topic_id)
                 .field("written_len", &written.len())
                 .finish(),
+            Command::GenerateTitle { id } => {
+                f.debug_struct("GenerateTitle").field("id", id).finish()
+            }
+            Command::PickTitle { id, title: _, by } => f
+                .debug_struct("PickTitle")
+                .field("id", id)
+                .field("title", &"…")
+                .field("by", by)
+                .finish(),
             Command::City { address } => f.debug_struct("City").field("address", address).finish(),
             Command::File { id, event, audio } => f
                 .debug_struct("File")
@@ -637,6 +650,8 @@ impl Command {
             Command::RemoveTopic { .. } => "RemoveTopic",
             Command::ImportTopicFile { .. } => "ImportTopicFile",
             Command::RememberTerm { .. } => "RememberTerm",
+            Command::GenerateTitle { .. } => "GenerateTitle",
+            Command::PickTitle { .. } => "PickTitle",
             Command::City { .. } => "City",
             Command::File { .. } => "File",
             Command::Diagnose => "Diagnose",
@@ -684,6 +699,8 @@ impl Command {
             | Command::RemoveTopic { .. }
             | Command::ImportTopicFile { .. }
             | Command::RememberTerm { .. }
+            | Command::GenerateTitle { .. }
+            | Command::PickTitle { .. }
             | Command::City { .. }
             | Command::Diagnose => false,
         }

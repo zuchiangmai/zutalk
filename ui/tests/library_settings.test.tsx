@@ -42,6 +42,9 @@ function makeRow(i: number, started = Date.UTC(2026, 10, 1 + (i % 20), 10, 0)): 
     started,
     length_ms: 60_000 + i * 1_000,
     title: `Recording session #${i}`,
+    title_by: 'Ai',
+    tags: [],
+    topics: [],
     preview: `Preview text ${i}`,
     spoken: i % 2 === 0 ? ['zh', 'en'] : ['th'],
     draft: i % 5 === 0,
@@ -100,7 +103,7 @@ describe('LibraryView virtualization (I8)', () => {
         rows={rows}
         hasMore={false}
         loading={false}
-        filter={{ draft_only: false, audio_only: false, filed_only: false, language: null }}
+        filter={{ draft_only: false, audio_only: false, filed_only: false, language: null, tag: null }}
         languages={['zh', 'en', 'th']}
         searchText=""
         searchHits={null}

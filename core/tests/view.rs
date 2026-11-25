@@ -1259,3 +1259,102 @@ async fn view_engine_never_stamps_stale_source_with_newer_version() {
     tree.cancel();
     tree.wait().await;
 }
+
+#[test]
+fn index_v2_rebuilds_from_v1_and_searches_and_filters_tags() {
+    use zutalk_core::record::shelf::{ContentTag, TitleBy, TitleCandidate};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shelf = shelf_for(&dir.path().join("shelf"), ME, 5);
+    let tapes = dir.path().join("tapes");
+    let db = dir.path().join("index.sqlite3");
+
+    // Seed two recordings: one with 2-char Chinese tag ("押金") and >=3-char tag ("读书会讨论"),
+    // and one with a different tag ("旅行").
+    let about_a = About {
+        started: NOW,
+        length_ms: 45_000,
+        title: "租房沟通".into(),
+        title_by: TitleBy::Ai,
+        tags: vec![
+            ContentTag { label: "押金".into(), at_ms: 3_000 },
+            ContentTag { label: "读书会讨论".into(), at_ms: 12_000 },
+        ],
+        topics: vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        title_candidates: vec![TitleCandidate { by: TitleBy::Ai, text: "租房沟通".into() }],
+        spoken: vec!["zh".into()],
+        shown: vec!["zh".into()],
+        source: "mic".into(),
+        take: 1,
+        ..About::default()
+    };
+    shelf.put("rec_tag_a", RECORDING, &[("rec_tag_a".into(), Some(about_a))], NOW).unwrap();
+    let about_b = About {
+        started: NOW + 1_000,
+        length_ms: 20_000,
+        title: "周末出行".into(),
+        title_by: TitleBy::Hand,
+        tags: vec![ContentTag { label: "旅行".into(), at_ms: 1_000 }],
+        spoken: vec!["zh".into()],
+        shown: vec!["zh".into()],
+        source: "mic".into(),
+        take: 1,
+        ..About::default()
+    };
+    shelf.put("rec_tag_b", RECORDING, &[("rec_tag_b".into(), Some(about_b))], NOW + 1_000).unwrap();
+
+    // Create a legacy v1 SQLite database on disk (user_version = 1) to verify automatic rebuild to v2.
+    {
+        let conn = rusqlite::Connection::open(&db).expect("create v1 db");
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta(key, value) VALUES ('by', 'did:zu:ewvi7nxzyoun6zhxrhs64oiz');
+             PRAGMA user_version = 1;",
+        )
+        .expect("init v1");
+    }
+
+    assert_eq!(INDEX_SCHEMA_VERSION, 2);
+    let stats = Stats::new();
+    let seen = zutalk_log::capture(zutalk_log::Level::Info);
+    let idx = Index::open(&db, &shelf, &tapes, &stats).expect("open & rebuild v1->v2");
+    assert!(
+        seen.of("index.open")
+            .iter()
+            .any(|l| l.text("mode") == Some("rebuilt") && l.text("why") == Some("version")),
+        "expected v1->v2 automatic rebuild event"
+    );
+
+    // Search hits 2-char Chinese tag ("押金") via fallback AND >=3-char tag ("读书会讨论") via FTS5.
+    let short_res = idx.search("押金", 50).expect("search short tag");
+    assert!(
+        short_res.hits.iter().any(|h| h.recording_id == "rec_tag_a"
+            && h.kind == SearchHitKind::Tag
+            && h.snippet == "押金"),
+        "expected SearchHitKind::Tag for 2-char tag, got {:?}",
+        short_res.hits
+    );
+    let long_res = idx.search("读书会讨论", 50).expect("search long tag");
+    assert!(
+        long_res.hits.iter().any(|h| h.recording_id == "rec_tag_a"
+            && h.kind == SearchHitKind::Tag
+            && h.snippet == "读书会讨论"),
+        "expected SearchHitKind::Tag for >=3-char tag, got {:?}",
+        long_res.hits
+    );
+
+    // LibraryFilter { tag: Some("押金") } filters strictly to rec_tag_a and preserves title_by/tags/topics.
+    let filtered = idx
+        .library_recent(
+            &LibraryFilter { tag: Some("押金".into()), ..LibraryFilter::default() },
+            50,
+            0,
+        )
+        .expect("filter by tag");
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.rows.len(), 1);
+    assert_eq!(filtered.rows[0].id, "rec_tag_a");
+    assert_eq!(filtered.rows[0].title_by, TitleBy::Ai);
+    assert_eq!(filtered.rows[0].tags.len(), 2);
+    assert_eq!(filtered.rows[0].topics, vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]);
+}

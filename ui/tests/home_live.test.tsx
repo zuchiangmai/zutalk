@@ -59,6 +59,7 @@ describe('HomeView', () => {
     refine: null,
     file: null,
     move_old: { id: 'old-1', step: 'moving', done: 41, of: 175 },
+    title: null,
   };
 
   it('starts recording, updates spoken/shown/sound/device setup, imports, and shows 0.8 migration status', () => {

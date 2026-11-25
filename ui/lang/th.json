@@ -468,5 +468,9 @@
  "code.topic.file.format": "รองรับเฉพาะไฟล์ข้อความ UTF-8, Markdown, CSV หรือ TSV เท่านั้น",
  "code.topic.file.big": "ไฟล์มีขนาดใหญ่เกินไป (สูงสุด 512 KiB)",
  "code.topic.file.read": "ไม่สามารถอ่านไฟล์นี้ได้",
- "code.topic.remembered": "เพิ่มเข้าสู่คลังความรู้แล้ว"
+ "code.topic.remembered": "เพิ่มเข้าสู่คลังความรู้แล้ว",
+ "step.titling": "กำลังตั้งชื่อเรื่อง",
+ "code.titles.empty": "ยังไม่มีข้อความถอดเสียงสำหรับตั้งชื่อ",
+ "code.titles.manual": "คงชื่อเรื่องที่คุณตั้งไว้",
+ "search.kind.Tag": "หัวข้อ"
 }

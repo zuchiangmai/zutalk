@@ -17,6 +17,8 @@ function hitKindLabel(kind: SearchHitKind): string {
   switch (kind) {
     case 'Title':
       return t('search.kind.Title');
+    case 'Tag':
+      return t('search.kind.Tag');
     case 'Line':
       return t('search.kind.Line');
     case 'Translation':

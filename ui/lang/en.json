@@ -468,5 +468,9 @@
  "code.topic.file.format": "Only UTF-8 text, Markdown, CSV, or TSV files can be read",
  "code.topic.file.big": "This file is too large to read (512 KiB max)",
  "code.topic.file.read": "This file could not be read",
- "code.topic.remembered": "Added to knowledge base"
+ "code.topic.remembered": "Added to knowledge base",
+ "step.titling": "Writing title",
+ "code.titles.empty": "No transcript text yet to name",
+ "code.titles.manual": "Kept your title",
+ "search.kind.Tag": "Topic"
 }

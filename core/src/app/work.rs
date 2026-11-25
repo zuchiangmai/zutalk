@@ -3,6 +3,7 @@
 //! identity creation, invite claiming, city calendar, rooms/slots, whole-recording transcription,
 //! city filing, 0.8 migration, and update installation (`P1.md` §3.6–§3.8, `P1-19`, `P1-20`).
 
+use crate::ai::titles::{self, TitleAction, TitleInput};
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
@@ -22,7 +23,8 @@ use crate::out::export::{Doc, EXPORTERS};
 use crate::out::host::{self, HOST_ARM_POLL_MS, HOST_KEEPALIVE_MS, HOST_SLOT_MS, Write};
 use crate::record::notes;
 use crate::record::shelf::{
-    About, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, TOPIC, Words,
+    About, ContentTag, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, TOPIC, TitleBy,
+    TitleCandidate, Words,
 };
 use crate::record::takes::{
     RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
@@ -36,7 +38,7 @@ use crate::rt::water::Water;
 use crate::view::index::Index;
 use crate::view::query::{ViewEngine, ViewKind};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -55,6 +57,9 @@ pub const DESK_QUEUE_JOBS: usize = 64;
 /// Heavy background jobs (whole-recording transcription, city filing, 0.8 migration) run one at a
 /// time so they neither fight each other nor starve live captioning (`PLAN.md` §4.1, `P1.md` §3.8).
 pub const BACKGROUND_AT_ONCE_JOBS: usize = 1;
+/// Independent single-concurrency semaphore for background AI title/tag generation so it never
+/// blocks recording, refining, or city filing (`P6.md` §3.4).
+pub const TITLE_AT_ONCE_JOBS: usize = 1;
 /// Diagnose bundles retained under `<data>/diagnose/`: each copies at most 2 log files (16 MB),
 /// so 3 bundles stay under 50 MB (`P1-22-diagnose.md`).
 pub const DIAGNOSE_KEPT_DIRS: usize = 3;
@@ -385,6 +390,20 @@ enum Job {
         said: String,
         written: BTreeMap<String, String>,
     },
+    PickTitle {
+        id: String,
+        title: String,
+        by: TitleBy,
+    },
+    ApplyTitles {
+        id: String,
+        shelf_by: String,
+        titles: Vec<String>,
+        tags: Vec<ContentTag>,
+        candidates: Vec<TitleCandidate>,
+        elapsed_ms: u64,
+        done: oneshot::Sender<()>,
+    },
     DestroyAudio {
         id: String,
         under_way: Option<String>,
@@ -439,6 +458,8 @@ impl DeskJob for Job {
             Job::RemoveTopic { .. } => "topic.remove",
             Job::ImportTopicFile { .. } => "topic.import",
             Job::RememberTerm { .. } => "topic.remember",
+            Job::PickTitle { .. } => "title.pick",
+            Job::ApplyTitles { .. } => "titles",
             Job::DestroyAudio { .. } => "destroy",
             Job::Export { .. } => "export",
             Job::BeginFile { .. } => "file.begin",
@@ -542,6 +563,8 @@ pub(crate) struct Work {
     keep_hint: Arc<Mutex<Option<u32>>>,
     desk: Desk<Job>,
     bg: Arc<Semaphore>,
+    title_bg: Arc<Semaphore>,
+    titling: Arc<Mutex<BTreeSet<String>>>,
     next_seq: Arc<AtomicU64>,
     host_live: Arc<Mutex<Option<ActiveHost>>>,
     host_busy: Register<bool>,
@@ -570,6 +593,8 @@ impl Work {
         let jobs_failed = stats.counter("jobs.failed");
         let next_seq = Arc::new(AtomicU64::new(1));
         let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
+        let title_bg = Arc::new(Semaphore::new(TITLE_AT_ONCE_JOBS));
+        let titling: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
         let identity = Arc::new(Mutex::new(Identity::starting()));
         let topics: Arc<Mutex<Vec<Topic>>> = Arc::new(Mutex::new(Vec::new()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
@@ -851,6 +876,8 @@ impl Work {
             keep_hint,
             desk,
             bg,
+            title_bg,
+            titling,
             next_seq,
             host_live,
             host_busy,
@@ -1217,6 +1244,38 @@ impl Work {
         self.desk.offer(Job::RememberTerm { topic_id, said, written }).map(|_| ())
     }
 
+    pub(crate) fn pick_title(
+        &self,
+        id: String,
+        title: String,
+        by: TitleBy,
+    ) -> Result<(), &'static str> {
+        self.desk.offer(Job::PickTitle { id, title, by }).map(|_| ())
+    }
+
+    pub(crate) fn generate_title(&self, id: String) -> Result<(), &'static str> {
+        let snap = snapshot(&self.identity);
+        let shelf = snap.shelf?;
+        spawn_titles_task(TitleTask {
+            id,
+            manual: true,
+            shelf,
+            keys: snap.keys,
+            http: self.http.clone(),
+            openrouter: self.config.openrouter.clone(),
+            work_tree: self.tree.clone(),
+            desk: self.desk.clone(),
+            progress_reg: self.progress_reg.clone(),
+            said: self.said.clone(),
+            title_bg: self.title_bg.clone(),
+            titling: self.titling.clone(),
+            next_seq: self.next_seq.clone(),
+            jobs_done: self.jobs_done.clone(),
+            jobs_failed: self.jobs_failed.clone(),
+        });
+        Ok(())
+    }
+
     pub(crate) fn destroy_audio(
         &self,
         id: String,
@@ -1519,6 +1578,10 @@ impl Work {
             work_tree: self.tree.clone(),
             root: self.root.clone(),
             bg: self.bg.clone(),
+            http: self.http.clone(),
+            desk: self.desk.clone(),
+            title_bg: self.title_bg.clone(),
+            titling: self.titling.clone(),
             next_seq: self.next_seq.clone(),
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
@@ -1543,6 +1606,10 @@ impl Work {
         let work_tree = self.tree.clone();
         let root = self.root.clone();
         let bg = self.bg.clone();
+        let http = self.http.clone();
+        let desk = self.desk.clone();
+        let title_bg = self.title_bg.clone();
+        let titling = self.titling.clone();
         let config = self.config.clone();
         let results = self.results.clone();
         let progress_reg = self.progress_reg.clone();
@@ -1583,6 +1650,10 @@ impl Work {
                     work_tree: work_tree.clone(),
                     root: root.clone(),
                     bg: bg.clone(),
+                    http: http.clone(),
+                    desk: desk.clone(),
+                    title_bg: title_bg.clone(),
+                    titling: titling.clone(),
                     next_seq: next_seq.clone(),
                     jobs_done: jobs_done.clone(),
                     jobs_failed: jobs_failed.clone(),
@@ -1620,6 +1691,10 @@ impl Work {
             work_tree: self.tree.clone(),
             root: self.root.clone(),
             bg: self.bg.clone(),
+            http: self.http.clone(),
+            desk: self.desk.clone(),
+            title_bg: self.title_bg.clone(),
+            titling: self.titling.clone(),
             next_seq: self.next_seq.clone(),
             jobs_done: self.jobs_done.clone(),
             jobs_failed: self.jobs_failed.clone(),
@@ -1804,6 +1879,26 @@ fn set_move_progress(reg: &Register<Progress>, value: Option<Writing>) {
             return None;
         }
         Some(Progress { move_old: value.clone(), ..cur.clone() })
+    });
+}
+
+fn set_title_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
+    reg.change(|cur| {
+        let next = match (&value, only_id) {
+            (Some(w), _) => Some(w.clone()),
+            (None, Some(target)) => {
+                if cur.title.as_ref().is_some_and(|w| w.id == target) {
+                    None
+                } else {
+                    return None;
+                }
+            }
+            (None, None) => None,
+        };
+        if cur.title == next {
+            return None;
+        }
+        Some(Progress { title: next, ..cur.clone() })
     });
 }
 
@@ -2158,6 +2253,102 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                     Err(c)
                 }
             }
+        }
+        Job::PickTitle { id, title, by } => {
+            let shelf = snapshot(identity).shelf?;
+            let about = shelf.about(&id).map_err(fail)?.ok_or("recording.gone")?.about;
+            let trimmed = title.trim().to_owned();
+            let title_by = if trimmed.is_empty() { TitleBy::None } else { by };
+            shelf
+                .put(
+                    &id,
+                    RECORDING,
+                    &[(id.clone(), Some(About { title: trimmed, title_by, ..about }))],
+                    now(),
+                )
+                .map_err(fail)?;
+            let tapes = config.tapes();
+            env.with_index(|idx| {
+                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
+            });
+            env.views.invalidate(ViewKind::Library, None);
+            env.views.invalidate(ViewKind::Search, None);
+            env.views.invalidate(ViewKind::Recording, Some(id));
+            Ok(DeskOut::Silent)
+        }
+        Job::ApplyTitles { id, shelf_by, titles, tags, candidates, elapsed_ms, done } => {
+            let commit_res = (|| -> Result<(), &'static str> {
+                let snap = snapshot(identity);
+                let Ok(shelf) = snap.shelf else {
+                    info!(
+                        "titles.done",
+                        rec = Id(&id),
+                        code = "gone",
+                        applied = false,
+                        tags = 0usize,
+                        ms = elapsed_ms
+                    );
+                    return Ok(());
+                };
+                if shelf.by() != shelf_by {
+                    info!(
+                        "titles.done",
+                        rec = Id(&id),
+                        code = "gone",
+                        applied = false,
+                        tags = 0usize,
+                        ms = elapsed_ms
+                    );
+                    return Ok(());
+                }
+                let Some(rec) = shelf.about(&id).map_err(fail)? else {
+                    info!(
+                        "titles.done",
+                        rec = Id(&id),
+                        code = "gone",
+                        applied = false,
+                        tags = 0usize,
+                        ms = elapsed_ms
+                    );
+                    return Ok(());
+                };
+                let mut next = rec.about;
+                let hand_protected = next.title_by == TitleBy::Hand
+                    || (matches!(next.title_by, TitleBy::File | TitleBy::Event)
+                        && !next.title.trim().is_empty());
+                let mut applied = false;
+                if !hand_protected && let Some(first) = titles.first() {
+                    next.title = first.clone();
+                    next.title_by = TitleBy::Ai;
+                    applied = true;
+                }
+                if !tags.is_empty() {
+                    next.tags = tags.clone();
+                }
+                if !candidates.is_empty() {
+                    next.title_candidates = candidates;
+                }
+                shelf.put(&id, RECORDING, &[(id.clone(), Some(next))], now()).map_err(fail)?;
+                let tapes = config.tapes();
+                env.with_index(|idx| {
+                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
+                });
+                env.views.invalidate(ViewKind::Library, None);
+                env.views.invalidate(ViewKind::Search, None);
+                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
+                info!(
+                    "titles.done",
+                    rec = Id(&id),
+                    code = "ok",
+                    applied = applied,
+                    tags = tags.len(),
+                    ms = elapsed_ms
+                );
+                Ok(())
+            })();
+            let _ = done.send(()); // dropped: background titling caller was cancelled
+            commit_res?;
+            Ok(DeskOut::Silent)
         }
         Job::DestroyAudio { id, under_way } => {
             let shelf = snapshot(identity).shelf?;
@@ -3296,6 +3487,194 @@ async fn host_slot_loop(
     }
 }
 
+struct TitleTask {
+    id: String,
+    manual: bool,
+    shelf: Arc<Shelf>,
+    keys: Arc<Chain>,
+    http: reqwest::Client,
+    openrouter: String,
+    work_tree: Tree,
+    desk: Desk<Job>,
+    progress_reg: Register<Progress>,
+    said: Voice,
+    title_bg: Arc<Semaphore>,
+    titling: Arc<Mutex<BTreeSet<String>>>,
+    next_seq: Arc<AtomicU64>,
+    jobs_done: Counter,
+    jobs_failed: Counter,
+}
+
+struct TitlingGuard {
+    id: String,
+    titling: Arc<Mutex<BTreeSet<String>>>,
+    progress_reg: Register<Progress>,
+}
+
+impl Drop for TitlingGuard {
+    fn drop(&mut self) {
+        self.titling.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
+        set_title_progress(&self.progress_reg, None, Some(&self.id));
+    }
+}
+
+fn spawn_titles_task(task: TitleTask) {
+    {
+        let mut set = task.titling.lock().unwrap_or_else(PoisonError::into_inner);
+        if !set.insert(task.id.clone()) {
+            return; // already titling this recording
+        }
+    }
+    let work_tree = task.work_tree.clone();
+    work_tree.spawn("job.titles", async move {
+        let _guard = TitlingGuard {
+            id: task.id.clone(),
+            titling: task.titling.clone(),
+            progress_reg: task.progress_reg.clone(),
+        };
+        let wait_at = tokio::time::Instant::now();
+        let Ok(_permit) = task.title_bg.clone().acquire_owned().await else {
+            return;
+        };
+        let waited_ms = wait_at.elapsed().as_millis() as u64;
+        let read_shelf = task.shelf.clone();
+        let read_id = task.id.clone();
+        let loaded = task
+            .work_tree
+            .blocking("titles.read", move || {
+                let rec = read_shelf.read(&read_id).map_err(|_| "shelf")?;
+                let topics = topic::list(&read_shelf).unwrap_or_default();
+                Ok::<_, &'static str>((rec, topics))
+            })
+            .await;
+        let (rec, all_topics) = match loaded {
+            Ok(Ok((Some(rec), topics))) => (rec, topics),
+            Ok(Ok((None, _))) => {
+                info!(
+                    "titles.done",
+                    rec = Id(&task.id),
+                    code = "gone",
+                    applied = false,
+                    tags = 0usize,
+                    ms = 0u64
+                );
+                return;
+            }
+            _ => return,
+        };
+
+        let has_lines = rec.lines.iter().any(|(_, s)| !s.line.text.trim().is_empty());
+        let has_key = task.keys.from(Service::OpenRouter) != From::Nowhere;
+        let title_empty = rec.about.title.trim().is_empty();
+        let tags_empty = rec.about.tags.is_empty();
+        match titles::title_plan(
+            has_lines,
+            has_key,
+            rec.about.title_by,
+            title_empty,
+            tags_empty,
+            task.manual,
+        ) {
+            TitleAction::Skip(why) => {
+                info!(
+                    "titles.done",
+                    rec = Id(&task.id),
+                    code = "skipped",
+                    applied = false,
+                    tags = 0usize,
+                    ms = 0u64
+                );
+                if task.manual {
+                    task.said.say(why);
+                }
+                return;
+            }
+            TitleAction::Generate { .. } => {}
+        }
+
+        let seq = task.next_seq.fetch_add(1, Ordering::Relaxed);
+        info!("job.start", kind = "titles", job = seq, waited_ms = waited_ms);
+        set_title_progress(
+            &task.progress_reg,
+            Some(Writing { id: task.id.clone(), step: "titling".into(), done: 0, of: 1 }),
+            None,
+        );
+
+        let line_refs: Vec<&Line> = rec.lines.iter().map(|(_, s)| &s.line).collect();
+        let excerpt = titles::sample_transcript(&line_refs);
+        let max_t_ms = line_refs.iter().map(|l| l.t1).max().unwrap_or(rec.about.length_ms);
+        let first_line =
+            line_refs.iter().map(|l| l.text.trim()).find(|t| !t.is_empty()).map(str::to_owned);
+        let file_or_event: Option<(TitleBy, String)> =
+            if matches!(rec.about.title_by, TitleBy::File | TitleBy::Event)
+                && !rec.about.title.trim().is_empty()
+            {
+                Some((rec.about.title_by, rec.about.title.clone()))
+            } else {
+                rec.about
+                    .title_candidates
+                    .iter()
+                    .find(|c| {
+                        matches!(c.by, TitleBy::Event | TitleBy::File) && !c.text.trim().is_empty()
+                    })
+                    .map(|c| (c.by, c.text.clone()))
+            };
+
+        let ctx = topic::assemble_context(&all_topics, &rec.about.topics, "");
+        let topic_hint = ctx
+            .general
+            .iter()
+            .filter(|(k, _)| k == "domain")
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let input = TitleInput { spoken: rec.about.spoken.clone(), topic_hint, excerpt, max_t_ms };
+        let started = std::time::Instant::now();
+        let generated = titles::generate(&task.http, &task.openrouter, &*task.keys, &input).await;
+        let ms = started.elapsed().as_millis() as u64;
+
+        match generated {
+            Ok(meta) => {
+                let fe_ref = file_or_event.as_ref().map(|(by, text)| (*by, text.as_str()));
+                let candidates =
+                    titles::build_candidates(&meta.titles, first_line.as_deref(), fe_ref);
+                let (done_tx, done_rx) = oneshot::channel();
+                let apply_job = Job::ApplyTitles {
+                    id: task.id.clone(),
+                    shelf_by: task.shelf.by().to_owned(),
+                    titles: meta.titles,
+                    tags: meta.tags,
+                    candidates,
+                    elapsed_ms: ms,
+                    done: done_tx,
+                };
+                if task.desk.send(apply_job).await.is_ok() {
+                    let _ = done_rx.await; // dropped: desk ended on shutdown
+                }
+                info!("job.done", kind = "titles", job = seq, code = "ok", ms = ms);
+                task.jobs_done.add(1);
+            }
+            Err(end) => {
+                let c = code(end);
+                warn!(
+                    "titles.done",
+                    rec = Id(&task.id),
+                    code = c,
+                    applied = false,
+                    tags = 0usize,
+                    ms = ms
+                );
+                warn!("job.done", kind = "titles", job = seq, code = c, ms = ms);
+                task.jobs_failed.add(1);
+                if task.manual {
+                    task.said.say(c);
+                }
+            }
+        }
+    });
+}
+
 struct WriteCtx {
     id: String,
     started_by: String,
@@ -3310,6 +3689,10 @@ struct WriteCtx {
     work_tree: Tree,
     root: Tree,
     bg: Arc<Semaphore>,
+    http: reqwest::Client,
+    desk: Desk<Job>,
+    title_bg: Arc<Semaphore>,
+    titling: Arc<Mutex<BTreeSet<String>>>,
     next_seq: Arc<AtomicU64>,
     jobs_done: Counter,
     jobs_failed: Counter,
@@ -3318,6 +3701,28 @@ struct WriteCtx {
 }
 
 impl WriteCtx {
+    fn spawn_auto_titles(&self) {
+        if self.keys.from(Service::OpenRouter) == From::Nowhere {
+            return;
+        }
+        spawn_titles_task(TitleTask {
+            id: self.id.clone(),
+            manual: false,
+            shelf: self.shelf.clone(),
+            keys: self.keys.clone(),
+            http: self.http.clone(),
+            openrouter: self.config.openrouter.clone(),
+            work_tree: self.work_tree.clone(),
+            desk: self.desk.clone(),
+            progress_reg: self.progress_reg.clone(),
+            said: self.said.clone(),
+            title_bg: self.title_bg.clone(),
+            titling: self.titling.clone(),
+            next_seq: self.next_seq.clone(),
+            jobs_done: self.jobs_done.clone(),
+            jobs_failed: self.jobs_failed.clone(),
+        });
+    }
     fn tape(&self) -> PathBuf {
         self.config.tapes().join(&self.id)
     }
@@ -3389,8 +3794,13 @@ impl WriteCtx {
                             return;
                         }
                     }
-                    write::Owed::Waits(why) => info!("write.skipped", n = 1usize, why = why),
-                    write::Owed::No => {}
+                    write::Owed::Waits(why) => {
+                        info!("write.skipped", n = 1usize, why = why);
+                        self.spawn_auto_titles();
+                    }
+                    write::Owed::No => {
+                        self.spawn_auto_titles();
+                    }
                 }
             }
             Ok(None) => {
@@ -3559,6 +3969,7 @@ impl WriteCtx {
                     *cur = next;
                 }
                 self.index_sync.refined(self.id.clone(), self.shelf.by().to_owned()).await;
+                self.spawn_auto_titles();
             }
             Ok(()) => {
                 self.views.set_active_refine(self.id.clone(), None);
@@ -3595,6 +4006,7 @@ impl WriteCtx {
                             RefineFailure { code: mapped.into(), at: failed_at },
                         )
                         .await;
+                    self.spawn_auto_titles();
                 } else {
                     self.views.set_active_refine(self.id.clone(), None);
                 }
@@ -3626,7 +4038,13 @@ fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<(), &'static str> {
     let done = match change {
         Change::Title { text } => {
             let about = shelf.about(id).map_err(fail)?.ok_or("recording.gone")?.about;
-            shelf.put(id, RECORDING, &[(id.into(), Some(About { title: text, ..about }))], now())
+            let title_by = if text.trim().is_empty() { TitleBy::None } else { TitleBy::Hand };
+            shelf.put(
+                id,
+                RECORDING,
+                &[(id.into(), Some(About { title: text, title_by, ..about }))],
+                now(),
+            )
         }
         Change::Line { key, language, text } => {
             let lines = shelf.read(id).map_err(fail)?.ok_or("recording.gone")?.lines;

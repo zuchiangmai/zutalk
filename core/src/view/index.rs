@@ -9,7 +9,7 @@ use crate::capture::tape;
 use crate::live::lang::profile;
 use crate::live::lines::Line;
 use crate::out::city::Filing;
-use crate::record::shelf::{FILING, LINE, RECORDING, Said, Shelf};
+use crate::record::shelf::{ContentTag, FILING, LINE, RECORDING, Said, Shelf, TitleBy};
 use crate::record::takes::{self, RefineFailure};
 use crate::rt::stats::Stats;
 use rusqlite::{Connection, InterruptHandle, OpenFlags, OptionalExtension, Transaction, params};
@@ -23,7 +23,7 @@ use ts_rs::TS;
 use zutalk_log::{debug, info, warn};
 
 /// Schema version stored in `PRAGMA user_version`; bump to trigger automatic rebuild.
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 /// Short WAL busy wait for concurrent readers and the single writer (`P2.md` §3.4).
 pub const INDEX_BUSY_TIMEOUT_MS: u64 = 200;
 /// Default page size for monthly and recent library queries (`P2.md` §3.4).
@@ -60,7 +60,10 @@ CREATE TABLE recordings (
     refine_error_at INTEGER,
     notes_count INTEGER NOT NULL,
     about_sig TEXT NOT NULL,
-    lines_sig TEXT NOT NULL
+    lines_sig TEXT NOT NULL,
+    title_by TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    topics_json TEXT NOT NULL
 );
 
 CREATE INDEX idx_recordings_started ON recordings(started DESC, id);
@@ -144,7 +147,7 @@ pub fn open_plan(health: IndexHealth) -> OpenPlan {
     }
 }
 
-/// One recording row projected for library lists and detail headers (`P2.md` §3.4).
+/// One recording row projected for library lists and detail headers (`P2.md` §3.4, `P6.md` §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LibraryRow {
@@ -153,6 +156,9 @@ pub struct LibraryRow {
     pub started: i64,
     pub length_ms: u32,
     pub title: String,
+    pub title_by: TitleBy,
+    pub tags: Vec<ContentTag>,
+    pub topics: Vec<String>,
     pub preview: String,
     pub spoken: Vec<String>,
     pub draft: bool,
@@ -186,6 +192,7 @@ pub struct LibraryFilter {
     pub audio_only: bool,
     pub filed_only: bool,
     pub language: Option<String>,
+    pub tag: Option<String>,
 }
 
 /// One bounded page of library rows.
@@ -202,6 +209,7 @@ pub struct LibraryPage {
 #[ts(export)]
 pub enum SearchHitKind {
     Title,
+    Tag,
     Line,
     Translation,
     Note,
@@ -787,12 +795,16 @@ fn upsert_recording_tx(
     let failure = takes::read_failure(&tapes.join(id));
     let spoken_json = serde_json::to_string(&rec.about.spoken).map_err(|_| "index")?;
     let shown_json = serde_json::to_string(&rec.about.shown).map_err(|_| "index")?;
+    let title_by_json = serde_json::to_string(&rec.about.title_by).map_err(|_| "index")?;
+    let tags_json = serde_json::to_string(&rec.about.tags).map_err(|_| "index")?;
+    let topics_json = serde_json::to_string(&rec.about.topics).map_err(|_| "index")?;
 
     tx.execute(
         "INSERT INTO recordings (\
             id, started, length_ms, title, preview, spoken, shown, source, take, moved, audio, \
-            filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig\
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig, \
+            title_by, tags_json, topics_json\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             id,
             rec.about.started,
@@ -811,6 +823,9 @@ fn upsert_recording_tx(
             rec.notes.len() as i64,
             about_sig,
             lines_sig,
+            title_by_json,
+            tags_json,
+            topics_json,
         ],
     )
     .map_err(|_| "index")?;
@@ -835,6 +850,18 @@ fn upsert_recording_tx(
         let norm = profile("").key(&rec.about.title);
         let snippet = truncate_utf8(&rec.about.title, SEARCH_SNIPPET_MAX_BYTES);
         doc_stmt.execute(params![id, "title", id, "", norm, snippet]).map_err(|_| "index")?;
+    }
+
+    // Index content tags (`kind = "tag"`) so FTS5 trigram and 1-2 char fallback both match.
+    for tag in &rec.about.tags {
+        if !tag.label.trim().is_empty() {
+            let norm = profile("").key(&tag.label);
+            let snippet = truncate_utf8(&tag.label, SEARCH_SNIPPET_MAX_BYTES);
+            let item_key = tag.at_ms.to_string();
+            doc_stmt
+                .execute(params![id, "tag", item_key, "", norm, snippet])
+                .map_err(|_| "index")?;
+        }
     }
 
     // Index all takes into `take_lines`, and current take's spoken + translated text into `search_docs`.
@@ -968,11 +995,20 @@ fn row_from_sqlite(r: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryRow> {
     let audio: i64 = r.get(7)?;
     let filed_state: String = r.get(8)?;
     let refine_failed: Option<String> = r.get(9)?;
+    let title_by_json: String = r.get(10)?;
+    let title_by: TitleBy = serde_json::from_str(&title_by_json).unwrap_or_default();
+    let tags_json: String = r.get(11)?;
+    let tags: Vec<ContentTag> = serde_json::from_str(&tags_json).unwrap_or_default();
+    let topics_json: String = r.get(12)?;
+    let topics: Vec<String> = serde_json::from_str(&topics_json).unwrap_or_default();
     Ok(LibraryRow {
         id: r.get(0)?,
         started: r.get(1)?,
         length_ms: r.get::<_, i64>(2)?.max(0) as u32,
         title: r.get(3)?,
+        title_by,
+        tags,
+        topics,
         preview: r.get(4)?,
         spoken,
         draft: take == 0,
@@ -984,7 +1020,8 @@ fn row_from_sqlite(r: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryRow> {
 
 fn query_recording_row(conn: &Connection, id: &str) -> Result<Option<LibraryRow>, &'static str> {
     conn.query_row(
-        "SELECT id, started, length_ms, title, preview, spoken, take, audio, filed_state, refine_error \
+        "SELECT id, started, length_ms, title, preview, spoken, take, audio, filed_state, \
+                refine_error, title_by, tags_json, topics_json \
          FROM recordings WHERE id = ?1",
         params![id],
         row_from_sqlite,
@@ -1045,6 +1082,16 @@ fn build_filter_where(
         );
         vals.push(rusqlite::types::Value::Text(lang.clone()));
     }
+    if let Some(ref tag) = filter.tag
+        && !tag.trim().is_empty()
+    {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM json_each(recordings.tags_json) \
+             WHERE json_extract(json_each.value, '$.label') = ?)"
+                .to_owned(),
+        );
+        vals.push(rusqlite::types::Value::Text(tag.trim().to_owned()));
+    }
     let where_sql = if clauses.is_empty() {
         String::new()
     } else {
@@ -1072,7 +1119,8 @@ fn query_library_page(
         .map_err(|_| "index")?;
 
     let select_sql = format!(
-        "SELECT id, started, length_ms, title, preview, spoken, take, audio, filed_state, refine_error \
+        "SELECT id, started, length_ms, title, preview, spoken, take, audio, filed_state, \
+                refine_error, title_by, tags_json, topics_json \
          FROM recordings{where_sql} ORDER BY started DESC, id ASC LIMIT ? OFFSET ?"
     );
     let mut select_params = base_params;
@@ -1117,6 +1165,7 @@ fn query_library_recent(
 fn hit_kind_from_str(s: &str) -> SearchHitKind {
     match s {
         "title" => SearchHitKind::Title,
+        "tag" => SearchHitKind::Tag,
         "translation" => SearchHitKind::Translation,
         "note" => SearchHitKind::Note,
         _ => SearchHitKind::Line,

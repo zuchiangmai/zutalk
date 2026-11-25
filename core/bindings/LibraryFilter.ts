@@ -3,4 +3,4 @@
 /**
  * Optional filters applied to monthly and recent library queries.
  */
-export type LibraryFilter = { draft_only: boolean, audio_only: boolean, filed_only: boolean, language: string | null, };
+export type LibraryFilter = { draft_only: boolean, audio_only: boolean, filed_only: boolean, language: string | null, tag: string | null, };

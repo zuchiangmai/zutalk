@@ -3,4 +3,4 @@
 /**
  * Where a search hit matched within a recording.
  */
-export type SearchHitKind = "Title" | "Line" | "Translation" | "Note";
+export type SearchHitKind = "Title" | "Tag" | "Line" | "Translation" | "Note";

@@ -134,11 +134,12 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `command.refused` | warn | `Core::send` 遇到 hub 邮箱满或已关闭，命令未能入队时发出 | `kind` `code`（`busy`） |
 | `hub.turn.slow` | warn | hub 单次消息处理超过预算 `HUB_TURN_BUDGET_US`（1000 µs）时发出 | `kind` `took_us` |
 | `notice.said` | info | 核心通过 `Voice::say` 向界面发出一条稳定提示代码时发出 | `code` |
-| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（`boot`、`settings`、`sign`、`confirm_signin`、`signout`、`discard_local`、`signin`、`create`、`recover`、`quota`、`profile`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`note`、`refine.prepare`、`remove`、`restore`、`term`、`topic.save`、`topic.remove`、`topic.import`、`topic.remember`、`destroy`、`export`、`export.write`、`host.make`、`host.slot`、`host.gone`、`host.recover`、`file.begin`、`file`、`own_key`、`diagnose`、`index.sync`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
+| `job.start` | info | `desk` 或 `Work` 的一件异步/阻塞活开始执行时发出 | `kind`（`boot`、`settings`、`sign`、`confirm_signin`、`signout`、`discard_local`、`signin`、`create`、`recover`、`quota`、`profile`、`claim`、`clip`、`rotation_saved`、`calendar`、`install`、`refresh`、`change`、`note`、`refine.prepare`、`remove`、`restore`、`term`、`topic.save`、`topic.remove`、`topic.import`、`topic.remember`、`title.pick`、`titles`、`destroy`、`export`、`export.write`、`host.make`、`host.slot`、`host.gone`、`host.recover`、`file.begin`、`file`、`own_key`、`diagnose`、`index.sync`、`sweep`、`write`、`move`） `job`（递增序号） `waited_ms` |
 | `job.done` | info；`code != "ok"` 时 warn | `desk` 或 `Work` 的一件活结束时发出 | `kind`（同上） `job` `code`（`ok` / `stale` / `cancelled` / `panic` 或失败码） `ms` |
 | `job.again` | warn | 后台或重试任务（`write`、`file`、`create`、`claim`）遇可恢复失败，退避等待下一次重试时发出 | `kind` `why` `wait_ms` `n` |
 | `topic.saved` | info；失败时 warn | 保存、删除、从文件提取、记词入主题或迁移旧词表到 `talk/topic` 完成时发出 | `op`（`save` / `remove` / `import` / `remember` / `migrate`） `pinned` `terms` `code` |
 | `topic.context` | info | 现场开录或整场精修起动前装配固定与选中主题上下文时发出（只记数量与字符数，不含内容） | `rec` `where`（`live` / `refine`） `topics` `terms` `pairs` `text_chars` |
+| `titles.done` | info；失败时 warn | 后台 AI 标题与话题生成完成、跳过、因录音已删放弃或失败时发出（绝不含标题或话题内容） | `rec` `code`（`ok` / `skipped` / `gone` / 失败码） `applied` `tags` `ms` |
 | `host.state` | info；失败退回 `Idle` 时 warn | 主持状态机 `HostState` 切换或对外开关变化时发出 | `from` `to`（`Idle` / `Arming` / `Armed` / `Live` / `Stopping`） `why` `outbound` `viewers` |
 | `host.room` | info；失败时 warn | 向服务器发送 `make`、`slot` 或 `gone` 请求结束时发出（不含房间 id 或密钥） | `action`（`make` / `slot` / `gone`） `code` `viewers` `ms` |
 | `host.recover` | info；失败时 warn | 启动或登录发现遗留 `host.lock` 后自动发 `gone` 清理结束时发出 | `code`（`ok` / `gone` 或失败码） |

@@ -4,8 +4,9 @@ import type { LibraryRow } from "./LibraryRow";
 import type { Note } from "./Note";
 import type { RefineStatus } from "./RefineStatus";
 import type { TakeInfo } from "./TakeInfo";
+import type { TitleCandidate } from "./TitleCandidate";
 
 /**
  * Complete detail header of one recording returned by [`Query::Recording`].
  */
-export type RecordingView = { row: LibraryRow, shown: Array<string>, source: string, take: number, takes: Array<TakeInfo>, speakers: { [key in string]: string }, notes: Array<Note>, note: string, filed: Filing | null, refine: RefineStatus, };
+export type RecordingView = { row: LibraryRow, shown: Array<string>, source: string, take: number, takes: Array<TakeInfo>, speakers: { [key in string]: string }, notes: Array<Note>, note: string, filed: Filing | null, refine: RefineStatus, topics: Array<string>, title_candidates: Array<TitleCandidate>, };

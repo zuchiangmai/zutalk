@@ -25,6 +25,37 @@ pub const TERM: &str = "talk/term"; // key: drawn from how the term is said; kep
 pub const TOPIC: &str = "talk/topic"; // key: <topic_id> ("always" for pinned topic); kept apart in topics.jsonl
 pub const FILING: &str = "talk/filing"; // key: <id>; where it went to a city, kept apart too
 
+/// Where a recording's current title came from (`P6.md` §3.2, `Titles.dc.html`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum TitleBy {
+    #[default]
+    None,
+    Hand,
+    Event,
+    File,
+    Ai,
+    Opening,
+}
+
+/// One concise topic tag with a jump timestamp into the transcript (`P6.md` §3.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct ContentTag {
+    pub label: String,
+    pub at_ms: u32,
+}
+
+/// One selectable title candidate stored alongside a recording (`P6.md` §3.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(default)]
+pub struct TitleCandidate {
+    pub by: TitleBy,
+    pub text: String,
+}
+
 /// What a recording is, apart from what was said in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +72,9 @@ pub struct About {
     pub take: u32,
     pub moved: bool, // from the 0.8 app, with the transcript it had there
     pub topics: Vec<String>,
+    pub tags: Vec<ContentTag>,
+    pub title_by: TitleBy,
+    pub title_candidates: Vec<TitleCandidate>,
 }
 
 /// A recording's first words, for a list.

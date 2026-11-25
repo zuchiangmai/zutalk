@@ -43,6 +43,9 @@ function makeRecording(overrides: Partial<RecordingView> = {}): RecordingView {
       started: 1_760_000_000_000,
       length_ms: 2_538_000,
       title: 'Chapter three reading',
+      title_by: 'Ai',
+      tags: [],
+      topics: [],
       preview: 'Line number 0 spoken text.',
       spoken: ['en'],
       draft: false,
@@ -62,6 +65,8 @@ function makeRecording(overrides: Partial<RecordingView> = {}): RecordingView {
     note: '',
     filed: null,
     refine: { is: 'Refined', take: 1 },
+    topics: [],
+    title_candidates: [],
     ...overrides,
   };
 }

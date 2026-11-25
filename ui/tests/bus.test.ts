@@ -34,6 +34,7 @@ const EMPTY_FILTER: LibraryFilter = {
   audio_only: false,
   filed_only: false,
   language: null,
+  tag: null,
 };
 
 function installMockRaf() {
@@ -124,6 +125,7 @@ describe('bus channel and state semantics', () => {
       refine: { id: 'rec-9', step: 'translating', done: 2, of: 6 },
       file: null,
       move_old: null,
+      title: null,
     };
     take({ kind: 'Signal', is: { seq: 1, signal: { of: 'Progress', is: progress } } });
     const stats: Tally = { counts: [{ name: 'frame.made', n: 42 }], peaks: [], spreads: [], queues: [] };
@@ -363,6 +365,9 @@ describe('QueryCache', () => {
       started: 1,
       length_ms: 1000,
       title: 'Old',
+      title_by: 'Ai',
+      tags: [],
+      topics: [],
       preview: '',
       spoken: ['en'],
       draft: false,

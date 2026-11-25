@@ -863,8 +863,10 @@ async fn a_recording_says_when_it_starts_how_it_goes_and_when_it_ends() {
         .collect();
     assert_eq!(all_rec1.first(), Some(&"recording.start"));
     assert_eq!(all_rec1.last(), Some(&"recording.end"));
-    let non_phase: Vec<&str> =
-        all_rec1.into_iter().filter(|&code| code != "recording.phase").collect();
+    let non_phase: Vec<&str> = all_rec1
+        .into_iter()
+        .filter(|&code| code != "recording.phase" && code != "topic.context")
+        .collect();
     assert_eq!(
         non_phase,
         ["recording.start", "session.status", "session.status", "session.status", "recording.end"]

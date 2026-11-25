@@ -23,6 +23,8 @@ import type { State } from '$proto/State';
 import type { TakeInfo } from '$proto/TakeInfo';
 import type { Tally } from '$proto/Tally';
 import type { Term } from '$proto/Term';
+import type { TitleBy } from '$proto/TitleBy';
+import type { TitleCandidate } from '$proto/TitleCandidate';
 import type { Topic } from '$proto/Topic';
 import type { TopicSummary } from '$proto/TopicSummary';
 import type { ViewKind } from '$proto/ViewKind';
@@ -141,6 +143,7 @@ function matchesFilter(r: LibraryRow, filter: LibraryFilter): boolean {
   if (filter.audio_only && !r.audio) return false;
   if (filter.filed_only && !r.filed) return false;
   if (filter.language && !r.spoken.includes(filter.language)) return false;
+  if (filter.tag && !r.tags.some((t) => t.label === filter.tag)) return false;
   return true;
 }
 
@@ -207,6 +210,7 @@ type MockRec = {
   note: string;
   filed: Filing | null;
   refine: RefineStatus;
+  title_candidates: TitleCandidate[];
 };
 
 function makeTakeInfos(rec: MockRec): TakeInfo[] {
@@ -268,12 +272,15 @@ export function mockBus(recording = false): Bus {
     length_ms: number,
     title: string,
     spoken: string[],
-    opts: { draft?: boolean; audio?: boolean; filed?: boolean; refine_failed?: string | null } = {},
+    opts: { draft?: boolean; audio?: boolean; filed?: boolean; refine_failed?: string | null; title_by?: TitleBy } = {},
   ): LibraryRow => ({
     id,
     started,
     length_ms,
     title,
+    title_by: opts.title_by ?? (title ? 'Ai' : 'None'),
+    tags: [],
+    topics: [],
     preview: sayScript(spoken[0])[0],
     spoken,
     draft: opts.draft ?? false,
@@ -302,6 +309,7 @@ export function mockBus(recording = false): Bus {
       note: '',
       filed: opts.filed ?? null,
       refine: opts.refine ?? (opts.refined ? { is: 'Refined', take: 1 } : { is: 'Draft', why: null }),
+      title_candidates: r.title ? [{ by: r.title_by, text: r.title }] : [],
     };
   };
 
@@ -382,6 +390,7 @@ export function mockBus(recording = false): Bus {
     refine: null,
     file: null,
     move_old: { id: 'r4', step: 'moving', done: 41, of: 175 },
+    title: null,
   };
   let session: Session | null = null;
   let version = 1;
@@ -761,6 +770,36 @@ export function mockBus(recording = false): Bus {
       if (target.pinned) emitInvalidate('Glossary');
       on({ kind: 'Notice', is: 'topic.remembered' });
     },
+    GenerateTitle: (c) => {
+      const rec = recs.find((r) => r.row.id === c.id);
+      if (!rec) return;
+      progress.title = { id: c.id, step: 'titling', done: 0, of: 1 };
+      emitProgress();
+      setTimeout(() => {
+        progress.title = null;
+        emitProgress();
+        if (rec.row.title_by !== 'Hand') {
+          rec.row.title = rec.row.title || 'Generated title';
+          rec.row.title_by = 'Ai';
+        }
+        rec.title_candidates = [
+          { by: 'Ai' as const, text: rec.row.title || 'Generated title' },
+          ...rec.title_candidates.filter((x) => x.text !== (rec.row.title || 'Generated title')),
+        ].slice(0, 4);
+        emitInvalidate('Library');
+        emitInvalidate('Search');
+        emitInvalidate('Recording', c.id);
+      }, 300);
+    },
+    PickTitle: (c) => {
+      const rec = recs.find((r) => r.row.id === c.id);
+      if (!rec) return;
+      rec.row.title = c.title.trim();
+      rec.row.title_by = rec.row.title ? c.by : 'None';
+      emitInvalidate('Library');
+      emitInvalidate('Search');
+      emitInvalidate('Recording', c.id);
+    },
     City: (c) => {
       const ev = (key: string, title: string, ago: number) => ({
         path: `zu://did:zu:organizer/ev/event/${key}`,
@@ -851,6 +890,17 @@ export function mockBus(recording = false): Bus {
                 snippet: rec.row.title,
               });
             }
+            for (const tag of rec.row.tags) {
+              if (tag.label.toLowerCase().includes(needle)) {
+                hits.push({
+                  recording_id: rec.row.id,
+                  kind: 'Tag',
+                  key: String(tag.at_ms),
+                  lang: '',
+                  snippet: tag.label,
+                });
+              }
+            }
             const activeLines = rec.takes.get(rec.currentTake)?.lines ?? [];
             for (const [k, l] of activeLines) {
               if (l.text.toLowerCase().includes(needle)) {
@@ -912,6 +962,8 @@ export function mockBus(recording = false): Bus {
                   note: rec.note,
                   filed: rec.filed,
                   refine: rec.refine,
+                  topics: rec.row.topics,
+                  title_candidates: rec.title_candidates,
                 })
               : null,
           },

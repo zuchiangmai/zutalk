@@ -468,5 +468,9 @@
  "code.topic.file.format": "目前只支持读取 UTF-8 纯文本、Markdown、CSV 或 TSV 文件",
  "code.topic.file.big": "文件超过 512 KiB 上限，无法读取",
  "code.topic.file.read": "读不了这个文件",
- "code.topic.remembered": "已记进知识库"
+ "code.topic.remembered": "已记进知识库",
+ "step.titling": "正在起标题",
+ "code.titles.empty": "还没有文字，没法起标题",
+ "code.titles.manual": "保留了你手改的标题",
+ "search.kind.Tag": "话题"
 }

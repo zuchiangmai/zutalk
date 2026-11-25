@@ -66,6 +66,9 @@ function makeRecording(overrides: Partial<RecordingView> = {}): RecordingView {
       started: 1_760_000_000_000,
       length_ms: 4_360_000, // 1:12:40 -> ~139 MB
       title: SAMPLE_EVENT.title,
+      title_by: 'Event',
+      tags: [],
+      topics: [],
       preview: 'Shared kitchen opens five days a week.',
       spoken: ['zh', 'en'],
       draft: false,
@@ -82,6 +85,8 @@ function makeRecording(overrides: Partial<RecordingView> = {}): RecordingView {
     note: '',
     filed: null,
     refine: { is: 'Refined', take: 1 },
+    topics: [],
+    title_candidates: [],
     ...overrides,
   };
 }

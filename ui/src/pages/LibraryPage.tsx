@@ -387,6 +387,7 @@ const EMPTY_FILTER: LibraryFilter = {
   audio_only: false,
   filed_only: false,
   language: null,
+  tag: null,
 };
 
 /** Bus-connected All Recordings library page. */

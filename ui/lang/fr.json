@@ -468,5 +468,9 @@
  "code.topic.file.format": "Seuls les fichiers texte UTF-8, Markdown, CSV ou TSV sont pris en charge",
  "code.topic.file.big": "Ce fichier est trop volumineux (512 Kio maximum)",
  "code.topic.file.read": "Impossible de lire ce fichier",
- "code.topic.remembered": "Ajouté à la base de connaissances"
+ "code.topic.remembered": "Ajouté à la base de connaissances",
+ "step.titling": "Création du titre",
+ "code.titles.empty": "Pas encore de texte pour proposer un titre",
+ "code.titles.manual": "Votre titre a été conservé",
+ "search.kind.Tag": "Sujet"
 }

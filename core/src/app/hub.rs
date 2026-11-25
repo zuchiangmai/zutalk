@@ -24,7 +24,7 @@ use crate::live::lane::{self, Mode};
 use crate::out::city::{Calendar, Filing};
 use crate::out::export::EXPORTERS;
 use crate::out::host::{HostStepEvent, host_step};
-use crate::record::shelf::About;
+use crate::record::shelf::{About, TitleBy, TitleCandidate};
 use crate::record::takes::RefineStatus;
 use crate::rt::queue::Rx;
 use crate::rt::signal::Register;
@@ -851,6 +851,13 @@ impl Hub {
             Command::RememberTerm { topic_id, said, written } => {
                 self.work.remember_term(topic_id, said, written)?
             }
+            Command::GenerateTitle { id } => {
+                if self.under_way(&id) {
+                    return Err("recording.under_way");
+                }
+                self.work.generate_title(id)?;
+            }
+            Command::PickTitle { id, title, by } => self.work.pick_title(id, title, by)?,
             // Installing relaunches the app, so never while recording.
             Command::Update if self.recording.is_some() => return Err("update.recording"),
             Command::Update if self.boot == Boot::Installing => return Err("update.installing"),
@@ -923,6 +930,15 @@ impl Hub {
             }
             _ => String::new(),
         };
+        let title_by = if file && !title.trim().is_empty() { TitleBy::File } else { TitleBy::None };
+        let title_candidates = if !file
+            && let Some(ev) = self.state.host.event()
+            && !ev.title.trim().is_empty()
+        {
+            vec![TitleCandidate { by: TitleBy::Event, text: ev.title.clone() }]
+        } else {
+            Vec::new()
+        };
         let (spoken, shown, topics) = (setup.spoken, setup.shown, setup.topics);
         let captions = lane::captions(file, &shown, self.has_key(Service::Soniox));
         let initial = match &captions {
@@ -932,6 +948,8 @@ impl Hub {
         let about = About {
             started,
             title,
+            title_by,
+            title_candidates,
             spoken,
             shown,
             source: source_name,

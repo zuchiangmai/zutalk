@@ -468,5 +468,9 @@
  "code.topic.file.format": "UTF-8 のテキスト、Markdown、CSV、TSV ファイルのみ読み込めます",
  "code.topic.file.big": "ファイルが大きすぎます（上限 512 KiB）",
  "code.topic.file.read": "このファイルを読み込めませんでした",
- "code.topic.remembered": "知識ベースに追加しました"
+ "code.topic.remembered": "知識ベースに追加しました",
+ "step.titling": "タイトルを作成中",
+ "code.titles.empty": "タイトルを作る文字起こしがまだありません",
+ "code.titles.manual": "手動のタイトルを保持しました",
+ "search.kind.Tag": "話題"
 }

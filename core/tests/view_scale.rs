@@ -94,8 +94,9 @@ fn seed_1000_recordings(db_path: &Path, shelf: &Shelf, tapes: &Path, touch_disk_
         .prepare(
             "INSERT INTO recordings (\
                 id, started, length_ms, title, preview, spoken, shown, source, take, moved, audio, \
-                filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL, ?13, ?14, ?15)",
+                filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig, \
+                title_by, tags_json, topics_json\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL, ?13, ?14, ?15, '\"None\"', '[]', '[]')",
         )
         .expect("prepare recordings");
     let mut line_stmt = tx
@@ -310,9 +311,10 @@ fn seed_two_take_recording(
     tx.execute(
         "INSERT INTO recordings (\
             id, started, length_ms, title, preview, spoken, shown, source, take, moved, audio, \
-            filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig\
+            filed_state, refine_error, refine_error_at, notes_count, about_sig, lines_sig, \
+            title_by, tags_json, topics_json\
          ) VALUES (?1, ?2, ?3, ?4, ?5, '[\"en\",\"zh\"]', '[\"en\",\"zh\"]', 'mic', 1, 0, 1, '', \
-                   NULL, NULL, 0, '0:0', '0:0')",
+                   NULL, NULL, 0, '0:0', '0:0', '\"None\"', '[]', '[]')",
         params![id, started, i64::from(length_ms), format!("Long talk {id}"), "Line 0"],
     )
     .expect("insert long recording");
@@ -478,6 +480,7 @@ async fn scale_1000_recordings_library_and_fts5_search_under_100ms() {
                 audio_only: true,
                 filed_only: false,
                 language: None,
+                tag: None,
             },
             limit: 50,
             offset: 0,

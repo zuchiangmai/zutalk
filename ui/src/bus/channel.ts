@@ -48,7 +48,7 @@ export type Bus = {
 };
 
 const EMPTY_LEVEL: Level = { peak: 0, rms: 0 };
-const EMPTY_PROGRESS: Progress = { refine: null, file: null, move_old: null };
+const EMPTY_PROGRESS: Progress = { refine: null, file: null, move_old: null, title: null };
 
 function loadThemePref(): ThemePref {
   try {

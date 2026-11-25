@@ -468,5 +468,9 @@
  "code.topic.file.format": "Solo se admiten archivos UTF-8 de texto, Markdown, CSV o TSV",
  "code.topic.file.big": "El archivo es demasiado grande (máximo 512 KiB)",
  "code.topic.file.read": "No se pudo leer este archivo",
- "code.topic.remembered": "Guardado en la base de conocimiento"
+ "code.topic.remembered": "Guardado en la base de conocimiento",
+ "step.titling": "Generando título",
+ "code.titles.empty": "Aún no hay texto para generar un título",
+ "code.titles.manual": "Se conservó tu título",
+ "search.kind.Tag": "Tema"
 }

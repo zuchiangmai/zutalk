@@ -710,6 +710,7 @@ async fn progress_signal_is_replayed_to_late_joiners_and_invalidations_are_not()
         refine: Some(Writing { id: "rec-1".into(), step: "translating".into(), done: 2, of: 5 }),
         file: None,
         move_old: None,
+        title: None,
     };
     regs.progress.set(prog.clone());
     regs.invalidate(ViewKind::Recording, Some("rec-1".into()));
