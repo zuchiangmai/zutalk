@@ -88,4 +88,83 @@ describe('store', () => {
     expect(store.notices).toHaveLength(before + 1);
     expect(store.notices.at(-1)?.code).toBe('busy');
   });
+
+  it('resets frame timing on visibilitychange so returning from background reports no false ui.frame.gap', () => {
+    const origRaf = globalThis.requestAnimationFrame;
+    const origCaf = globalThis.cancelAnimationFrame;
+    const origDoc = globalThis.document;
+
+    let nextId = 1;
+    const pending = new Map<number, FrameRequestCallback>();
+    const listeners = new Map<string, Set<() => void>>();
+    const doc = {
+      hidden: false,
+      addEventListener(type: string, fn: () => void) {
+        let set = listeners.get(type);
+        if (!set) {
+          set = new Set();
+          listeners.set(type, set);
+        }
+        set.add(fn);
+      },
+      removeEventListener(type: string, fn: () => void) {
+        listeners.get(type)?.delete(fn);
+      },
+    };
+    const dispatch = (type: string) => {
+      for (const fn of [...(listeners.get(type) ?? [])]) fn();
+    };
+    const tick = (now: number) => {
+      const entries = [...pending.entries()];
+      pending.clear();
+      for (const [, cb] of entries) cb(now);
+    };
+
+    (globalThis as unknown as { requestAnimationFrame: typeof requestAnimationFrame }).requestAnimationFrame = (cb) => {
+      const id = nextId++;
+      pending.set(id, cb);
+      return id;
+    };
+    (globalThis as unknown as { cancelAnimationFrame: typeof cancelAnimationFrame }).cancelAnimationFrame = (id) => {
+      pending.delete(id);
+    };
+    (globalThis as unknown as { document: unknown }).document = doc;
+
+    const reported: { seq: number; gap_ms: number; gaps: number }[] = [];
+    try {
+      const stop = use({
+        send: () => Promise.resolve(),
+        listen: () => () => {},
+        drawn: (seq, gap_ms, gaps) => reported.push({ seq, gap_ms, gaps }),
+      });
+
+      // Two normal frames at 60 fps.
+      tick(0);
+      tick(16);
+
+      // Window moves to background: browser fires visibilitychange and pauses rAF completely.
+      doc.hidden = true;
+      dispatch('visibilitychange');
+
+      // 10 s later, window returns to foreground: visibilitychange fires, then first rAF arrives.
+      doc.hidden = false;
+      dispatch('visibilitychange');
+      tick(10_016);
+      tick(10_032);
+      expect(reported.filter((r) => r.gaps > 0)).toEqual([]);
+
+      // A genuine foreground stall of 468 ms (> FRAME_GAP_MS = 250 ms) is reported accurately.
+      tick(10_500);
+      tick(11_100);
+      expect(reported.at(-1)).toEqual(expect.objectContaining({ gap_ms: 468, gaps: 1 }));
+
+      stop();
+      expect(pending.size).toBe(0);
+      expect(listeners.get('visibilitychange')?.size ?? 0).toBe(0);
+    } finally {
+      (globalThis as unknown as { requestAnimationFrame: typeof requestAnimationFrame }).requestAnimationFrame = origRaf;
+      (globalThis as unknown as { cancelAnimationFrame: typeof cancelAnimationFrame }).cancelAnimationFrame = origCaf;
+      (globalThis as unknown as { document: Document }).document = origDoc;
+    }
+  });
 });

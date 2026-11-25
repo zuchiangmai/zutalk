@@ -61,9 +61,16 @@ export const use = (b: Bus) => {
   const stopListen = b.listen(take);
   let raf = 0;
   let alive = true;
+  let onVisibility: (() => void) | null = null;
   if (b.drawn && typeof requestAnimationFrame === 'function') {
     const reportDrawn = b.drawn;
     let vitals = emptyVitals();
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      onVisibility = () => {
+        if (document.hidden) vitals = frame(vitals, 0, true);
+      };
+      document.addEventListener('visibilitychange', onVisibility);
+    }
     const step = (now: number) => {
       if (!alive) return;
       const hidden = typeof document !== 'undefined' && document.hidden;
@@ -77,6 +84,9 @@ export const use = (b: Bus) => {
   }
   return () => {
     alive = false;
+    if (onVisibility && typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
     if (raf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf);
     stopListen();
   };
