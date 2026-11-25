@@ -4,7 +4,7 @@ import type { Session } from '$proto/Session';
 import type { State } from '$proto/State';
 import type { Tally } from '$proto/Tally';
 import { EMPTY } from '../dev/mock';
-import { seen, store, take } from '../src/lib/core.svelte';
+import { seen, send, store, take, use } from '../src/lib/core.svelte';
 import { system, ui } from '../src/lib/words.svelte';
 
 describe('store', () => {
@@ -75,5 +75,17 @@ describe('store', () => {
     expect(ui.lang).toBe('th');
     take({ kind: 'State', is: EMPTY });
     expect(ui.lang).toBe(system);
+  });
+
+  it('says the refusal code when a command is rejected by the bus', async () => {
+    const before = store.notices.length;
+    const stop = use({
+      send: () => Promise.reject('busy'),
+      listen: () => () => {},
+    });
+    await send({ do: 'Start' });
+    stop();
+    expect(store.notices).toHaveLength(before + 1);
+    expect(store.notices.at(-1)?.code).toBe('busy');
   });
 });

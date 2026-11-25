@@ -1,210 +1,33 @@
-//! The shell: the windows, the bridge between the interface and the core, and the app's own
-//! updates. It decides nothing: it carries commands in and events out, fetches a newer version
-//! for the core to offer, and installs it when the core says so.
+//! The shell: thin wiring between Tauri, the supervised `shell` tree, and `zutalk-core`
+//! (`P1.md` §3.9, `P1-23`). All commands are async, nothing holds a lock, and nothing waits on
+//! the main thread.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent, State, ipc::Channel};
+use std::sync::{Arc, OnceLock};
+use tauri::{Manager, RunEvent, State, WebviewWindow, ipc::Channel};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_updater::{Update, UpdaterExt};
-use zutalk_core::app::hub::{Clip, Config, Core, Install, Outlet};
-use zutalk_core::app::proto::{Command, Event, Signal, Stamped};
+use zutalk::pump::{self, Joins, SHELL_JOINS_MSGS};
+use zutalk::{updates, windows};
+use zutalk_core::app::hub::{Clip, Config, Core};
+use zutalk_core::app::proto::{Command, Event};
 use zutalk_core::id::keys;
+use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::supervise::Tree;
 use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
 
-/// The windows listening, and the last state: a window that opens late is sent it first.
-type Windows = Arc<Mutex<(Vec<Channel<Event>>, Option<Event>)>>;
-/// A newer version, downloaded, its signature checked against the key in the config.
-type Ready = Arc<Mutex<Option<(Update, Vec<u8>)>>>;
-/// How long between looks for a newer version, after the one at start-up: six hours
-/// (DESIGN.md, updates). Origin to be traced.
-const LOOK_MS: u64 = 6 * 60 * 60 * 1_000;
-
 #[tauri::command]
-fn dispatch(command: Command, app: AppHandle, core: State<Core>, windows: State<Windows>) {
-    if let Err(code) = core.send(command) {
-        fan(&app, &windows, Event::Notice(code.into()));
-    }
+async fn dispatch(command: Command, core: State<'_, Core>) -> Result<(), String> {
+    core.send(command).map_err(str::to_owned)
 }
 
 #[tauri::command]
-fn subscribe(channel: Channel<Event>, windows: State<Windows>) {
-    let Ok(mut windows) = windows.lock() else { return };
-    windows.1.iter().for_each(|last| drop(channel.send(last.clone()))); // dropped: a closed channel is pruned on the next fan
-    windows.0.push(channel);
-}
-
-/// Every event to every window. The captions window is on screen while the state says so.
-fn fan(app: &AppHandle, windows: &Windows, event: Event) {
-    let Ok(mut windows) = windows.lock() else { return };
-    if let Event::State(state) = &event {
-        let captions = app.get_webview_window("captions");
-        if let Some(window) = captions.filter(|w| w.is_visible().ok() != Some(state.captions)) {
-            let _ = if state.captions { window.show() } else { window.hide() }; // dropped: OS window show/hide error ignored until P1-23
-        }
-        windows.1 = Some(event.clone());
-    }
-    windows.0.retain(|channel| channel.send(event.clone()).is_ok());
-}
-
-/// Reads the core's registers and forwards changes to open windows until P1-23 replaces `fan`.
-async fn forward(app: AppHandle, windows: Windows, mut outlet: Outlet) {
-    let (mut state_seq, initial_state) = outlet.state.now();
-    if state_seq > 0 {
-        fan(&app, &windows, Event::State(initial_state));
-    }
-    let (mut frame_seq, initial_frame) = outlet.frame.now();
-    if frame_seq > 0 {
-        let signal = Signal::Frame(initial_frame);
-        fan(&app, &windows, Event::Signal(Stamped { seq: frame_seq, signal }));
-    }
-    let (mut session_seq, initial_session) = outlet.session.now();
-    if session_seq > 0 {
-        let signal = Signal::Session(initial_session);
-        fan(&app, &windows, Event::Signal(Stamped { seq: session_seq, signal }));
-    }
-    let (mut level_seq, initial_level) = outlet.level.now();
-    if level_seq > 0 {
-        let signal = Signal::Level(initial_level);
-        fan(&app, &windows, Event::Signal(Stamped { seq: level_seq, signal }));
-    }
-    let (mut water_seq, initial_water) = outlet.water.now();
-    if water_seq > 0 {
-        let signal = Signal::Water(initial_water);
-        fan(&app, &windows, Event::Signal(Stamped { seq: water_seq, signal }));
-    }
-    let (mut stats_seq, initial_stats) = outlet.stats.now();
-    if stats_seq > 0 {
-        let signal = Signal::Stats(initial_stats);
-        fan(&app, &windows, Event::Signal(Stamped { seq: stats_seq, signal }));
-    }
-    let (_, initial_said) = outlet.said.now();
-    let mut said_at = initial_said.next;
-    for code in &initial_said.codes {
-        fan(&app, &windows, Event::Notice(code.clone()));
-    }
-    loop {
-        tokio::select! {
-            next = outlet.state.next() => match next {
-                Some((seq, state)) => {
-                    if seq > state_seq {
-                        state_seq = seq;
-                        fan(&app, &windows, Event::State(state));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.frame.next() => match next {
-                Some((seq, frame)) => {
-                    if seq > frame_seq {
-                        frame_seq = seq;
-                        let signal = Signal::Frame(frame);
-                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.session.next() => match next {
-                Some((seq, session)) => {
-                    if seq > session_seq {
-                        session_seq = seq;
-                        let signal = Signal::Session(session);
-                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.level.next() => match next {
-                Some((seq, level)) => {
-                    if seq > level_seq {
-                        level_seq = seq;
-                        let signal = Signal::Level(level);
-                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.water.next() => match next {
-                Some((seq, water)) => {
-                    if seq > water_seq {
-                        water_seq = seq;
-                        let signal = Signal::Water(water);
-                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.stats.next() => match next {
-                Some((seq, stats)) => {
-                    if seq > stats_seq {
-                        stats_seq = seq;
-                        let signal = Signal::Stats(stats);
-                        fan(&app, &windows, Event::Signal(Stamped { seq, signal }));
-                    }
-                }
-                None => break,
-            },
-            next = outlet.said.next() => match next {
-                Some((_, notices)) => {
-                    let first = notices.next.saturating_sub(notices.codes.len() as u64);
-                    let start = said_at.max(first);
-                    for code in &notices.codes[(start - first) as usize..] {
-                        fan(&app, &windows, Event::Notice(code.clone()));
-                    }
-                    said_at = notices.next;
-                }
-                None => break,
-            },
-        }
-    }
-}
-
-/// Looks for a newer version at start-up and every `LOOK_MS` until one is downloaded, then tells
-/// the core. Trouble is told once, until a look goes well.
-async fn look(app: AppHandle, ready: Ready) {
-    let mut told = false;
-    loop {
-        match fetch(&app).await {
-            Ok(Some((update, bytes))) => {
-                let version = update.version.clone();
-                if let Ok(mut ready) = ready.lock() {
-                    *ready = Some((update, bytes));
-                }
-                app.state::<Core>().looked(Ok(version)).await;
-                return;
-            }
-            Ok(None) => told = false,
-            Err(_) if told => {}
-            Err(_) => {
-                told = true;
-                app.state::<Core>().looked(Err("update")).await;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(LOOK_MS)).await;
-    }
-}
-
-/// A newer version, if there is one, downloaded and its signature checked.
-async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<(Update, Vec<u8>)>> {
-    let Some(update) = app.updater()?.check().await? else { return Ok(None) };
-    let bytes = update.download(|_, _| {}, || {}).await?;
-    Ok(Some((update, bytes)))
-}
-
-/// Puts what is ready in place of the app and relaunches it. A version that failed to install
-/// stays ready, to be tried again.
-fn installer(app: AppHandle, ready: Ready) -> Install {
-    Arc::new(move || {
-        let Ok(ready) = ready.lock() else { return };
-        if let Some((update, bytes)) = ready.as_ref()
-            && update.install(bytes).is_ok()
-        {
-            app.restart();
-        }
-    })
+async fn subscribe(
+    window: WebviewWindow,
+    channel: Channel<Event>,
+    joins: State<'_, Joins<Channel<Event>>>,
+) -> Result<(), String> {
+    joins.send((window.label().to_owned(), channel)).await.map_err(|_| "busy".to_owned())
 }
 
 fn main() {
@@ -238,26 +61,38 @@ fn main() {
             let old = cfg!(target_os = "macos").then_some(app.path().data_dir()?.join("ZuTalk"));
             let clipboard = app.handle().clone();
             let clip: Clip = Arc::new(move |text| clipboard.clipboard().write_text(text).is_ok());
-            let ready = Ready::default();
-            let install = installer(app.handle().clone(), ready.clone());
+
+            // Enter Tauri's Tokio runtime synchronously: Core::start and Tree only spawn tasks.
+            let runtime = tauri::async_runtime::handle();
+            let _entered = runtime.inner().enter();
+
+            let install_slot = Arc::new(OnceLock::new());
+            let install = updates::installer(install_slot.clone());
             let config = Config { old, clip, install, ..base };
-            let (handle, windows) = (app.handle().clone(), Windows::default());
-            let theirs = windows.clone();
-            // The core and the shell's forwarder run on the shell's runtime.
-            let started = tauri::async_runtime::block_on(async {
-                let (core, outlet) = Core::start(config)?;
-                let shell = Tree::root("shell", core.stats());
-                shell.spawn("shell.forward", forward(handle, theirs, outlet));
-                Ok::<_, zutalk_core::rt::supervise::End>((core, shell))
-            });
-            let (core, shell) = started.map_err(|end| format!("{end:?}"))?;
+            let (core, outlet) = Core::start(config).map_err(|end| format!("{end:?}"))?;
+            let shell = Tree::root("shell", core.stats());
+            let (update_tx, update_rx) = updates::channel(shell.stats());
+            let _ = install_slot.set(update_tx); // dropped: initialized once before any Install call
+            let (joins_tx, joins_rx) = queue::bounded::<(String, Channel<Event>)>(
+                shell.stats(),
+                "shell.joins",
+                SHELL_JOINS_MSGS,
+                Full::Wait,
+            );
+            // Manage Core before starting shell tasks so handle.state::<Core>() is always ready.
             app.manage(core);
+            let handle_pushed = app.handle().clone();
+            let handle_captions = app.handle().clone();
+            let _kept = pump::start(
+                &shell,
+                outlet,
+                joins_rx,
+                move |seq| handle_pushed.state::<Core>().pushed(seq),
+                move |show| windows::set_captions(&handle_captions, show),
+            );
+            updates::start(&shell, app.handle().clone(), update_rx, !tauri::is_dev());
             let _ = app.manage(shell); // dropped: `false` only if one was managed already
-            app.manage(windows);
-            // A build that is not a release has no installed app to put a version in place of.
-            if !tauri::is_dev() {
-                tauri::async_runtime::spawn(look(app.handle().clone(), ready));
-            }
+            app.manage(joins_tx);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![dispatch, subscribe])

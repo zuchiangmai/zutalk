@@ -47,7 +47,10 @@ export function take(e: Event) {
 export type Bus = { send(c: Command): Promise<void>; listen(on: (e: Event) => void): () => void };
 
 let bus: Bus;
-export const send = (c: Command) => bus.send(c);
+export const send = (c: Command): Promise<void> =>
+  bus.send(c).catch((err) => {
+    say(typeof err === 'string' ? err : err instanceof Error ? err.message : 'busy');
+  });
 export const use = (b: Bus) => ((bus = b), b.listen(take));
 
 /** The core in the app. Events come over a channel: plain Tauri events are not built for 10 Hz. */

@@ -127,6 +127,10 @@ ZuTalk 出了什么事，只看日志就要讲得出来。日志里只有**代�
 | `hub.boot` | info | hub 的启动与安装状态机 `Boot` 转换 | `from` `to`（`Starting` / `Ready` / `Installing`） `why`（`boot` / `update` / `update.install`） |
 | `boot.step` | info；失败时 warn | 启动的每一步完成（`devices` 另带 `n`，不含设备名） | `step`（`settings` / `identity` / `invites` / `devices`） `code` `ms`（`devices` 另带 `n`） |
 | `diagnose.wrote` | info | desk 写完一份自检包（原子改名并清掉旧包之后） | `files`（包内文件数，含 `logs/`） `bytes`（总字节数） |
+| `shell.join` | info | 一个窗口向外壳推送任务订阅了事件通道 | `window`（窗口标签） `replaced`（是否替换了该窗口的旧通道） |
+| `shell.sink.gone` | warn | 一个窗口的通道关闭或发送时 panic，已从推送表移除 | `window` `why`（`closed` / `panic`） |
+| `shell.captions` | info；失败时 warn | 外壳按 `State.captions` 变化向字幕窗投递显隐请求（不查询窗口） | `shown` `code`（`ok` / `missing` / `failed`） |
+| `update.look` | info；出错时 warn | 外壳 `updates` 任务查了一次新版本 | `code`（`none` / `ready` / `update`） |
 
 ## 怎么读一组快照
 

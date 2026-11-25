@@ -10,7 +10,6 @@ cd "$(dirname "$0")/../../.."
 
 # Debt: file, count, who pays it.
 debt='
-app/src/main.rs 1 P1-23
 '
 
 # Server uses checked in the phase that touches the server (P1.md §3.13.12).
