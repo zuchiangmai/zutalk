@@ -49,11 +49,11 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
 
 | 类型 | 键 | 正文 | 来自设计稿 | 现在的状态 |
 |---|---|---|---|---|
-| `talk/recording` | 录音 id | `About`：开始时间、长度、标题、说的语言、字幕语言、声源、当前用哪一版（`take`）、用了哪些主题（`topics`），以及话题词（`tags`，见下方说明） | 标题与话题 | 有；`topics`、`tags` 和标题来源要新加 |
+| `talk/recording` | 录音 id | `About`：开始时间、长度、标题、说的语言、字幕语言、声源、当前用哪一版（`take`）、用了哪些主题（`topics`），以及话题词（`tags`，见下方说明） | 标题与话题 | **P6 已做**：`About` 补齐 `topics`、`tags`、`title_by`、`title_candidates`（均 `#[serde(default)]` 向后兼容） |
 | `talk/line` | `<id>.<take>.<n>` | 一行：时间、说话人、语言、原文、译文、每一部分的来源（`via`） | 现场稿 / 精修稿 / 对比 | 有；旧的版本要能读出来（**P2-01 已做**：`record/takes.rs` 支持读任意 `take` 与版本列表，现场草稿改用 `O(1)` 内存 `DraftWriter`） |
 | `talk/speaker` | `<id>.<label>` | 名字 | 读一场录音 | 有 |
 | `talk/note` | `<id>.<t_ms>.<rand>` | 一条笔记：`{ at, text, anchor? }`；`anchor` 指向某一行 | 边录边记、读页的笔记 | **改**：现在是整场一个字符串（**P2-01 已做**：`record/notes.rs`，键 `<id>.<at_ms:010>.<rand:08x>`，向后兼容旧单串笔记，边录边记不拦） |
-| `talk/topic` | 主题 id | 一个主题：名称、领域、背景、词表、译法、来源文件；外加一个固定的「每场都用」主题 | 知识库 | **新**，取代 `talk/term` |
+| `talk/topic` | 主题 id | 一个主题：名称、领域、背景、词表、译法、来源文件；外加一个固定的「每场都用」主题 | 知识库 | **P6 已做**：`topics.jsonl` 取代旧扁平 `talk/term`（首次打开自动无损迁移旧词入固定 `always` 主题，兼容 `Command::Term`/`Query::Glossary` 与本机领回 `adopt`） |
 | `talk/filing` | 录音 id | 交到哪座城、哪场活动、带不带音频、状态 | 交到档案馆、设置里的「对外」 | 有 |
 | tape（不是记录） | 录音 id / 分钟 | 加密的分钟块 | 音频 | 有 |
 
@@ -80,25 +80,25 @@ ZuTalk 的毛病从来不是「数据错」，而是「流动停了」：录得�
 | `Frame` | `seq`、`t_audio`；每栏最近 K 行加正在说的那一行；每栏的健康状态 | ≤10 Hz | 序列化后 ≤ 8 KB（Tauri Channel 走直接注入的上限） |
 | `Session` | 录音状态（录音中 / 已暂停 / 只录音 / 文字慢了 / 连接中）、开始时间、对外与否、几个人在看 | 变化时发 | 固定（**P5-02 已做**：补齐 `outbound`、`viewers`、`event_title` 定界标量） |
 | `Level` | 输入电平 | ≤15 Hz | 固定 |
-| `Progress` | 精修、交城、搬运、生成标题，各自一份 `{id, step, done, of}` | ≤2 Hz | 每种任务一份（**P2-05 已做**：`Outlet.progress` 承载 `refine` / `filing` / `moving` 三槽，经 `Signal::Progress` 推到界面；生成标题随 P6 补入） |
+| `Progress` | 精修、交城、搬运、生成标题，各自一份 `{id, step, done, of}` | ≤2 Hz | 每种任务一份（**P2-05 + P6-03 已做**：`Outlet.progress` 承载 `refine` / `file` / `move_old` / `title` 全部 4 槽，独立信号量 `TITLE_AT_ONCE_JOBS = 1` 绝不阻塞精修或交城） |
 | `Water` | 各层的水位线和判断结果（§4.3） | 1 Hz | 固定 |
 
 ### 2.4 小状态（整份发送，类型上有上限）
 
 身份（DID、句柄、要不要存恢复密钥）、城、额度（出字、AI 各一条，每天的次数）、各服务钥匙的来源、下一场的设置、字幕窗是否显示、有没有新版本、提示的队列（最多 N 条）。
 
-**不再放进去**：资料库、正文、搜索结果、词表、日历。（**P2-06 已做**：`State` 瘦身为 13 个定界字段，移除 `library`/`open`/`hits`/`terms`/`city`/`writing`/`filing`/`moving` 及旧命令 `Open`/`Close`/`Search`，I8 字节数比 `1.00`；**P4-02/03 补齐**：以 `auth: AuthFlow` 取代裸 `login`，增补定界 `handle`、`quota`（固定 2 服务）与 `local_shelf`（`recordings` + `adopted`），5 条 vs 100 条录音 `State` 为 `523 B / 525 B`，比值仍为 `1.00`；**P5-02/03 补齐**：移除 `rooms: Vec<Room>` 改用定界 `host: HostState`（至多 1 场），并在 `Setup` 中加入固定 4 场合 `CaptionPrefs` 与 `city`，5 条 vs 100 条录音 `State` 为 `1320 B / 1322 B`，比值恒为 `1.00`。）
+**不再放进去**：资料库、正文、搜索结果、词表、日历。（**P2-06 已做**：`State` 瘦身为 13 个定界字段，移除 `library`/`open`/`hits`/`terms`/`city`/`writing`/`filing`/`moving` 及旧命令 `Open`/`Close`/`Search`，I8 字节数比 `1.00`；**P4-02/03 补齐**：以 `auth: AuthFlow` 取代裸 `login`，增补定界 `handle`、`quota`（固定 2 服务）与 `local_shelf`（`recordings` + `adopted`），5 条 vs 100 条录音 `State` 为 `523 B / 525 B`，比值仍为 `1.00`；**P5-02/03 补齐**：移除 `rooms: Vec<Room>` 改用定界 `host: HostState`（至多 1 场），并在 `Setup` 中加入固定 4 场合 `CaptionPrefs` 与 `city`，5 条 vs 100 条录音 `State` 为 `1320 B / 1322 B`，比值恒为 `1.00`；**P6-02 补齐**：`Setup` 增补封顶 `MAX_SELECTED_TOPICS = 8` 且只存随机十六进制 id 的 `topics: Vec<String>`，5 条 vs 100 条录音 `State` 为 `1332 B / 1334 B`，比值恒为 `1.00`。）
 
 ### 2.5 视图（由事实算出，可以丢掉重建，按范围取，带版本号）
 
 | 视图 | 查询 | 怎么维护 |
 |---|---|---|
 | `library` | 按月分组的计数；某个月的行；最近 N 条（给侧栏用） | 本机的 SQLite 索引，从 pack 重建；写入事实时同步更新（**P2-03/05 已做**：`LibrarySummary` / `LibraryMonth` / `LibraryRecent`） |
-| `search` | 关键词 → 命中的录音和行，范围是标题、正文、译文、笔记 | SQLite FTS5 的 `trigram` 分词器，中文、泰文、英文都能搜，不需要分词库（**P2-03 已做**：含 1–2 字短词归一化子串回退与 SARA AM 统一） |
-| `recording` | 抬头 + 有哪几版 + 笔记 + 交城状态 | 读 `about.jsonl` 和笔记（**P2-04 已做**：`Query::Recording` 另带 `RefineStatus`） |
+| `search` | 关键词 → 命中的录音和行，范围是标题、话题、正文、译文、笔记 | SQLite FTS5 的 `trigram` 分词器，中文、泰文、英文都能搜，不需要分词库（**P2-03 + P6-03 已做**：含 1–2 字短词归一化子串回退、SARA AM 统一及 `INDEX_SCHEMA_VERSION = 2` `SearchHitKind::Tag` / `LibraryFilter.tag`） |
+| `recording` | 抬头 + 有哪几版 + 笔记 + 交城状态 + 主题与标题候选 | 读 `about.jsonl` 和笔记（**P2-04 + P6-03 已做**：`Query::Recording` 另带 `RefineStatus`、`topics`、`title_candidates`） |
 | `transcript` | `(id, take, chunk)` → 64 行一块，每块带版本号 | 按块缓存，一块不变就不重读、不重画（**P2-04 已做**：`Query::Transcript`，从 SQLite `take_lines` 按块切取，录音中直读草稿 pack） |
 | `compare` | `(id, take a, take b, chunk)` → 逐行的差别 | 纯函数，按块算（**P2-04 已做**：`Query::Compare`，时间重叠对齐 + 1024 B 封顶字符级 LCS `DiffOp`） |
-| `knowledge` | 主题列表；一个主题的详情 | 读 `topics.jsonl`（**P2-04 先提供 `Query::Glossary`**，P6 升级为 `topics.jsonl`） |
+| `knowledge` | 主题列表；一个主题的详情 | 读 `topics.jsonl`（**P6-01 已做**：`ViewKind::Knowledge`、`Query::Topics` / `Query::Topic { id }`，并保持 `Query::Glossary` 指向固定 `always` 主题） |
 | `calendar` | 一座城的活动 | 现取，只在内存里缓存（**P2-04/05 已做**：`Query::Calendar`） |
 | `outbound` | 已交、正在交、没送到 | 读 `filings.jsonl`（**P2-04 已做**：`Query::Outbound`） |
 
@@ -384,6 +384,8 @@ server/src/
 
 > **P5 实际变更**：**零新增外部依赖**（`Cargo.lock` 与 `ui/package-lock.json` 零变更）；服务器复用既有 `tokio::sync::watch` / `WatchStream` 与 `tokio_util::sync::CancellationToken`，界面二维码复用既有 `uqr`。全仓 `bounded.sh`、`spawn.sh`、`layers.sh` 三份规则脚本欠账**全部清零**。
 
+> **P6 实际变更**：**零新增外部依赖**（`Cargo.lock` 与 `ui/package-lock.json` 零变更）；知识库文件导入使用标准库 `std::fs` 实现有界 UTF-8 `.txt`/`.md`/`.csv`/`.tsv` 提取（上限 512 KiB），零新增 `Stats` 计数/分布行，全仓 10 个规则脚本零欠账全绿。
+
 ### 5.4 写法规矩（加进 `CLAUDE.md` 的 Rules）
 
 - 没有无上限的队列；每个队列写明满了以后怎么办。
@@ -449,8 +451,8 @@ ui/src/
 | I5 外壳不会死锁 | 用 `loom` 给外壳的订阅和推送协议建模；也测「页面重新加载时正好在推送」。**P1 实测**：单任务独占 `Fan` 无锁，`app/tests/pump.rs::every_interleaving_ends_with_each_window_holding_the_latest` 穷举交错 + `a_reload_while_frames_are_coming_loses_nothing_and_the_old_channel_goes_quiet` + `shell.sh` |
 | I6 任何部件都能被杀掉并自愈 | 随机杀掉 lane、帧任务、写盘线程、网页，N 秒内恢复，事实不丢失。**P1 实测**：`i6_a_lane_that_dies_comes_back_and_marks_what_it_missed`、`i6_a_tape_writer_that_dies_comes_back_and_the_hole_is_silence`、`core/tests/supervise.rs::a_part_that_panics_is_opened_again`、`core/tests/keep.rs`、`app/tests/pump.rs::a_pump_that_dies_is_started_again_and_no_window_has_to_join_again` |
 | I7 停滞一定被看见 | 用 `turmoil` 模拟：Soniox 连着但不回话、取钥匙卡住、断网；`judge` 在预算内给出 `Stalled` 并采取动作。**P1 实测**：暂停时钟 + `Dial`/`Keys` 替身：`core/tests/water.rs`、`i7_a_service_that_takes_audio_and_says_nothing_is_left_for_a_new_connection`、`i7_a_capture_that_stops_delivering_ends_the_recording_out_loud`、`i7_offline_is_said_and_captions_stop_trying_until_asked`、`core/tests/live.rs::a_lease_that_never_comes_is_given_up_on` |
-| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1。**P2 实测**：`i8_what_one_change_sends_does_not_grow_with_the_library` 已转正通过（5 条 vs 100 条 `State = 441 B / 441 B`，比值 `1.00`，`Invalidate = 60 B`）；`core/tests/view_scale.rs::i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration`（1 分钟 vs 4 小时 2,560 行，64 行单块 JSON 封顶 13.6 KB / 26.0 KB，耗时均 ≤ 12 ms）。**P3 界面侧实测**：`ui/tests/scale_i8.test.tsx` 在 600 px 模拟视口下实测 1 分钟（16 行）与 4 小时（2,560 行 = 40 块）阅读页挂载 DOM 行数均为 `11`（比值 `1.00`，远 ≤ 40），4 小时仅按需拉取 `2` 块（绝不拉第 39 块）；15 条与 500 条资料库挂载 DOM 行数均为 `11`（比值 `1.00`）；同帧突灌 50 帧 `Frame` + 50 次 `Level` 合并为 `1` 次 React 提交。**P4 复测**：5 条 vs 100 条 `State = 523 B / 525 B`（比值 `1.00`）。**P5 复测**：移除 `State.rooms` 改定界 `host: HostState` 并加入固定 4 场合 `CaptionPrefs` 后，5 条 vs 100 条 `State = 1320 B / 1322 B`（比值仍为 `1.00`），`Invalidate = 60 B` |
-| **I9 显式与可观测**（原则 10，§4.5） | **P1–P5 实测**：全部 10 个规则脚本全绿且 **`bounded.sh` / `spawn.sh` / `layers.sh` 全仓欠账归零**，`pending.sh` 升级同禁 P1/P2/P3/P4/P5，80 个 Rust 事件入 `docs/EVENTS.md`（P5 新增 `host.state`、`host.room`、`host.recover`、`shell.captions.style` 及 `server.sweep.removed`），P5 零新增 `Stats` 行、`stats.full == 0`、`Tally ≤ 8192 B`；P5 新增 6 台显式状态机/规则（服务器 `SlotState` & `room_expired`、核心 `HostState`/`host_step`、外壳 `CaptionWindowTracker::diff`、界面 `FilePhase`/`filePhaseStep`、`isCaptionQuiet`、`ViewerStatus`/`viewerStatusStep`）并全配转换表测试；端到端双保险测试 `host_crash_recovery_double_insurance_leaves_nothing_outside` 与落盘隐私审计 `host_city_and_caption_secrets_never_reach_logs_diagnose_lock_or_settings` 验证崩溃后外部清零及密钥/片段/文本/标题/DID/房间 id 零泄漏 |
+| I8 每次更新的代价与历史无关 | 测 `Frame` 生成、视图查询、界面渲染的耗时，在 1 分钟和 4 小时两种长度下之比 ≈ 1。**P2 实测**：`i8_what_one_change_sends_does_not_grow_with_the_library` 已转正通过（5 条 vs 100 条 `State = 441 B / 441 B`，比值 `1.00`，`Invalidate = 60 B`）；`core/tests/view_scale.rs::i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration`（1 分钟 vs 4 小时 2,560 行，64 行单块 JSON 封顶 13.6 KB / 26.0 KB，耗时均 ≤ 12 ms）。**P3 界面侧实测**：`ui/tests/scale_i8.test.tsx` 在 600 px 模拟视口下实测 1 分钟（16 行）与 4 小时（2,560 行 = 40 块）阅读页挂载 DOM 行数均为 `11`（比值 `1.00`，远 ≤ 40），4 小时仅按需拉取 `2` 块（绝不拉第 39 块）；15 条与 500 条资料库挂载 DOM 行数均为 `11`（比值 `1.00`）；同帧突灌 50 帧 `Frame` + 50 次 `Level` 合并为 `1` 次 React 提交。**P4 复测**：5 条 vs 100 条 `State = 523 B / 525 B`（比值 `1.00`）。**P5 复测**：5 条 vs 100 条 `State = 1320 B / 1322 B`（比值 `1.00`）。**P6 复测**：`Setup.topics` 封顶 8 项后 5 条 vs 100 条 `State = 1332 B / 1334 B`（比值恒为 `1.00`），`Invalidate = 60 B`；`ai::titles::sample_transcript` 对 4 小时（2,560 行）录音 `O(1)` 采样封顶 `6,000` 字符；`scale_i8.test.tsx` 保持绿灯 |
+| **I9 显式与可观测**（原则 10，§4.5） | **P1–P6 实测**：全部 10 个规则脚本全绿且 **`bounded.sh` / `spawn.sh` / `layers.sh` 全仓欠账归零**，`pending.sh` 升级同禁 P1–P6，83 个 Rust 事件入 `docs/EVENTS.md`（P6 新增 `topic.saved`、`topic.context`、`titles.done`），P6 零新增 `Stats` 行（38/40 计数）、`stats.full == 0`、`Tally ≤ 8192 B`；P6 新增 4 组纯函数规则与转换表测试（`topic::normalize` / `size_chars`、`topic::assemble_context`、`titles::title_plan`、界面 `topicBudgetPercent` / `topicDraftStep` / `findLineIndexForTime`）；端到端读书会测试与真实落盘隐私审计 `core/tests/knowledge.rs` 验证 `logs/*.jsonl`、`diagnose/**/*` 与 `settings.json` 零内容/主题名/文件名/标题/话题泄漏且 `zutalk_log::refused() == 0` |
 | 真机 | `core/tests/audio.rs` 开头的手工清单，三个系统；8 小时实录一次 |
 
 **先写测试**：P1 的第一件事是让台架在现在的代码上跑起来，并且让它失败。失败的地方就是要改的地方。
@@ -469,7 +471,7 @@ ui/src/
 | **P3 界面主流程** | 框架定下；`ds/` 设计系统；两栏版面；首页、录音中、边录边记、停止以后、精修稿、读一场录音、全部录音；字幕窗基本款；状态一览里各种状态都有画法。**已做（P3-01 至 P3-07）**：零 Rust 协议改动，切至 React 19 + TypeScript + `virtua` dsh 结构；落地 `bus/`（rAF 合并、128 项活跃订阅 `QueryCache`、`routeStep`）、`ds/`（亮/暗令牌、`InlineConfirm`、`stateView`）、`shell/`（侧栏、顶栏、通知、`⌘K`、`HealthOverlay`）、全部 6 个主流程页、零查询 `CaptionsWindow`、React `ViewerPage`、8 语 312 键字典、`ui.sh` 与升级后 `pending.sh` | **E1–E7 自动化出口全通过**（12 份 UI 测试 76 条 + 10 个规则脚本 + 3 入口构建全绿；I8 阅读 16 vs 2,560 行与资料库 15 vs 500 条均恒挂 11 个 DOM 行、50 帧突灌合并 1 次提交）；**真机 WebView 视觉走查与 1 小时实录 I1 延迟等负责人核对**（见 `docs/build/reports/P3-07-close.md`） | 2 周（可以和 P2 后半并行：先用假数据） |
 | **P4 身份与额度** | 需要时才问；扫码登录加核对数字（要先补 zu `login.md`，§9 第 5 条）；新建身份、恢复密钥、句柄；额度按服务、按天（服务器 + 城）；**领回本机身份名下的记录（§2.7）**。**已做（P4-01 至 P4-06）**：`server/src/tasks.rs` 监督账本任务并还清 `spawn.sh` P4 欠账、`POST /quota` 与按服务 UTC 日上限；`zu::did` 补 `create_with_aka`/`Rotation::from_multikey`/`add_signing_key`；核心 `id/{identity,quota}.rs`（`AuthFlow` 两段扫码确认、建号、恢复、句柄离线缓存、按服务额度）与 `record/adopt.rs`（首次登录重签领回、`adopted.json` 单人绑定、进行中本机录音封盘补领、`DiscardLocal`）；界面 `bus/identity.ts`、`IdentitySheet.tsx`（无登录墙按需弹出）与 `SettingsPage.tsx`（`@handle`+短 DID、出字/AI 每日进度条、本机领回备份横幅与两步清除）、8 语全量词条、全链路隐私落盘验收与 `pending.sh` 升级禁 P4 | **E1–E6 自动化出口全通过**（零新增外部依赖，10 个规则脚本全绿，I8 `State` 523 B / 525 B 比值 `1.00`，`stats.full == 0`，日志/自检包秘密与隐私零泄漏；**六位数派生算法、短句柄域名、线上目录与生产额度参数待负责人确认**，见 `docs/build/reports/P4-06-close.md`） | 1–1.5 周（服务器部分可以和 P3 并行） |
 | **P5 主持与对外** | `out/host.rs`（不落盘、人数、两道保险）；房间只留槽；删掉单条录音的分享；色带；字幕窗的场合、大小、穿透点击、舞台全屏；观众页；按住交档案馆、8 秒撤销；记录类型和档案馆对齐。**已做（P5-01 至 P5-06）**：服务器无盘只留槽 `watch` 直播房间（2 分钟 TTL + `Tasks` 监督 `server.sweep`），清零 `bounded.sh` 与 `spawn.sh`；核心删除 `out/room.rs` 与 `talk/share`、新建 `out/host.rs`（`HostState` 状态机、内存持钥、`host.lock` 两道保险、`StopOutbound`）、`out/city.rs` 集中 `ARCHIVE_TYPES` 单表并清零 `layers.sh`；外壳 `Setup.caption` 4 场合持久化与无锁 `CaptionWindowTracker` + 防抖几何回写 + `ExitRequested` 异步 `gone`；界面 `HostPage`、直播色带、`FileArchiveCard`（1.4 s 按住 + 8 s 撤销）、`OutboundPage`、`CaptionScenesPanel`（16:10 预览）、4 场合零查询 `CaptionsWindow`（含 `Facing` 180° 与 10 s 隐去）、只留槽手机 `ViewerPage`、8 语全同步与 `pending.sh` 升级禁 P5 | **E1–E6 自动化出口全通过**（零新增外部依赖，全仓规则欠账彻底归零，I8 `State` `1320 B / 1322 B` 比值 `1.00`，双保险崩溃清理与落盘隐私审计全过；**档案馆 v0.3 类型确认、线上边缘反代与三平台真机字幕窗验证待负责人确认**，见 `docs/build/reports/P5-06-close.md`） | 1.5 周 |
-| **P6 知识库与 AI** | `talk/topic` 与知识库页；主题送进现场和精修的 context；标题与话题；「记进知识库」；只用额度的人怎么精修（§9 第 4 条） | 一场读书会：专有名词识别对、标题像人写的 | 1.5 周 |
+| **P6 知识库与 AI** | `talk/topic` 与知识库页；主题送进现场和精修的 context；标题与话题；「记进知识库」；只用额度的人怎么精修（§9 第 4 条）。**已做（P6-01 至 P6-05）**：`knowledge/topic.rs`（`talk/topic`、固定 `always` 主题、旧 `talk/term` 无损迁移、零新 crate 有界 UTF-8 文件提取与建议词、`record/adopt.rs` 纯 JSON 领回守 `layers.sh`）；`TopicContext` 脱敏 `Debug` + `live/lane.rs` & `ai/write.rs` 双路上下文注入与未选主题隔离（`DECISIONS.md` #7）；`ai/titles.rs`（`title_plan`、`O(1)` 采样、OpenRouter 严格 JSON 零留存、独立 `TITLE_AT_ONCE_JOBS = 1` 信号量 + 第 4 槽 `Progress.title`、手写标题永不被覆写、额度键异步拒绝后草稿仍自动起标题）；SQLite `INDEX_SCHEMA_VERSION = 2` 索引 `title_by`/`tags`/`topics` 与 `SearchHitKind::Tag`/`LibraryFilter.tag`；界面 `KnowledgePage`、首页主题选择器、阅读页字重区分/换标题候选弹窗/话题胶囊跳转/「+ 记进知识库」、全部录音页话题副标题与过滤、8 语同步、端到端读书会与真实落盘隐私审计、`pending.sh` 升级禁 P6 | **E1–E6 自动化出口全通过**（零新增外部依赖、零新增 `Stats` 行、`stats.full == 0`、`Tally ≤ 8192 B`、I8 `State` `1332 B / 1334 B` 比值 `1.00`、真实落盘零泄漏；**真机真钥匙读书会实测与是否引入 PDF/DOCX 解析 crate 待负责人确认**，见 `docs/build/reports/P6-05-close.md`） | 1.5 周 |
 | **P7 搬家与发布** | 打上并发布 0.8.6 交接补丁；在 175 条真数据的副本上搬一遍；更新签名钥匙；Sparkle 的 `zu` 频道；三个系统的手工清单；8 小时实录 | 发布清单（`RELEASE.md`）全部打钩 | 1 周 |
 
 关键路径：P0 → P1 → P2 → P3 → P5 → P7。P4 的服务器部分、P6 的提示词与评测可以提前并行。

@@ -43,7 +43,8 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | 导出器 | `EXPORTERS` 表里的一行 | `export` |
 | 有没有音频 | 本机还有没有这条录音的分钟文件（`tape::kept`），`Row.audio` 把它交给界面。补写、清扫、交城都只问它 | `tape` |
 | 留多久 | 音频在本机留几天，设备偏好里选；整场记录写好之前一律不删，本人销毁除外 | `retain`、`tape` |
-| 词表 | 本人要听对、写对的人名和词：怎么说，各语言怎么写。一个词一条记录 | `glossary`、`shelf` |
+| 知识库与主题 | 按主题组织的 `talk/topic` 记录（`topics.jsonl`）：名称、领域、概况、背景、词表、显式译法、仅留基名的来源文件与文件提取建议词，加一条固定不可删的「每场都用」主题 `always`（启动自动无损迁移旧 `talk/term`）；纯函数 `assemble_context` 只合并 `always` 与本场选中的主题（未选主题绝不发，封顶 8 个随机十六进制 id）注入现场与精修双路上下文 | `knowledge/topic.rs`、`record/shelf.rs` |
+| AI 标题与话题 | 独立后台任务（`TITLE_AT_ONCE_JOBS = 1`，接 `Progress.title` 第 4 槽）对录音做 `O(1)` 头中尾采样（≤ 6,000 字符），经 OpenRouter 严格 JSON Schema + 零留存生成候选标题与 1–4 个带时间点的话题词；写回前二次核对书架，手写标题（`TitleBy::Hand`）永不被覆写、中途删除绝不复活；SQLite v2 索引 `tags` 供 2 字与 ≥3 字检索及过滤 | `ai/titles.rs`、`view/index.rs` |
 | 交城 | 本人的记录，`to` 写城的 DID，交给城的 Zu 主机；交到哪里、交得怎样是本人的一条 `talk/filing` 记录 | `city` |
 | 再试 | 会过去的失败按 `AGAIN` 起越等越久地再试，一个 `again`：整场转写、认领邀请、交城共用 | `supervise` |
 | 状态、信号与提示 | 核心往外只走寄存器（`Outlet`）：有上限的小状态（`State`，16 个定界字段，含 `auth`/`handle`/`quota`/`local_shelf`，不含资料库/正文/搜索/词表/日历）变了整份发；信号（`Frame`、`Session`、`Level`、`Progress`、`Water`、`Stats`）带各自序号 `seq`，只留最新一份；失效环（`Invalidations`）保留最近 64 条合并后的 `Invalidate`；提示（`Notices`）保留最近 16 个稳定代码，直接由各部件写入并发 `notice.said` | `app/core.rs`、`app/proto.rs`、`rt/signal.rs`、`view/query.rs` |
@@ -71,8 +72,8 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 | `id` | `id.rs`、`id/keys.rs`、`id/identity.rs`、`id/quota.rs` | 身份（本机 `did:key` 与登录 `did:zu`，状态机 `Who` 与 `AuthFlow`）、两段式扫码确认、建号/恢复密钥找回与离线句柄缓存、按服务每日额度 `Quota` 解析与拉取、秘密文件与钥匙库、各服务钥匙来源（`From`）与 `Chain`、派生密钥、对服务器的签名请求、旧版邀请认领 |
 | `live` | `live.rs`、`live/wire.rs`、`live/lane.rs`、`live/frame.rs`、`live/lines.rs`、`live/lang.rs` | 实时连接端口 `Dial`、每栏一条 `lane`（重连、换钥匙、取钥匙时限、跳直播沿）、增量组帧器 `Composer` 与 8 KB `fit`、断句规则、各语言档案与逐字显现单位 |
 | `record` | `record.rs`、`record/shelf.rs`、`record/notes.rs`、`record/takes.rs`、`record/adopt.rs`、`record/retain.rs`、`record/migrate.rs` | 书架（记录读写、改、删与撤销、`Writer`、O(1) 草稿写手 `DraftWriter` 与 `DraftGap`）；带时间/锚点的多条笔记 `notes`；多版本读取与精修状态机 `takes`；本机 `did:key` 首次登录重签领回与清理 `adopt`；音频保留与清扫 `retain`；0.8 交接搬运 `migrate` |
-| `knowledge` | `knowledge.rs`、`knowledge/glossary.rs` | 词表（读写、给现场各流的 `terms`/`translation_terms` 与整场转写的 `Plan.terms`；P6 升级为 `topic.rs`） |
-| `ai` | `ai.rs`、`ai/write.rs` | 整场转写、整场翻译与检查、远端删除与扫尾、无钥匙草稿等待规则 `owed`、精修失败状态持久化 |
+| `knowledge` | `knowledge.rs`、`knowledge/glossary.rs`、`knowledge/topic.rs` | 本机知识库：`talk/topic` CRUD、固定 `always` 主题、旧 `talk/term` 无损迁移、零新 crate UTF-8 `.txt`/`.md`/`.csv`/`.tsv` 文件提取与建议词、脱敏 `TopicContext` 装配与现场/精修双路投影 |
+| `ai` | `ai.rs`、`ai/write.rs`、`ai/titles.rs` | 整场转写、整场翻译与检查（带主题上下文）、远端删除与扫尾、无钥匙草稿等待规则 `owed`、精修失败状态持久化；独立后台 AI 标题与话题生成（`title_plan`、`O(1)` 采样、严格 JSON 零留存） |
 | `out` | `out.rs`、`out/export.rs`、`out/host.rs`、`out/city.rs` | 导出器表（Markdown、SRT、VTT）；无盘主持直播房间状态机、内存持钥封帧与 `host.lock` 崩溃恢复；交城日历、集中 `ARCHIVE_TYPES` 归档表与分段音频 |
 | `view` | `view.rs`、`view/index.rs`、`view/transcript.rs`、`view/query.rs` | L3 可丢弃本机投影层：SQLite WAL + FTS5 `trigram` 索引与自动重建/对账/增量同步、64 行正文分块与纯函数对比、并发限 8 可取消 `ViewEngine` 与有界 `Invalidations` 环 |
 | `app` | `lib.rs`、`app.rs`、`app/core.rs`、`app/hub.rs`、`app/proto.rs`、`app/recording.rs`、`app/work.rs` | `Config`/`Core`/`Outlet` 入口（含 `Core::query`）；零 IO 状态机 `hub`（含 `Boot`）；瘦身后的协议 `proto`；一场录音的监督子树与状态机 `recording`；顺序 `desk`（单写 SQLite 同步）、导出、串行后台精修/交城/搬运与自检包 `work` |
@@ -157,14 +158,15 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 测试：`core/tests/retain.rs`（规则表、销毁留下欠账的日志、启动时清扫且没写好的留着、本人销毁后不再补写、写好后 0 天立即删）。
 
-### 5.9 词表
+### 5.9 知识库、双路上下文与 AI 标题话题（P6 升级）
 
-- **放在哪：记录。** 词表是本人知道的东西，常是对话里的人名：它该跟着本人换设备，同一台设备上别人登录也读不到；设备偏好（`settings.json`）是这台设备上所有人共用的。类型 `talk/term`，像房间清单一样单独一个 pack（`terms.jsonl`）。键是「怎么说」规范化（NFKC、小写）后 SHA-256 的前 16 字节，所以同一个词再加一次是同一路径上多一条记录；拿掉是一条空记录。
-- **现场。** `glossary::live` 按流配：每种写法都进 `terms`；这条流译入的每种语言，把其余写法译成那种语言的写法（没有就用怎么说的写法），进 `translation_terms`。不会把泰文写法交给译成中文的那条流。
-- **整场。** `Plan.terms` 原来一直是空的，现在是录音任务开始时的词表，进整场转写的 `context.terms`、翻译请求和 `glossary` 守卫。
-- **界面。** 设置页「词表」：已有的词是点一下就拿掉的标签，后面一个框写怎么说，说的语言和字幕语言各一个框写它的写法。解释只在提示里。
+- **放在哪：`talk/topic` 记录。** 知识库属于本人，记录类型 `talk/topic` 落在 `topics.jsonl`，不登录也能用，首次登录时由 `record/adopt.rs` 在纯 JSON 层（不引入 `crate::knowledge`，严守 `layers.sh`）重签领回并无损合并双方固定 `always` 主题。旧 `talk/term` 在打开书架时由 `topic::ensure_migrated` 自动无损迁入固定不可删的 `"always"` 主题；`Command::Term` 与 `Query::Glossary` 保持 100% 向后兼容。自定义主题使用随机 32 位十六进制 id，`Setup.topics` 封顶 8 项且只存随机 id，绝不把主题名或内容写进 `settings.json`。
+- **预算与文件提取。** 每个主题在纯函数 `topic::normalize` 与 `size_chars` 中严守 10,000 字符总上限（概况 ≤ 16、背景 ≤ 6,000、词 ≤ 200、译法 ≤ 100、建议词 ≤ 40）。零新增 crate 支持 UTF-8 `.txt`/`.md`/`.markdown`/`.csv`/`.tsv` 文件提取（硬限 ≤ 512 KiB，仅保存文件基名 `file_name()`），提取词只进 `suggested_terms` 供人点选采纳、绝不自动塞进 `terms`，背景仅在原背景为空时预填。
+- **双路上下文注入（`DECISIONS.md` #7）。** `TopicContext`（手写脱敏 `Debug`）由纯函数 `assemble_context` 合并固定 `always` + 本场选中主题（未选主题一律排除，封顶 24 条 `general`、8,000 字 `text`、300 词、300 译法对）。现场路经 `topic::apply_live` 填入 Soniox `context.{general, text, terms, translation_terms}`；精修路经 `write::Plan` 同时注入 Soniox 异步转写 `context` 与 OpenRouter 翻译系统提示词（背景封顶 2,400 字）。现场与精修起动各发一条仅含计数的 `topic.context` 事件。
+- **独立后台 AI 标题与话题（`ai/titles.rs`）。** `Work` 设独立信号量 `TITLE_AT_ONCE_JOBS = 1`（绝不阻塞录音、精修或交城），经 `Progress.title` 第 4 槽向界面回报。`sample_transcript` 对任意长度录音（含 4 小时 2,560 行）按头 40 / 中 20 / 尾 20 行封顶 6,000 字符做 `O(1)` 采样；OpenRouter 请求强制 `zdr: true`、`data_collection: "deny"` 与严格 JSON Schema，拒收 HTTP 200 内嵌错误正文。写回前在 `desk` 重读 `shelf.about(&id)`：录音已删则立即放弃（`titles.done(code = "gone")`），手写标题（`TitleBy::Hand`）永不被 AI 覆写（仅刷新候选与话题）。额度键遭 Soniox 异步 403 拒绝（`keys.async_refused`）后，若 OpenRouter 可用，草稿仍自动产出 AI 标题与话题。SQLite `INDEX_SCHEMA_VERSION = 2` 自动重建索引 `title_by`、`tags_json`、`topics_json` 并支持 `SearchHitKind::Tag`（含 2 字中文短词）与 `LibraryFilter.tag`。
+- **界面。** `KnowledgePage`（对照 `Knowledge.dc.html`：左轨固定与自定义主题、10,000 字篇幅条、概况/背景/词/虚线建议词/译法、两步红底删除与常驻隐私提示）、`HomePage` 主题选择器、`ReaderPage`/`TranscriptList`/`ResultPage`（手写粗体 vs 自动常规、换标题候选弹窗与重新生成、话题时间胶囊跳转不破坏 `VList`、手改行「+ 记进知识库」）与 `LibraryPage` 话题副标题及一键筛选。
 
-测试：`core/tests/glossary.rs`（每种流的配置、同一个词只一条记录、经枢纽到达现场配置和整场转写请求、登出后看不到）。
+测试：`core/tests/topic.rs`、`core/tests/write.rs`、`core/tests/titles.rs`、`core/tests/view.rs`、`core/tests/adopt.rs`、`core/tests/knowledge.rs`（读书会端到端、额度草稿起标题与真实落盘逐字节隐私审计）、`ui/tests/knowledge.test.tsx`、`ui/tests/titles.test.tsx`。
 
 ### 5.10 应用自己的更新
 
@@ -227,7 +229,7 @@ P1 已将 `PLAN.md` §4 与 `docs/build/phases/P1.md` §3 落地：现场路径�
 ### 5.14 显式与可观测
 
 - **日志**：写到 `<数据目录>/logs/zutalk.jsonl`（服务器为 `<ZUTALK_DATA>/logs/zutalk-server.jsonl`），每行平铺 JSON（`t_ms`、`seq`、`level`、`component`、`event` 加事件字段），按 8 MB 轮换、留 5 个；发事件的人走 4096 行有界队列，从不等磁盘。
-- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节（含笔记、搜索词与精修）与自检包。全部 72 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`pending.sh` 共 9 个规则脚本在门禁里守着。
+- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节（含笔记、搜索词、精修、身份、主持、知识库与 AI 标题/话题）与自检包。全部 83 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`ui.sh`、`pending.sh` 共 10 个规则脚本在门禁里零欠账守着。
 - **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`；索引重建看 `index.open` 与 `index.sync`；查询变慢看 `query.slow` 与 `query.done`；精修失败看 `refine.state` 与 `write.skipped`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
 
 ### 5.15 不登录也能录

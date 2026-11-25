@@ -107,3 +107,10 @@
 - **桌面字幕窗在 `shell.sh` 零锁零查询红线下，几何同步必须靠事件驱动 + 无锁防抖 + 纯状态机 diff。** 不调任何会阻塞主线程的 `inner_size`/`outer_position`/`scale_factor`，直接用 `WindowEvent::Moved`/`Resized` 推入 `tokio::sync::watch`、防抖 400 ms 回写 `Command::CaptionGeometry`，并由 `CaptionWindowTracker::diff` 跳过相同规格与全屏期间几何，杜绝 OS 事件回调引发的回环。
 - **按住 1.4 秒 + 8 秒可撤销倒数把「公开不可撤回」的误触降到零，但绝不能提前派发 `Command::File`。** 8 秒宽限期完全在界面显式状态机 `FilePhase` 内完成，按撤销立即清定时器并退回 `review`；只有宽限期走完才真正发出 `Command::File`。
 - **静态规则脚本的正则扫描也会检查注释与测试外源码。** `ui.sh` 禁止不安全 HTML 注入属性名出现在 `ui/src` 任何位置（包括注释），二维码统一用 `uqr::encode()` 输出纯 JSX `<svg><path d={...} /></svg>`，既轻又彻底消除注入面。
+
+## P6 里学到的（2026-11）
+
+- **跨层领回 `talk/topic` 同样可以零依赖地留在 `record` 层，并合并固定主题而不丢数据。** `record/adopt.rs` 不能引用 `crate::knowledge`（`layers.sh` 单向分层红线）；直接按 `Shelf::kept::<Value>(TOPIC)` 读取并在 JSON 值层合并双方 `"always"` 主题的 `terms` / `facts` / `translation_terms`，既保持零欠账，又保证首次登录领回不覆盖本人已有词表。
+- **`settings.json` 与日志的隐私防线要靠数据结构本身兜底，而不是事后过滤。** 自定义主题 id 强制使用 32 位随机十六进制（绝不取主题名），`Topic.source_file` 在 `normalize` 里强制剥离目录仅留基名，`TopicContext` 手写脱敏 `Debug` 只打计数与字符数——这样即便 `Setup.topics` 落盘 `settings.json` 或代码误打调试日志，也按构造不泄任何主题名、文件路径或背景正文。
+- **后台 AI 标题必须与精修/交城物理隔离，且落盘前必须重读最新 `About` 复核。** `Work` 为标题单独设 `TITLE_AT_ONCE_JOBS = 1` 信号量（不占 `Work.bg`），即使 OpenRouter 慢或卡住也绝不堵住精修、交城或 L3 查询；写回经顺序 `desk` 的 `Job::ApplyTitles` 二次核对 `shelf.about(&id)`，从根上消除了「AI 运行中被用户手改标题覆盖」和「录音已删又被标题写回复活」两类竞态。
+- **额度键被异步转写 403 拒绝时，把自动起标题挂在精修终态失败分支上就能无感兜底。** 沿 `DECISIONS.md` #4 保持现场草稿并给出 `keys.async_refused` 清晰提示，同时只要 OpenRouter 钥匙可用，草稿依然会自动获得人话标题与可搜索的话题词，避免只用额度的人留下满屏「未命名录音」。
