@@ -427,8 +427,8 @@ impl ViewEngine {
     pub async fn query(&self, query: Query) -> Result<QueryReply, &'static str> {
         let started = Instant::now();
         let view_code = query.code();
-        let src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if !src.ready {
+        let ready = self.0.source.lock().unwrap_or_else(PoisonError::into_inner).ready;
+        if !ready {
             let ms = started.elapsed().as_millis() as u64;
             warn!("query.done", view = view_code, code = "starting", ms = ms, rows = 0usize);
             return Err("starting");
@@ -454,7 +454,17 @@ impl ViewEngine {
             return Err(self.finish_cancelled(slot, my_gen, view_code, started));
         }
 
+        // Load `version` (Acquire) *before* cloning `ViewSource`: writers always update `source`
+        // (and commit SQLite) before bumping `version` (AcqRel) in `invalidate`, so reading
+        // `version` first guarantees the cloned snapshot is at least as fresh as `version`.
         let version = self.0.version.load(Ordering::Acquire);
+        let src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if !src.ready {
+            self.clear_slot(slot, my_gen);
+            let ms = started.elapsed().as_millis() as u64;
+            warn!("query.done", view = view_code, code = "starting", ms = ms, rows = 0usize);
+            return Err("starting");
+        }
         let run_cancel = cancel.clone();
         let run_interrupt = interrupt.clone();
         let outcome = self

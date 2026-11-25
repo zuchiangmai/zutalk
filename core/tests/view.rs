@@ -1124,3 +1124,136 @@ async fn core_query_reflects_recording_notes_changes_search_takes_and_invalidate
         "Outlet.progress must observe refine progress for rec_broken"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn view_engine_never_stamps_stale_source_with_newer_version() {
+    use std::sync::{Condvar, Mutex};
+    use zutalk_core::out::city::{Calendar, CityEvent};
+    use zutalk_core::rt::stats::Stats;
+    use zutalk_core::rt::supervise::Tree;
+    use zutalk_core::view::query::{
+        QUERY_CONCURRENT_MAX_JOBS, Query, QueryValue, ViewEngine, ViewKind,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shelf = Arc::new(shelf_for(&dir.path().join("records"), ME, 5));
+    let tapes = dir.path().join("tapes");
+    write_recording(
+        &shelf,
+        "rec1",
+        NOW,
+        "Snapshot Order Test",
+        &["en"],
+        0,
+        &[(0, vec![said(0, 1_000, "en", "hello world", &[])])],
+    );
+
+    let stats = Stats::new();
+    let tree = Tree::root("core", stats.clone()).child("work");
+    let db = dir.path().join("index.sqlite3");
+    let _idx = Index::open(&db, &shelf, &tapes, &stats).expect("open");
+
+    let (engine, _inv) = ViewEngine::new(tree.clone(), tapes);
+    engine.set_source(Some(shelf), Some(db), false, true);
+    engine.set_calendar(None);
+
+    // Block all QUERY_CONCURRENT_MAX_JOBS (8) permits inside the Search worker hook until released.
+    let state = Arc::new((Mutex::new((0usize, false)), Condvar::new()));
+    let hook_state = state.clone();
+    engine.set_hook(Some(Arc::new(move |view, _cancel| {
+        if view == "search" {
+            let (lock, cvar) = &*hook_state;
+            let mut guard = lock.lock().expect("lock");
+            guard.0 += 1;
+            cvar.notify_all();
+            while !guard.1 {
+                guard = cvar.wait(guard).expect("wait");
+            }
+        }
+    })));
+
+    let mut blockers = Vec::with_capacity(QUERY_CONCURRENT_MAX_JOBS);
+    for i in 0..QUERY_CONCURRENT_MAX_JOBS {
+        let eng = engine.clone();
+        blockers.push(tokio::spawn(async move {
+            eng.query(Query::Search { query: "hello".into(), limit: 10 }).await
+        }));
+        // Wait for blocker `i` to hold its semaphore permit inside the hook before the next
+        // Search supersedes its slot, so all 8 permits are deterministically occupied.
+        let wait_state = state.clone();
+        let target = i + 1;
+        tokio::task::spawn_blocking(move || {
+            let (lock, cvar) = &*wait_state;
+            let mut guard = lock.lock().expect("lock");
+            while guard.0 < target {
+                guard = cvar.wait(guard).expect("wait");
+            }
+        })
+        .await
+        .expect("barrier");
+    }
+
+    // Start a Calendar query (Other slot, not cancelled by Search) while all 8 permits are busy.
+    let eng_cal = engine.clone();
+    let queued = tokio::spawn(async move { eng_cal.query(Query::Calendar).await });
+    // Let the queued task reach `permits.acquire_owned().await`.
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Update calendar and bump version while the Calendar query is queued on the semaphore.
+    let fresh = Calendar {
+        address: "city.test".into(),
+        did: "did:zu:city".into(),
+        events: vec![CityEvent {
+            path: "zu://did:zu:org/ev/event/e1".into(),
+            title: "Fresh".into(),
+            start: Some(NOW),
+        }],
+    };
+    engine.set_calendar(Some(fresh.clone()));
+    let v_new = engine.invalidate(ViewKind::Calendar, None);
+
+    // Release all 8 blocking Search workers so the queued Calendar query acquires a permit.
+    {
+        let (lock, cvar) = &*state;
+        let mut guard = lock.lock().expect("lock");
+        guard.1 = true;
+        cvar.notify_all();
+    }
+
+    let reply = queued.await.expect("join queued").expect("calendar reply");
+    for h in blockers {
+        let _ = h.await;
+    }
+
+    assert!(
+        reply.version < v_new
+            || matches!(&reply.value, QueryValue::Calendar(Some(cal)) if cal.did == fresh.did && cal.events.len() == 1),
+        "stale Calendar(None) must never be stamped with version {} >= v_new {}: reply={reply:?}",
+        reply.version,
+        v_new
+    );
+    assert_eq!(reply.version, v_new);
+    assert!(
+        matches!(&reply.value, QueryValue::Calendar(Some(cal)) if cal.did == fresh.did && cal.events.len() == 1),
+        "queued Calendar query must observe fresh calendar for v_new={v_new}, got {:?}",
+        reply.value
+    );
+    let cancelled = stats
+        .tally()
+        .counts
+        .into_iter()
+        .find(|c| c.name == "query.cancelled")
+        .map(|c| c.n)
+        .unwrap_or(0);
+    assert!(
+        cancelled >= (QUERY_CONCURRENT_MAX_JOBS - 1) as u64,
+        "expected superseded search cancellations, got {cancelled}"
+    );
+
+    engine.set_hook(None);
+    tree.cancel();
+    tree.wait().await;
+}
