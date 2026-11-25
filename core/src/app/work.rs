@@ -14,13 +14,16 @@ use crate::id::identity::{self, PendingSignIn};
 use crate::id::keys::{self, Chain, Me, Ours, SIGN_IN_WAIT_MS, Secret, Service, SignIn, Who};
 use crate::id::quota;
 use crate::knowledge::glossary::{self, Term};
+use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic};
 use crate::live::frame::Frame;
 use crate::live::lines::Line;
 use crate::out::city::{self, FileGate, Filer, Filing};
 use crate::out::export::{Doc, EXPORTERS};
 use crate::out::host::{self, HOST_ARM_POLL_MS, HOST_KEEPALIVE_MS, HOST_SLOT_MS, Write};
 use crate::record::notes;
-use crate::record::shelf::{About, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, Words};
+use crate::record::shelf::{
+    About, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, TOPIC, Words,
+};
 use crate::record::takes::{
     RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
 };
@@ -368,6 +371,21 @@ enum Job {
         said: String,
         written: Option<BTreeMap<String, String>>,
     },
+    SaveTopic {
+        topic: Topic,
+    },
+    RemoveTopic {
+        id: String,
+    },
+    ImportTopicFile {
+        id: String,
+        path: String,
+    },
+    RememberTerm {
+        topic_id: String,
+        said: String,
+        written: BTreeMap<String, String>,
+    },
     DestroyAudio {
         id: String,
         under_way: Option<String>,
@@ -418,6 +436,10 @@ impl DeskJob for Job {
             Job::Remove { .. } => "remove",
             Job::Restore { .. } => "restore",
             Job::Term { .. } => "term",
+            Job::SaveTopic { .. } => "topic.save",
+            Job::RemoveTopic { .. } => "topic.remove",
+            Job::ImportTopicFile { .. } => "topic.import",
+            Job::RememberTerm { .. } => "topic.remember",
             Job::DestroyAudio { .. } => "destroy",
             Job::Export { .. } => "export",
             Job::BeginFile { .. } => "file.begin",
@@ -433,6 +455,8 @@ enum DeskOut {
     Copied,
     Diagnosed,
     RotationSaved,
+    TopicRemembered,
+    TopicRemoved(String),
     Booted {
         out: Box<BootOut>,
         start_create: bool,
@@ -469,6 +493,7 @@ struct DeskEnv {
     index: Mutex<Option<Index>>,
     views: Arc<ViewEngine>,
     terms: Arc<Mutex<Vec<Term>>>,
+    topics: Arc<Mutex<Vec<Topic>>>,
     invite: Arc<Mutex<Option<Secret>>>,
     signing: Arc<Mutex<Option<CancellationToken>>>,
     pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
@@ -509,6 +534,8 @@ pub(crate) struct Work {
     progress_reg: Register<Progress>,
     views: Arc<ViewEngine>,
     terms: Arc<Mutex<Vec<Term>>>,
+    #[allow(dead_code)] // read in P6-02 when assembling TopicContext on start_recording
+    topics: Arc<Mutex<Vec<Topic>>>,
     said: Voice,
     root: Tree,
     tree: Tree,
@@ -549,6 +576,7 @@ impl Work {
         let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
         let identity = Arc::new(Mutex::new(Identity::starting()));
         let terms: Arc<Mutex<Vec<Term>>> = Arc::new(Mutex::new(Vec::new()));
+        let topics: Arc<Mutex<Vec<Topic>>> = Arc::new(Mutex::new(Vec::new()));
         let invite: Arc<Mutex<Option<Secret>>> = Arc::new(Mutex::new(None));
         let signing: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
         let pending_signin: Arc<Mutex<Option<PendingSignIn>>> = Arc::new(Mutex::new(None));
@@ -564,6 +592,7 @@ impl Work {
             index: Mutex::new(None),
             views: views.clone(),
             terms: terms.clone(),
+            topics: topics.clone(),
             invite: invite.clone(),
             signing: signing.clone(),
             pending_signin: pending_signin.clone(),
@@ -622,6 +651,12 @@ impl Work {
                         }
                         Ok(DeskOut::RotationSaved) => {
                             let _ = results.send(Msg::RotationSaved).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::TopicRemembered) => {
+                            let _ = results.send(Msg::TopicRemembered).await; // dropped: the hub has ended
+                        }
+                        Ok(DeskOut::TopicRemoved(id)) => {
+                            let _ = results.send(Msg::TopicRemoved(id)).await; // dropped: the hub has ended
                         }
                         Ok(DeskOut::Booted { out, start_create, start_claim, recover_host }) => {
                             let snap = snapshot(&identity);
@@ -812,6 +847,7 @@ impl Work {
             progress_reg,
             views,
             terms,
+            topics,
             said,
             root,
             tree,
@@ -1165,6 +1201,27 @@ impl Work {
         written: Option<BTreeMap<String, String>>,
     ) -> Result<(), &'static str> {
         self.desk.offer(Job::Term { said, written }).map(|_| ())
+    }
+
+    pub(crate) fn save_topic(&self, topic: Topic) -> Result<(), &'static str> {
+        self.desk.offer(Job::SaveTopic { topic }).map(|_| ())
+    }
+
+    pub(crate) fn remove_topic(&self, id: String) -> Result<(), &'static str> {
+        self.desk.offer(Job::RemoveTopic { id }).map(|_| ())
+    }
+
+    pub(crate) fn import_topic_file(&self, id: String, path: String) -> Result<(), &'static str> {
+        self.desk.offer(Job::ImportTopicFile { id, path }).map(|_| ())
+    }
+
+    pub(crate) fn remember_term(
+        &self,
+        topic_id: String,
+        said: String,
+        written: BTreeMap<String, String>,
+    ) -> Result<(), &'static str> {
+        self.desk.offer(Job::RememberTerm { topic_id, said, written }).map(|_| ())
     }
 
     pub(crate) fn destroy_audio(
@@ -1834,7 +1891,14 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                             return Err("adopt.failed");
                         }
                     };
-                    has_recs || has_terms
+                    let has_topics = match shelf.kept::<serde_json::Value>(TOPIC) {
+                        Ok(topics) => !topics.is_empty(),
+                        Err(_) => {
+                            warn!("identity.discard_local", code = "adopt.failed");
+                            return Err("adopt.failed");
+                        }
+                    };
+                    has_recs || has_terms || has_topics
                 } else {
                     false
                 };
@@ -1984,12 +2048,127 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::Term { said, written } => {
             let shelf = snapshot(identity).shelf?;
+            topic::put_always_term(&shelf, &said, written.clone(), now())?;
             glossary::put(&shelf, &said, written, now())?;
-            if let Ok(terms) = glossary::read(&shelf) {
-                *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = terms;
-            }
+            refresh_topic_caches(env, &shelf);
             env.views.invalidate(ViewKind::Glossary, None);
+            env.views.invalidate(ViewKind::Knowledge, None);
             Ok(DeskOut::Silent)
+        }
+        Job::SaveTopic { topic } => {
+            let shelf = snapshot(identity).shelf?;
+            let is_pinned = topic.id.trim() == ALWAYS_TOPIC_ID;
+            match topic::save(&shelf, topic, now()) {
+                Ok(saved) => {
+                    refresh_topic_caches(env, &shelf);
+                    env.views.invalidate(ViewKind::Knowledge, None);
+                    if saved.pinned {
+                        env.views.invalidate(ViewKind::Glossary, None);
+                    }
+                    info!(
+                        "topic.saved",
+                        op = "save",
+                        pinned = saved.pinned,
+                        terms = saved.terms.len(),
+                        code = "ok"
+                    );
+                    Ok(DeskOut::Silent)
+                }
+                Err(c) => {
+                    warn!("topic.saved", op = "save", pinned = is_pinned, terms = 0usize, code = c);
+                    Err(c)
+                }
+            }
+        }
+        Job::RemoveTopic { id } => {
+            let shelf = snapshot(identity).shelf?;
+            let is_pinned = id == ALWAYS_TOPIC_ID;
+            match topic::remove(&shelf, &id, now()) {
+                Ok(()) => {
+                    refresh_topic_caches(env, &shelf);
+                    env.views.invalidate(ViewKind::Knowledge, None);
+                    info!(
+                        "topic.saved",
+                        op = "remove",
+                        pinned = false,
+                        terms = 0usize,
+                        code = "ok"
+                    );
+                    Ok(DeskOut::TopicRemoved(id))
+                }
+                Err(c) => {
+                    warn!(
+                        "topic.saved",
+                        op = "remove",
+                        pinned = is_pinned,
+                        terms = 0usize,
+                        code = c
+                    );
+                    Err(c)
+                }
+            }
+        }
+        Job::ImportTopicFile { id, path } => {
+            let shelf = snapshot(identity).shelf?;
+            let is_pinned = id.trim().is_empty() || id.trim() == ALWAYS_TOPIC_ID;
+            match topic::import_file(&shelf, &id, Path::new(&path), now()) {
+                Ok(saved) => {
+                    refresh_topic_caches(env, &shelf);
+                    env.views.invalidate(ViewKind::Knowledge, None);
+                    if saved.pinned {
+                        env.views.invalidate(ViewKind::Glossary, None);
+                    }
+                    info!(
+                        "topic.saved",
+                        op = "import",
+                        pinned = saved.pinned,
+                        terms = saved.terms.len(),
+                        code = "ok"
+                    );
+                    Ok(DeskOut::Silent)
+                }
+                Err(c) => {
+                    warn!(
+                        "topic.saved",
+                        op = "import",
+                        pinned = is_pinned,
+                        terms = 0usize,
+                        code = c
+                    );
+                    Err(c)
+                }
+            }
+        }
+        Job::RememberTerm { topic_id, said, written } => {
+            let shelf = snapshot(identity).shelf?;
+            let is_pinned = topic_id.trim().is_empty() || topic_id.trim() == ALWAYS_TOPIC_ID;
+            match topic::remember_term(&shelf, &topic_id, &said, written, now()) {
+                Ok(saved) => {
+                    refresh_topic_caches(env, &shelf);
+                    env.views.invalidate(ViewKind::Knowledge, None);
+                    if saved.pinned {
+                        env.views.invalidate(ViewKind::Glossary, None);
+                    }
+                    info!(
+                        "topic.saved",
+                        op = "remember",
+                        pinned = saved.pinned,
+                        terms = saved.terms.len(),
+                        code = "ok"
+                    );
+                    Ok(DeskOut::TopicRemembered)
+                }
+                Err(c) => {
+                    warn!(
+                        "topic.saved",
+                        op = "remember",
+                        pinned = is_pinned,
+                        terms = 0usize,
+                        code = c
+                    );
+                    Err(c)
+                }
+            }
         }
         Job::DestroyAudio { id, under_way } => {
             let shelf = snapshot(identity).shelf?;
@@ -2507,7 +2686,7 @@ fn run_sign(
                     match adopt::run(&config.data, &local, person_shelf, &exclude, now()) {
                         Ok(sum) => {
                             if sum.plan == adopt::AdoptPlan::Adopt
-                                && (sum.recordings > 0 || sum.terms > 0)
+                                && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0)
                             {
                                 info!(
                                     "identity.adopt",
@@ -2551,9 +2730,13 @@ fn run_sign(
     *env.index.lock().unwrap_or_else(PoisonError::into_inner) = None;
 
     let snap = snapshot(identity);
-    let cached_terms =
-        snap.shelf.as_ref().ok().and_then(|s| glossary::read(s).ok()).unwrap_or_default();
-    *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = cached_terms;
+    if let Ok(shelf) = &snap.shelf {
+        let _ = topic::ensure_migrated(shelf, now()); // dropped: best-effort legacy talk/term migration on sign-in
+        refresh_topic_caches(env, shelf);
+    } else {
+        *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = Vec::new();
+        *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = Vec::new();
+    }
 
     let refreshed = match run_refresh(env, &snap, 0, Some(keep)) {
         Ok(refreshed) => refreshed,
@@ -2597,6 +2780,15 @@ fn run_sign(
     };
 
     Ok(SignedOut { me, handle, rotation_unsaved, local_shelf, refreshed, survey, say })
+}
+
+fn refresh_topic_caches(env: &DeskEnv, shelf: &Shelf) {
+    if let Ok(list) = topic::list(shelf) {
+        let always_terms =
+            list.iter().find(|t| t.pinned).map(|t| t.terms.clone()).unwrap_or_default();
+        *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = list;
+        *env.terms.lock().unwrap_or_else(PoisonError::into_inner) = always_terms;
+    }
 }
 
 fn run_refresh(

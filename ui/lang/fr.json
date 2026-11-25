@@ -460,5 +460,13 @@
  "captions.saved_local": "Enregistré sur cet appareil",
  "viewer.waiting": "En attente du début",
  "viewer.waiting_detail": "En attente de la prise de parole…",
- "viewer.error_title": "Sous-titres indisponibles"
+ "viewer.error_title": "Sous-titres indisponibles",
+ "code.topic.empty": "Donnez un nom au sujet",
+ "code.topic.pinned": "Ce sujet épinglé ne peut pas être supprimé",
+ "code.topic.missing": "Ce sujet n’existe plus",
+ "code.topic.limit": "Ce sujet dépasse la limite de 10 000 caractères",
+ "code.topic.file.format": "Seuls les fichiers texte UTF-8, Markdown, CSV ou TSV sont pris en charge",
+ "code.topic.file.big": "Ce fichier est trop volumineux (512 Kio maximum)",
+ "code.topic.file.read": "Impossible de lire ce fichier",
+ "code.topic.remembered": "Ajouté à la base de connaissances"
 }

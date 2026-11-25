@@ -7,9 +7,11 @@ import type { OutboundRow } from "./OutboundRow";
 import type { RecordingView } from "./RecordingView";
 import type { SearchResult } from "./SearchResult";
 import type { Term } from "./Term";
+import type { Topic } from "./Topic";
+import type { TopicSummary } from "./TopicSummary";
 import type { TranscriptChunk } from "./TranscriptChunk";
 
 /**
  * Typed payload inside [`QueryReply`].
  */
-export type QueryValue = { "view": "LibrarySummary", "data": LibrarySummary } | { "view": "LibraryPage", "data": LibraryPage } | { "view": "Search", "data": SearchResult } | { "view": "Recording", "data": RecordingView | null } | { "view": "Transcript", "data": TranscriptChunk } | { "view": "Compare", "data": CompareChunk } | { "view": "Glossary", "data": Array<Term> } | { "view": "Calendar", "data": Calendar | null } | { "view": "Outbound", "data": Array<OutboundRow> };
+export type QueryValue = { "view": "LibrarySummary", "data": LibrarySummary } | { "view": "LibraryPage", "data": LibraryPage } | { "view": "Search", "data": SearchResult } | { "view": "Recording", "data": RecordingView | null } | { "view": "Transcript", "data": TranscriptChunk } | { "view": "Compare", "data": CompareChunk } | { "view": "Glossary", "data": Array<Term> } | { "view": "Topics", "data": Array<TopicSummary> } | { "view": "Topic", "data": Topic | null } | { "view": "Calendar", "data": Calendar | null } | { "view": "Outbound", "data": Array<OutboundRow> };

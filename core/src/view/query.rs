@@ -6,7 +6,8 @@
 //! cancels and interrupts any superseded in-flight query.
 
 use crate::capture::tape;
-use crate::knowledge::glossary::{self, Term};
+use crate::knowledge::glossary::Term;
+use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic, TopicSummary};
 use crate::out::city::{Calendar, Filing};
 use crate::record::notes::Note;
 use crate::record::shelf::{FILING, Shelf};
@@ -48,18 +49,20 @@ pub enum ViewKind {
     Recording,
     Transcript,
     Glossary,
+    Knowledge,
     Calendar,
     Outbound,
 }
 
 impl ViewKind {
     /// Every view family, used for full invalidation on identity switch or index rebuild.
-    pub const ALL: [ViewKind; 7] = [
+    pub const ALL: [ViewKind; 8] = [
         ViewKind::Library,
         ViewKind::Search,
         ViewKind::Recording,
         ViewKind::Transcript,
         ViewKind::Glossary,
+        ViewKind::Knowledge,
         ViewKind::Calendar,
         ViewKind::Outbound,
     ];
@@ -72,6 +75,7 @@ impl ViewKind {
             ViewKind::Recording => "recording",
             ViewKind::Transcript => "transcript",
             ViewKind::Glossary => "glossary",
+            ViewKind::Knowledge => "knowledge",
             ViewKind::Calendar => "calendar",
             ViewKind::Outbound => "outbound",
         }
@@ -146,10 +150,11 @@ pub enum QuerySlot {
     Recording,
     Transcript,
     Compare,
+    Knowledge,
     Other,
 }
 
-/// All 10 L3 view queries supported by [`ViewEngine`] (`P2.md` §3.6.2).
+/// All L3 view queries supported by [`ViewEngine`] (`P2.md` §3.6.2, `P6.md` §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "view")]
@@ -197,6 +202,10 @@ pub enum Query {
         chunk: u32,
     },
     Glossary,
+    Topics,
+    Topic {
+        id: String,
+    },
     Calendar,
     Outbound,
 }
@@ -213,6 +222,8 @@ impl Query {
             Query::Transcript { .. } => "transcript",
             Query::Compare { .. } => "compare",
             Query::Glossary => "glossary",
+            Query::Topics => "topics",
+            Query::Topic { .. } => "topic",
             Query::Calendar => "calendar",
             Query::Outbound => "outbound",
         }
@@ -228,7 +239,8 @@ impl Query {
             Query::Recording { .. } => QuerySlot::Recording,
             Query::Transcript { .. } => QuerySlot::Transcript,
             Query::Compare { .. } => QuerySlot::Compare,
-            Query::Glossary | Query::Calendar | Query::Outbound => QuerySlot::Other,
+            Query::Topic { .. } => QuerySlot::Knowledge,
+            Query::Glossary | Query::Topics | Query::Calendar | Query::Outbound => QuerySlot::Other,
         }
     }
 }
@@ -245,6 +257,8 @@ pub enum QueryValue {
     Transcript(TranscriptChunk),
     Compare(CompareChunk),
     Glossary(Vec<Term>),
+    Topics(Vec<TopicSummary>),
+    Topic(Option<Topic>),
     Calendar(Option<Calendar>),
     Outbound(Vec<OutboundRow>),
 }
@@ -767,12 +781,31 @@ fn execute_blocking(
             Ok((QueryValue::Compare(reply), rows))
         }
         Query::Glossary => {
-            let terms = match &src.shelf {
-                Some(shelf) => glossary::read(shelf)?,
+            let mut terms = match &src.shelf {
+                Some(shelf) => {
+                    topic::get(shelf, ALWAYS_TOPIC_ID)?.map(|t| t.terms).unwrap_or_default()
+                }
                 None => Vec::new(),
             };
+            terms.sort_by(|a, b| a.said.cmp(&b.said));
             let rows = terms.len();
             Ok((QueryValue::Glossary(terms), rows))
+        }
+        Query::Topics => {
+            let list = match &src.shelf {
+                Some(shelf) => topic::summaries(shelf)?,
+                None => Vec::new(),
+            };
+            let rows = list.len();
+            Ok((QueryValue::Topics(list), rows))
+        }
+        Query::Topic { id } => {
+            let found = match &src.shelf {
+                Some(shelf) => topic::get(shelf, &id)?,
+                None => None,
+            };
+            let rows = usize::from(found.is_some());
+            Ok((QueryValue::Topic(found), rows))
         }
         Query::Calendar => {
             let rows = src.calendar.as_ref().map_or(0, |c| c.events.len());

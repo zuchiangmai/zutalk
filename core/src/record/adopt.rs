@@ -7,14 +7,20 @@
 //! and binds `local -> first person` atomically in `<data>/adopted.json`.
 
 use crate::record::notes::NoteBody;
-use crate::record::shelf::{LINE, NOTE, RECORDING, Recording, SPEAKER, Said, Shelf, TERM, Words};
+use crate::record::shelf::{
+    LINE, NOTE, RECORDING, Recording, SPEAKER, Said, Shelf, TERM, TOPIC, Words,
+};
 use crate::record::takes;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 use ts_rs::TS;
+
+/// Key of the pinned "used in every recording" topic (`P6.md` §3.2); kept here as a literal so
+/// `record/adopt.rs` stays strictly inside the `record` layer without importing `crate::knowledge`.
+const ALWAYS_TOPIC_KEY: &str = "always";
 
 /// Bounded summary of the device-local shelf exposed in `State`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
@@ -32,6 +38,8 @@ pub struct Adopted {
     pub at: i64,
     pub recordings: u32,
     pub terms: u32,
+    #[serde(default)]
+    pub topics: u32,
 }
 
 /// Pure adoption decision produced by [`plan`].
@@ -49,6 +57,7 @@ pub struct AdoptSummary {
     pub plan: AdoptPlan,
     pub recordings: u32,
     pub terms: u32,
+    pub topics: u32,
     pub adopted_ids: Vec<String>,
 }
 
@@ -166,8 +175,117 @@ fn adopt_one_recording(
     Ok(true)
 }
 
-/// Adopts all eligible local recordings (excluding `exclude_ids`) and glossary terms from `local`
-/// into `person`, leaving `local` and `tape/` untouched and recording the binding in `adopted.json`.
+/// Pure `serde_json::Value` merge of missing `terms`, `facts`, and `translation_terms` from a
+/// local `"always"` topic into the person's existing `"always"` topic without importing
+/// `crate::knowledge` (`P6.md` §3.2). Returns `Some(merged)` only when at least one entry is added.
+fn merge_always_topic_value(
+    person: &serde_json::Value,
+    local: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut merged = person.as_object()?.clone();
+    let local_obj = local.as_object()?;
+    let mut changed = false;
+
+    // Merge missing `terms` by lowercased trimmed `said`.
+    if let Some(local_terms) = local_obj.get("terms").and_then(serde_json::Value::as_array) {
+        let mut out_terms =
+            merged.get("terms").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let mut seen: BTreeSet<String> = out_terms
+            .iter()
+            .filter_map(|v| v.get("said").and_then(serde_json::Value::as_str))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        for item in local_terms {
+            let Some(said) = item.get("said").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let key = said.trim().to_lowercase();
+            if !key.is_empty() && seen.insert(key) {
+                out_terms.push(item.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            merged.insert("terms".into(), serde_json::Value::Array(out_terms));
+        }
+    }
+
+    // Merge missing `facts` by lowercased trimmed `(key, value)`.
+    if let Some(local_facts) = local_obj.get("facts").and_then(serde_json::Value::as_array) {
+        let mut out_facts =
+            merged.get("facts").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let mut seen: BTreeSet<(String, String)> = out_facts
+            .iter()
+            .filter_map(|v| {
+                let k = v.get("key").and_then(serde_json::Value::as_str)?.trim().to_lowercase();
+                let val = v.get("value").and_then(serde_json::Value::as_str)?.trim().to_lowercase();
+                (!k.is_empty() && !val.is_empty()).then_some((k, val))
+            })
+            .collect();
+        let mut facts_changed = false;
+        for item in local_facts {
+            let (Some(k), Some(val)) = (
+                item.get("key").and_then(serde_json::Value::as_str),
+                item.get("value").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            let pair = (k.trim().to_lowercase(), val.trim().to_lowercase());
+            if !pair.0.is_empty() && !pair.1.is_empty() && seen.insert(pair) {
+                out_facts.push(item.clone());
+                facts_changed = true;
+            }
+        }
+        if facts_changed {
+            merged.insert("facts".into(), serde_json::Value::Array(out_facts));
+            changed = true;
+        }
+    }
+
+    // Merge missing `translation_terms` by lowercased trimmed `(source, target)`.
+    if let Some(local_pairs) =
+        local_obj.get("translation_terms").and_then(serde_json::Value::as_array)
+    {
+        let mut out_pairs = merged
+            .get("translation_terms")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut seen: BTreeSet<(String, String)> = out_pairs
+            .iter()
+            .filter_map(|v| {
+                let s = v.get("source").and_then(serde_json::Value::as_str)?.trim().to_lowercase();
+                let t = v.get("target").and_then(serde_json::Value::as_str)?.trim().to_lowercase();
+                (!s.is_empty() && !t.is_empty()).then_some((s, t))
+            })
+            .collect();
+        let mut pairs_changed = false;
+        for item in local_pairs {
+            let (Some(s), Some(t)) = (
+                item.get("source").and_then(serde_json::Value::as_str),
+                item.get("target").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            let pair = (s.trim().to_lowercase(), t.trim().to_lowercase());
+            if !pair.0.is_empty() && !pair.1.is_empty() && seen.insert(pair) {
+                out_pairs.push(item.clone());
+                pairs_changed = true;
+            }
+        }
+        if pairs_changed {
+            merged.insert("translation_terms".into(), serde_json::Value::Array(out_pairs));
+            changed = true;
+        }
+    }
+
+    changed.then_some(serde_json::Value::Object(merged))
+}
+
+/// Adopts all eligible local recordings (excluding `exclude_ids`), glossary terms, and knowledge
+/// topics from `local` into `person`, leaving `local` and `tape/` untouched and recording the
+/// binding in `adopted.json`.
 pub fn run(
     data: &Path,
     local: &Shelf,
@@ -182,7 +300,8 @@ pub fn run(
         .filter(|r| !exclude_ids.iter().any(|ex| ex == &r.id))
         .collect();
     let local_terms = local.kept::<serde_json::Value>(TERM).map_err(|_| "adopt.failed")?;
-    let has_local_data = !recs.is_empty() || !local_terms.is_empty();
+    let local_topics = local.kept::<serde_json::Value>(TOPIC).map_err(|_| "adopt.failed")?;
+    let has_local_data = !recs.is_empty() || !local_terms.is_empty() || !local_topics.is_empty();
 
     let marker = read_marker(data)?;
     let decision = plan(marker.as_ref(), local.by(), person.by(), has_local_data);
@@ -214,6 +333,29 @@ pub fn run(
         person.put("", TERM, &missing_terms, now).map_err(|_| "adopt.failed")?;
     }
 
+    // Adopt `talk/topic` records without importing `crate::knowledge`, merging `"always"` losslessly.
+    let existing_topics: BTreeMap<String, serde_json::Value> =
+        person.kept::<serde_json::Value>(TOPIC).map_err(|_| "adopt.failed")?.into_iter().collect();
+    let mut adopted_topics: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+    for (k, val) in local_topics {
+        if k == ALWAYS_TOPIC_KEY {
+            match existing_topics.get(ALWAYS_TOPIC_KEY) {
+                None => adopted_topics.push((k, Some(val))),
+                Some(person_always) => {
+                    if let Some(merged) = merge_always_topic_value(person_always, &val) {
+                        adopted_topics.push((k, Some(merged)));
+                    }
+                }
+            }
+        } else if !existing_topics.contains_key(&k) {
+            adopted_topics.push((k, Some(val)));
+        }
+    }
+    let topics_count = u32::try_from(adopted_topics.len()).unwrap_or(u32::MAX);
+    if !adopted_topics.is_empty() {
+        person.put("", TOPIC, &adopted_topics, now).map_err(|_| "adopt.failed")?;
+    }
+
     let recs_count = u32::try_from(adopted_ids.len()).unwrap_or(u32::MAX);
     let next_marker = match marker {
         Some(prev) if prev.local == local.by() && prev.to == person.by() => Adopted {
@@ -222,6 +364,7 @@ pub fn run(
             at: prev.at,
             recordings: prev.recordings.saturating_add(recs_count),
             terms: prev.terms.saturating_add(terms_count),
+            topics: prev.topics.saturating_add(topics_count),
         },
         _ => Adopted {
             local: local.by().to_owned(),
@@ -229,9 +372,10 @@ pub fn run(
             at: now,
             recordings: recs_count,
             terms: terms_count,
+            topics: topics_count,
         },
     };
-    if recs_count > 0 || terms_count > 0 || read_marker(data)?.is_none() {
+    if recs_count > 0 || terms_count > 0 || topics_count > 0 || read_marker(data)?.is_none() {
         write_marker(data, &next_marker)?;
     }
 
@@ -239,6 +383,7 @@ pub fn run(
         plan: AdoptPlan::Adopt,
         recordings: recs_count,
         terms: terms_count,
+        topics: topics_count,
         adopted_ids,
     })
 }
@@ -270,6 +415,7 @@ pub fn run_one(
             at: prev.at,
             recordings: prev.recordings.saturating_add(1),
             terms: prev.terms,
+            topics: prev.topics,
         },
         _ => Adopted {
             local: local.by().to_owned(),
@@ -277,6 +423,7 @@ pub fn run_one(
             at: now,
             recordings: 1,
             terms: 0,
+            topics: 0,
         },
     };
     write_marker(data, &next_marker)?;
@@ -284,6 +431,7 @@ pub fn run_one(
         plan: AdoptPlan::Adopt,
         recordings: 1,
         terms: 0,
+        topics: 0,
         adopted_ids: vec![id.to_owned()],
     })
 }

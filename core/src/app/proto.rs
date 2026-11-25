@@ -6,6 +6,7 @@ pub use crate::capture::audio::Device;
 pub use crate::id::identity::AuthFlow;
 pub use crate::id::keys::From;
 pub use crate::id::quota::{Quota, ServiceQuota};
+pub use crate::knowledge::topic::{Topic, TopicFact, TopicSummary, TranslationPair};
 pub use crate::live::frame::{Caption, Column, Frame, Status};
 pub use crate::out::host::{HostEvent, HostState};
 pub use crate::record::adopt::LocalShelf;
@@ -496,6 +497,10 @@ pub enum Command {
     CaptionGeometry { scene: CaptionScene, rect: WindowRect },
     DestroyAudio { id: String },
     Term { said: String, written: Option<BTreeMap<String, String>> },
+    SaveTopic { topic: Topic },
+    RemoveTopic { id: String },
+    ImportTopicFile { id: String, path: String },
+    RememberTerm { topic_id: String, said: String, written: BTreeMap<String, String> },
     City { address: String },
     File { id: String, event: String, audio: bool },
     Diagnose,
@@ -562,6 +567,21 @@ impl std::fmt::Debug for Command {
             Command::Term { said, written } => {
                 f.debug_struct("Term").field("said", said).field("written", written).finish()
             }
+            Command::SaveTopic { topic } => f
+                .debug_struct("SaveTopic")
+                .field("id", &topic.id)
+                .field("pinned", &topic.pinned)
+                .field("terms", &topic.terms.len())
+                .finish(),
+            Command::RemoveTopic { id } => f.debug_struct("RemoveTopic").field("id", id).finish(),
+            Command::ImportTopicFile { id, path: _ } => {
+                f.debug_struct("ImportTopicFile").field("id", id).field("path", &"…").finish()
+            }
+            Command::RememberTerm { topic_id, said: _, written } => f
+                .debug_struct("RememberTerm")
+                .field("topic_id", topic_id)
+                .field("written_len", &written.len())
+                .finish(),
             Command::City { address } => f.debug_struct("City").field("address", address).finish(),
             Command::File { id, event, audio } => f
                 .debug_struct("File")
@@ -611,6 +631,10 @@ impl Command {
             Command::CaptionGeometry { .. } => "CaptionGeometry",
             Command::DestroyAudio { .. } => "DestroyAudio",
             Command::Term { .. } => "Term",
+            Command::SaveTopic { .. } => "SaveTopic",
+            Command::RemoveTopic { .. } => "RemoveTopic",
+            Command::ImportTopicFile { .. } => "ImportTopicFile",
+            Command::RememberTerm { .. } => "RememberTerm",
             Command::City { .. } => "City",
             Command::File { .. } => "File",
             Command::Diagnose => "Diagnose",
@@ -654,6 +678,10 @@ impl Command {
             | Command::CaptionGeometry { .. }
             | Command::DestroyAudio { .. }
             | Command::Term { .. }
+            | Command::SaveTopic { .. }
+            | Command::RemoveTopic { .. }
+            | Command::ImportTopicFile { .. }
+            | Command::RememberTerm { .. }
             | Command::City { .. }
             | Command::Diagnose => false,
         }

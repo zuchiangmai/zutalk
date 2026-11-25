@@ -460,5 +460,13 @@
  "captions.saved_local": "この端末に保存",
  "viewer.waiting": "開始待ち",
  "viewer.waiting_detail": "進行役が話し始めるのを待っています…",
- "viewer.error_title": "字幕を表示できません"
+ "viewer.error_title": "字幕を表示できません",
+ "code.topic.empty": "トピック名を入力してください",
+ "code.topic.pinned": "固定トピックは削除できません",
+ "code.topic.missing": "このトピックは見つかりません",
+ "code.topic.limit": "トピックの内容が 10,000 文字の上限を超えています",
+ "code.topic.file.format": "UTF-8 のテキスト、Markdown、CSV、TSV ファイルのみ読み込めます",
+ "code.topic.file.big": "ファイルが大きすぎます（上限 512 KiB）",
+ "code.topic.file.read": "このファイルを読み込めませんでした",
+ "code.topic.remembered": "知識ベースに追加しました"
 }

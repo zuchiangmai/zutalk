@@ -19,7 +19,8 @@ use zutalk_core::app::proto::{Command, LocalShelf, Query, QueryValue};
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::capture::tape::{Pass, kept as tape_kept};
 use zutalk_core::id::keys;
-use zutalk_core::knowledge::glossary;
+use zutalk_core::knowledge::glossary::{self, Term};
+use zutalk_core::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic, TopicFact, TranslationPair};
 use zutalk_core::live::lines::Line;
 use zutalk_core::record::adopt::{self, AdoptPlan, Adopted};
 use zutalk_core::record::notes;
@@ -56,8 +57,14 @@ fn adopt_plan_table() {
 
     // Marker bound to person A: same person adopts (idempotent catch-up) when local data exists;
     // second distinct person is always refused with OtherPerson.
-    let marker_a =
-        Adopted { local: local.into(), to: person_a.into(), at: 1000, recordings: 2, terms: 1 };
+    let marker_a = Adopted {
+        local: local.into(),
+        to: person_a.into(),
+        at: 1000,
+        recordings: 2,
+        terms: 1,
+        topics: 0,
+    };
     assert_eq!(adopt::plan(Some(&marker_a), local, person_a, true), AdoptPlan::Adopt);
     assert_eq!(adopt::plan(Some(&marker_a), local, person_a, false), AdoptPlan::Nothing);
     assert_eq!(adopt::plan(Some(&marker_a), local, person_b, true), AdoptPlan::OtherPerson);
@@ -72,14 +79,21 @@ fn can_discard_table() {
     let local = "did:key:z6Mklocalsample";
     let person_a = "did:zu:aaaaaaaaaaaaaaaaaaaaaaaa";
     let person_b = "did:zu:bbbbbbbbbbbbbbbbbbbbbbbb";
-    let marker_a =
-        Adopted { local: local.into(), to: person_a.into(), at: 1000, recordings: 1, terms: 0 };
+    let marker_a = Adopted {
+        local: local.into(),
+        to: person_a.into(),
+        at: 1000,
+        recordings: 1,
+        terms: 0,
+        topics: 0,
+    };
     let marker_other_local = Adopted {
         local: "did:key:z6Mkother".into(),
         to: person_a.into(),
         at: 1000,
         recordings: 1,
         terms: 0,
+        topics: 0,
     };
 
     // Idempotent cleanup when no local recordings or terms remain on disk.
@@ -623,4 +637,121 @@ async fn second_person_cannot_discard_first_persons_local_backup() {
     assert!(local_index.is_file(), "local sqlite index must remain intact");
     assert_eq!(local_shelf(dir.path()).list().unwrap().len(), 1);
     assert_eq!(app_b.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_resigns_local_topics_and_merges_always_without_losing_person_terms() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = 1_765_000_000_000i64;
+
+    let local = local_shelf(dir.path());
+    // Local device shelf has an `always` topic and a custom topic.
+    topic::save(
+        &local,
+        Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            facts: vec![TopicFact { key: "City".into(), value: "Chiangmai".into() }],
+            terms: vec![
+                Term {
+                    said: "LocalOnlyTerm".into(),
+                    written: BTreeMap::from([("zh".into(), "本地词".into())]),
+                },
+                Term {
+                    said: "SharedTerm".into(),
+                    written: BTreeMap::from([("zh".into(), "本地版本".into())]),
+                },
+            ],
+            translation_terms: vec![TranslationPair {
+                source: "Agora".into(),
+                target: "广场".into(),
+            }],
+            ..Topic::default()
+        },
+        now,
+    )
+    .expect("save local always");
+
+    let local_custom = topic::save(
+        &local,
+        Topic {
+            name: "Book Club".into(),
+            domain: "Philosophy".into(),
+            background: "Third night notes".into(),
+            terms: vec![Term { said: "Polis".into(), written: BTreeMap::new() }],
+            ..Topic::default()
+        },
+        now + 1,
+    )
+    .expect("save local custom");
+
+    // Person A already has their own `always` topic with their own term + SharedTerm.
+    let key_a = Arc::new(SecretKey::from_seed(&[21u8; 32]));
+    let did_a = "did:zu:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let person_a =
+        Shelf::new(dir.path().join("records").join(did_a.replace(':', "-")), did_a, key_a.clone());
+    topic::save(
+        &person_a,
+        Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            terms: vec![
+                Term {
+                    said: "PersonOnlyTerm".into(),
+                    written: BTreeMap::from([("zh".into(), "本人词".into())]),
+                },
+                Term {
+                    said: "SharedTerm".into(),
+                    written: BTreeMap::from([("zh".into(), "本人版本".into())]),
+                },
+            ],
+            ..Topic::default()
+        },
+        now + 2,
+    )
+    .expect("save person always");
+
+    // Run adoption: custom topic is re-signed onto Person A, and `always` is losslessly merged.
+    let sum = adopt::run(dir.path(), &local, &person_a, &[], now + 10).expect("adopt topics");
+    assert_eq!(sum.plan, AdoptPlan::Adopt);
+    assert_eq!(sum.topics, 2);
+
+    // Verify re-signed `topics.jsonl` records are signed by Person A.
+    let pub_a = key_a.public();
+    let held = Pack::read(person_a.pack_path("", zutalk_core::record::shelf::TOPIC))
+        .expect("read person topics pack");
+    assert!(!held.records.is_empty());
+    for record in &held.records {
+        assert_eq!(record.path.by, did_a);
+        assert_eq!(record.verify(|by, key, _| by == did_a && *key == pub_a, |_| None), Ok(()));
+    }
+
+    let always_a = topic::get(&person_a, ALWAYS_TOPIC_ID).unwrap().expect("person always");
+    assert!(always_a.terms.iter().any(|t| t.said == "PersonOnlyTerm"));
+    assert!(always_a.terms.iter().any(|t| t.said == "LocalOnlyTerm"));
+    // Person's existing SharedTerm is preserved (not overwritten by local).
+    let shared = always_a.terms.iter().find(|t| t.said == "SharedTerm").expect("SharedTerm");
+    assert_eq!(shared.written.get("zh").map(String::as_str), Some("本人版本"));
+    assert!(always_a.facts.iter().any(|f| f.key == "City" && f.value == "Chiangmai"));
+    assert!(always_a.translation_terms.iter().any(|p| p.source == "Agora" && p.target == "广场"));
+
+    let custom_a = topic::get(&person_a, &local_custom.id).unwrap().expect("adopted custom topic");
+    assert_eq!(custom_a.name, "Book Club");
+    assert_eq!(custom_a.background, "Third night notes");
+
+    // Second run for Person A is idempotent (0 new topics).
+    let again = adopt::run(dir.path(), &local, &person_a, &[], now + 20).expect("idempotent");
+    assert_eq!(again.topics, 0);
+
+    // Second distinct Person B is refused with OtherPerson and receives no topics.
+    let key_b = Arc::new(SecretKey::from_seed(&[22u8; 32]));
+    let did_b = "did:zu:bbbbbbbbbbbbbbbbbbbbbbbb";
+    let person_b =
+        Shelf::new(dir.path().join("records").join(did_b.replace(':', "-")), did_b, key_b);
+    let sum_b = adopt::run(dir.path(), &local, &person_b, &[], now + 30).expect("refuse B");
+    assert_eq!(sum_b.plan, AdoptPlan::OtherPerson);
+    assert_eq!(sum_b.topics, 0);
+    assert!(topic::get(&person_b, &local_custom.id).unwrap().is_none());
 }

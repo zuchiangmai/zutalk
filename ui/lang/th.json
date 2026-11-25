@@ -460,5 +460,13 @@
  "captions.saved_local": "บันทึกไว้ในเครื่องนี้",
  "viewer.waiting": "รอเริ่มเซสชัน",
  "viewer.waiting_detail": "กำลังรอให้ผู้ดำเนินรายการเริ่มพูด…",
- "viewer.error_title": "ไม่สามารถดูคำบรรยายได้"
+ "viewer.error_title": "ไม่สามารถดูคำบรรยายได้",
+ "code.topic.empty": "กรุณาตั้งชื่อหัวข้อ",
+ "code.topic.pinned": "ไม่สามารถลบหัวข้อที่ปักหมุดไว้ได้",
+ "code.topic.missing": "ไม่พบหัวข้อนี้แล้ว",
+ "code.topic.limit": "เนื้อหาหัวข้อเกินขีดจำกัด 10,000 อักขระ",
+ "code.topic.file.format": "รองรับเฉพาะไฟล์ข้อความ UTF-8, Markdown, CSV หรือ TSV เท่านั้น",
+ "code.topic.file.big": "ไฟล์มีขนาดใหญ่เกินไป (สูงสุด 512 KiB)",
+ "code.topic.file.read": "ไม่สามารถอ่านไฟล์นี้ได้",
+ "code.topic.remembered": "เพิ่มเข้าสู่คลังความรู้แล้ว"
 }

@@ -460,5 +460,13 @@
  "captions.saved_local": "이 기기에 저장됨",
  "viewer.waiting": "시작 대기 중",
  "viewer.waiting_detail": "진행자가 말하기 시작할 때까지 기다리는 중…",
- "viewer.error_title": "자막을 볼 수 없습니다"
+ "viewer.error_title": "자막을 볼 수 없습니다",
+ "code.topic.empty": "주제 이름을 입력해 주세요",
+ "code.topic.pinned": "고정된 주제는 삭제할 수 없습니다",
+ "code.topic.missing": "이 주제는 더 이상 없습니다",
+ "code.topic.limit": "주제 내용이 10,000자 한도를 초과했습니다",
+ "code.topic.file.format": "UTF-8 텍스트, Markdown, CSV, TSV 파일만 읽을 수 있습니다",
+ "code.topic.file.big": "파일이 너무 큽니다 (최대 512 KiB)",
+ "code.topic.file.read": "이 파일을 읽을 수 없습니다",
+ "code.topic.remembered": "지식 베이스에 추가했습니다"
 }

@@ -2,6 +2,6 @@
 import type { LibraryFilter } from "./LibraryFilter";
 
 /**
- * All 10 L3 view queries supported by [`ViewEngine`] (`P2.md` §3.6.2).
+ * All L3 view queries supported by [`ViewEngine`] (`P2.md` §3.6.2, `P6.md` §3.4).
  */
-export type Query = { "view": "LibrarySummary", tz_offset_min: number, } | { "view": "LibraryMonth", month: string, tz_offset_min: number, filter: LibraryFilter, limit: number, offset: number, } | { "view": "LibraryRecent", filter: LibraryFilter, limit: number, offset: number, } | { "view": "Search", query: string, limit: number, } | { "view": "Recording", id: string, } | { "view": "Transcript", id: string, take: number | null, chunk: number, } | { "view": "Compare", id: string, take_a: number, take_b: number, chunk: number, } | { "view": "Glossary" } | { "view": "Calendar" } | { "view": "Outbound" };
+export type Query = { "view": "LibrarySummary", tz_offset_min: number, } | { "view": "LibraryMonth", month: string, tz_offset_min: number, filter: LibraryFilter, limit: number, offset: number, } | { "view": "LibraryRecent", filter: LibraryFilter, limit: number, offset: number, } | { "view": "Search", query: string, limit: number, } | { "view": "Recording", id: string, } | { "view": "Transcript", id: string, take: number | null, chunk: number, } | { "view": "Compare", id: string, take_a: number, take_b: number, chunk: number, } | { "view": "Glossary" } | { "view": "Topics" } | { "view": "Topic", id: string, } | { "view": "Calendar" } | { "view": "Outbound" };

@@ -2,3 +2,4 @@
 //! transcript. Read when a recording opens, never per block on the live path.
 
 pub mod glossary;
+pub mod topic;

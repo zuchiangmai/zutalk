@@ -114,6 +114,8 @@ pub(crate) enum Msg {
     Copied,
     Diagnosed,
     RotationSaved,
+    TopicRemembered,
+    TopicRemoved(String),
     InstallFailed(&'static str),
     Refreshed(Result<Refreshed, &'static str>),
     DeskFailed(&'static str),
@@ -150,6 +152,8 @@ impl Msg {
             Msg::Copied => "Copied",
             Msg::Diagnosed => "Diagnosed",
             Msg::RotationSaved => "RotationSaved",
+            Msg::TopicRemembered => "TopicRemembered",
+            Msg::TopicRemoved(_) => "TopicRemoved",
             Msg::InstallFailed(_) => "InstallFailed",
             Msg::Refreshed(_) => "Refreshed",
             Msg::DeskFailed(_) => "DeskFailed",
@@ -517,6 +521,8 @@ impl Hub {
             Msg::Copied => self.said.say("copied"),
             Msg::Diagnosed => self.said.say("diagnose.done"),
             Msg::RotationSaved => self.state.rotation_unsaved = false,
+            Msg::TopicRemembered => self.said.say("topic.remembered"),
+            Msg::TopicRemoved(_id) => {} // P6-02 removes `_id` from `self.state.setup.topics`
             Msg::InstallFailed(c) => {
                 self.set_boot(BootEvent::InstallFailed, "update.install");
                 return Err(c);
@@ -831,6 +837,12 @@ impl Hub {
                 self.work.destroy_audio(id, under_way)?;
             }
             Command::Term { said, written } => self.work.term(said, written)?,
+            Command::SaveTopic { topic } => self.work.save_topic(topic)?,
+            Command::RemoveTopic { id } => self.work.remove_topic(id)?,
+            Command::ImportTopicFile { id, path } => self.work.import_topic_file(id, path)?,
+            Command::RememberTerm { topic_id, said, written } => {
+                self.work.remember_term(topic_id, said, written)?
+            }
             // Installing relaunches the app, so never while recording.
             Command::Update if self.recording.is_some() => return Err("update.recording"),
             Command::Update if self.boot == Boot::Installing => return Err("update.installing"),

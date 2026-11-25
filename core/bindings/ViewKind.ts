@@ -3,4 +3,4 @@
 /**
  * Which view family a change invalidated (`P2.md` §3.6.2).
  */
-export type ViewKind = "Library" | "Search" | "Recording" | "Transcript" | "Glossary" | "Calendar" | "Outbound";
+export type ViewKind = "Library" | "Search" | "Recording" | "Transcript" | "Glossary" | "Knowledge" | "Calendar" | "Outbound";

@@ -460,5 +460,13 @@
  "captions.saved_local": "Saved on this device",
  "viewer.waiting": "Waiting to start",
  "viewer.waiting_detail": "Waiting for the host to start speaking…",
- "viewer.error_title": "Captions unavailable"
+ "viewer.error_title": "Captions unavailable",
+ "code.topic.empty": "Give the topic a name",
+ "code.topic.pinned": "This pinned topic cannot be deleted",
+ "code.topic.missing": "This topic is no longer there",
+ "code.topic.limit": "This topic exceeds the 10,000-character limit",
+ "code.topic.file.format": "Only UTF-8 text, Markdown, CSV, or TSV files can be read",
+ "code.topic.file.big": "This file is too large to read (512 KiB max)",
+ "code.topic.file.read": "This file could not be read",
+ "code.topic.remembered": "Added to knowledge base"
 }

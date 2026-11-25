@@ -460,5 +460,13 @@
  "captions.saved_local": "Guardado en este dispositivo",
  "viewer.waiting": "Esperando el inicio",
  "viewer.waiting_detail": "Esperando a que comience la sesión…",
- "viewer.error_title": "Subtítulos no disponibles"
+ "viewer.error_title": "Subtítulos no disponibles",
+ "code.topic.empty": "Ponle un nombre al tema",
+ "code.topic.pinned": "Este tema fijado no se puede eliminar",
+ "code.topic.missing": "Este tema ya no existe",
+ "code.topic.limit": "Este tema supera el límite de 10.000 caracteres",
+ "code.topic.file.format": "Solo se admiten archivos UTF-8 de texto, Markdown, CSV o TSV",
+ "code.topic.file.big": "El archivo es demasiado grande (máximo 512 KiB)",
+ "code.topic.file.read": "No se pudo leer este archivo",
+ "code.topic.remembered": "Guardado en la base de conocimiento"
 }

@@ -22,6 +22,7 @@ pub const LINE: &str = "talk/line"; // key: <id>.<take>.<number>
 pub const SPEAKER: &str = "talk/speaker"; // key: <id>.<label>
 pub const NOTE: &str = "talk/note"; // key: <id>
 pub const TERM: &str = "talk/term"; // key: drawn from how the term is said; kept apart too
+pub const TOPIC: &str = "talk/topic"; // key: <topic_id> ("always" for pinned topic); kept apart in topics.jsonl
 pub const FILING: &str = "talk/filing"; // key: <id>; where it went to a city, kept apart too
 
 /// What a recording is, apart from what was said in it.
@@ -293,6 +294,7 @@ impl Shelf {
         match ty {
             LINE => self.root.join(id).join("lines.jsonl"),
             TERM => self.root.join("terms.jsonl"),
+            TOPIC => self.root.join("topics.jsonl"),
             FILING => self.root.join("filings.jsonl"),
             _ => self.root.join(id).join("about.jsonl"),
         }

@@ -460,5 +460,13 @@
  "captions.saved_local": "Auf diesem Gerät gespeichert",
  "viewer.waiting": "Wartet auf Beginn",
  "viewer.waiting_detail": "Wartet darauf, dass die Moderation beginnt…",
- "viewer.error_title": "Untertitel nicht verfügbar"
+ "viewer.error_title": "Untertitel nicht verfügbar",
+ "code.topic.empty": "Gib dem Thema einen Namen",
+ "code.topic.pinned": "Dieses angeheftete Thema kann nicht gelöscht werden",
+ "code.topic.missing": "Dieses Thema gibt es nicht mehr",
+ "code.topic.limit": "Dieses Thema überschreitet das Limit von 10.000 Zeichen",
+ "code.topic.file.format": "Nur UTF-8-Text-, Markdown-, CSV- oder TSV-Dateien werden unterstützt",
+ "code.topic.file.big": "Diese Datei ist zu groß (max. 512 KiB)",
+ "code.topic.file.read": "Diese Datei konnte nicht gelesen werden",
+ "code.topic.remembered": "Zur Wissensbasis hinzugefügt"
 }

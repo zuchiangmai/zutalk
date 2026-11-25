@@ -23,6 +23,8 @@ import type { State } from '$proto/State';
 import type { TakeInfo } from '$proto/TakeInfo';
 import type { Tally } from '$proto/Tally';
 import type { Term } from '$proto/Term';
+import type { Topic } from '$proto/Topic';
+import type { TopicSummary } from '$proto/TopicSummary';
 import type { ViewKind } from '$proto/ViewKind';
 import type { Water } from '$proto/Water';
 import type { Bus } from '../src/bus/channel';
@@ -344,6 +346,34 @@ export function mockBus(recording = false): Bus {
 
   const gone = new Map<string, MockRec>();
   let terms: Term[] = [{ said: 'Zuzalu', written: { th: 'ซูซาลู' } }];
+  let topics: Topic[] = [
+    {
+      id: 'always',
+      name: '',
+      domain: '',
+      facts: [],
+      background: '',
+      terms: structuredClone(terms),
+      translation_terms: [],
+      source_file: null,
+      suggested_terms: [],
+      pinned: true,
+      updated_at: now - DAY_MS,
+    },
+  ];
+  const topicSizeChars = (t: Topic): number =>
+    t.name.length +
+    t.domain.length +
+    t.facts.reduce((n, f) => n + f.key.length + f.value.length, 0) +
+    t.background.length +
+    t.terms.reduce(
+      (n, term) =>
+        n +
+        term.said.length +
+        Object.values(term.written).reduce((m, v) => m + (v?.length ?? 0), 0),
+      0,
+    ) +
+    t.translation_terms.reduce((n, p) => n + p.source.length + p.target.length, 0);
   let city: Calendar | null = null;
   let noteSeq = 10;
   const progress: Progress = {
@@ -676,7 +706,58 @@ export function mockBus(recording = false): Bus {
     Term: (c) => {
       terms = terms.filter((x) => x.said.toLowerCase() !== c.said.toLowerCase());
       if (c.written) terms = [...terms, { said: c.said, written: c.written }].sort((a, b) => (a.said < b.said ? -1 : 1));
+      const always = topics.find((t) => t.id === 'always');
+      if (always) always.terms = structuredClone(terms);
       emitInvalidate('Glossary');
+      emitInvalidate('Knowledge');
+    },
+    SaveTopic: (c) => {
+      const id = c.topic.id.trim() || `t${Date.now().toString(16)}`;
+      const pinned = id === 'always';
+      const saved: Topic = { ...structuredClone(c.topic), id, pinned, updated_at: Date.now() };
+      topics = [saved, ...topics.filter((t) => t.id !== id)];
+      if (pinned) terms = structuredClone(saved.terms);
+      emitInvalidate('Knowledge');
+      if (pinned) emitInvalidate('Glossary');
+    },
+    RemoveTopic: (c) => {
+      if (c.id === 'always') {
+        on({ kind: 'Notice', is: 'topic.pinned' });
+        return;
+      }
+      topics = topics.filter((t) => t.id !== c.id);
+      emitInvalidate('Knowledge');
+    },
+    ImportTopicFile: (c) => {
+      const target = topics.find((t) => t.id === (c.id || 'always'));
+      if (!target) {
+        on({ kind: 'Notice', is: 'topic.missing' });
+        return;
+      }
+      const name = c.path.split(/[\\/]/).pop() || c.path;
+      target.source_file = name;
+      target.updated_at = Date.now();
+      emitInvalidate('Knowledge');
+    },
+    RememberTerm: (c) => {
+      const target = topics.find((t) => t.id === (c.topic_id || 'always'));
+      if (!target) {
+        on({ kind: 'Notice', is: 'topic.missing' });
+        return;
+      }
+      const existing = target.terms.find((t) => t.said.toLowerCase() === c.said.trim().toLowerCase());
+      if (existing) {
+        existing.written = { ...existing.written, ...c.written };
+      } else {
+        target.terms.push({ said: c.said.trim(), written: { ...c.written } });
+      }
+      target.suggested_terms = target.suggested_terms.filter(
+        (cand) => cand.toLowerCase() !== c.said.trim().toLowerCase(),
+      );
+      if (target.pinned) terms = structuredClone(target.terms);
+      emitInvalidate('Knowledge');
+      if (target.pinned) emitInvalidate('Glossary');
+      on({ kind: 'Notice', is: 'topic.remembered' });
     },
     City: (c) => {
       const ev = (key: string, title: string, ago: number) => ({
@@ -903,6 +984,25 @@ export function mockBus(recording = false): Bus {
       }
 
       if (q.view === 'Glossary') return { version, value: { view: 'Glossary', data: structuredClone(terms) } };
+      if (q.view === 'Topics') {
+        const ordered = [...topics].sort((a, b) =>
+          a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : b.updated_at - a.updated_at,
+        );
+        const list: TopicSummary[] = ordered.map((t) => ({
+          id: t.id,
+          name: t.name,
+          domain: t.domain,
+          pinned: t.pinned,
+          terms_count: t.terms.length,
+          size_chars: topicSizeChars(t),
+          updated_at: t.updated_at,
+        }));
+        return { version, value: { view: 'Topics', data: list } };
+      }
+      if (q.view === 'Topic') {
+        const found = topics.find((t) => t.id === q.id) ?? null;
+        return { version, value: { view: 'Topic', data: structuredClone(found) } };
+      }
       if (q.view === 'Calendar') return { version, value: { view: 'Calendar', data: structuredClone(city) } };
 
       const outbound: OutboundRow[] = recs
