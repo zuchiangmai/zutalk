@@ -1,0 +1,6 @@
+阶段：P5（主持/对外直播房间、字幕窗场合与舞台全屏、手机端查看器与按住交档案馆）
+状态：通过
+基线：de7aa6497954bf15d671749624507a22abb91815
+收尾提交：72c0f3612d1887f7ee628834b5e6ed31bee0dd6f
+审查记录：docs/build/reviews/P5-r1.md、docs/build/reviews/P5-r2.md（结论：通过）
+全量门禁：RUSTC_WRAPPER="" scripts/build/check.sh — check: all green（10/10 规则全绿且 bounded/spawn/layers 全仓零欠账，Rust 755 passed / 0 failed / 6 ignored，UI 14 files / 109 passed，零新增外部依赖）
