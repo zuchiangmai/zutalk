@@ -1,0 +1,16 @@
+[package]
+name = "zutalk-log"
+description = "The one way to say what happened: events of codes and numbers, a file that turns, a capture for tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1.0.154"
+# The only crate that names it: everyone else says what happened through this one's macros.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }

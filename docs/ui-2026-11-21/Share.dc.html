@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>分享一场录音</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row {{r.cls}}" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">Z</span>
+<span class="me">did:zu:7kq2…f9a</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>已分享</span>
+<span class="spacer"></span>
+<span class="seg" role="tablist"><button class="seg-i on" role="tab" aria-selected="true">文字稿</button><button class="seg-i" role="tab" aria-selected="false">笔记</button></span>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<article class="doc" style="position: relative">
+<h1 class="title" style="margin: 0">读书会：《看不见的城市》第三夜</h1>
+<div class="meta"><span>今天 19:32</span><span class="num">42:18</span><span>中文 · English · ไทย</span><span class="tag">音频</span></div>
+
+<div class="acts">
+<button class="btn"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>复制</button>
+<button class="pill on" aria-pressed="true">中文</button>
+<button class="pill on" aria-pressed="true">English</button>
+<button class="pill" aria-pressed="false">ไทย</button>
+<span class="spacer"></span>
+<button class="pill">导出<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+<button class="pill on" aria-expanded="true">分享</button>
+</div>
+
+<div class="pop" style="top: 122px; right: 40px; width: 304px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; gap: 14px; align-items: center">
+<div class="qr"><svg viewBox="0 0 25 25" width="112" height="112" role="img" aria-label="链接的二维码" shape-rendering="crispEdges"><path d="{{qr}}" fill="#0A0A0A"></path></svg></div>
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<span class="tag"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 9v6M16 5v14M20 10v4"></path></svg>不含音频</span>
+<span class="tag">30 天后失效</span>
+<span class="tag">只有文字</span>
+</div>
+</div>
+<div style="display: flex; gap: 8px">
+<span class="field mono" style="flex: 1; display: flex; align-items: center; overflow: hidden; white-space: nowrap">zutalk.example/r/9f3c…#k7Qm…</span>
+<button class="btn" style="height: 34px">复制链接</button>
+</div>
+<button class="pill danger" style="align-self: flex-start"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.2A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a15 15 0 0 1-2.4 3M6.5 7.5A15 15 0 0 0 3 12s4 6 9 6a9.6 9.6 0 0 0 3-.5"></path></svg>停止分享</button>
+</div>
+
+<ol class="tl">
+<sc-for list="{{lines}}" as="l" hint-placeholder-count="4">
+<li>
+<div class="who"><b>{{l.who}}</b><span class="num">{{l.t}}</span></div>
+<div><p class="said">{{l.a}}</p><p class="tr">{{l.b}}</p></div>
+</li>
+</sc-for>
+</ol>
+</article>
+
+<div class="toast" role="status">链接已复制<button class="icon-btn" style="color: inherit" aria-label="关闭"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button></div>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // A stand-in pattern, not a code that scans: the app draws the real one from the link.
+    const qr = (seed) => {
+      const n = 25; let s = seed, d = '';
+      const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+      const corner = (x, y) => (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+        let on;
+        if (corner(x, y)) {
+          const fx = x < 8 ? x : x - (n - 7), fy = y < 8 ? y : y - (n - 7);
+          on = fx >= 0 && fx <= 6 && fy >= 0 && fy <= 6 && (fx === 0 || fx === 6 || fy === 0 || fy === 6 || (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4));
+        } else on = rnd() > 0.52;
+        if (on) d += 'M' + x + ' ' + y + 'h1v1h-1z';
+      }
+      return d;
+    };
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag, cls) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft', cls: cls ?? '' });
+    return {
+      theme: this.props.theme ?? 'light',
+      qr: qr(20261121),
+      lines: [
+        { who: '主持人', t: '0:12', a: '我们从第三章开始。上次停在那座只存在于记忆里的城。', b: "Let's start from chapter three. Last time we stopped at the city that exists only in memory." },
+        { who: '说话人 2', t: '0:31', a: 'I think every city he writes about is really the same one.', b: '我觉得他写的每一座城，其实都是同一座。' },
+        { who: '主持人', t: '0:44', a: '对，所以读到后面，会觉得是在读一个人的回忆。', b: "Right, so later on it feels like reading one person's memories." },
+        { who: '说话人 3', t: '1:05', a: '我想问一下，书里的可汗到底相不相信他？', b: 'May I ask: does the Khan in the book actually believe him?' },
+      ],
+      rows: [
+        day('今天'),
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย', 'out', 'on'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

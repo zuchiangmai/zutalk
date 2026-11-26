@@ -1,35 +1,22 @@
 # ZuTalk
 
-[ไทย](README.th.md) | **English** | [Français](README.fr.md) | [Español](README.es.md) | [Deutsch](README.de.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-Hans.md)
+Records a conversation, shows live multilingual captions, and leaves an accurate
+transcript that belongs to the person who recorded it. An application of the
+[Zu protocol](https://github.com/zuchiangmai/zu) for Windows, macOS and Linux.
 
-ZuTalk is a native macOS voice-note app that helps you record, transcribe,
-and organize your content, with floating subtitles that follow multilingual
-conversations.
+This repository is the rewrite that replaces the 0.8 line. The whole design is in
+[docs/DESIGN.md](docs/DESIGN.md).
 
-## Download
+```text
+zu/      the Zu protocol kernel (shared by every Zu application; not ZuTalk-specific)
+core/    everything ZuTalk knows and does; no UI
+app/     the Tauri shell
+ui/      the interface, and the page a shared link opens
+server/  short-lived keys and rooms
+```
 
-[Download the latest ZuTalk](https://github.com/4seas-community/ZuTalk/releases/latest)
+```bash
+cargo test                  # every rule has a test
+```
 
-Supports Apple Silicon and Intel Macs. Requires macOS 12.5 or later.
-
-The installer is not yet notarized by Apple. If macOS blocks the first
-launch, Control-click ZuTalk in Finder and choose "Open", or go to
-System Settings → Privacy & Security to allow it.
-
-## Features
-
-- Record or import audio and transcribe it with Soniox
-- Show multilingual live subtitles in a movable, resizable floating window
-- Organize recordings, transcripts, and notes in Notebooks
-- Edit, search, and export your content
-- Get new versions through in-app update prompts
-
-## Privacy
-
-Audio, transcripts, and notes stay on your Mac by default. Content is sent
-to a service provider only when you actively use remote transcription.
-API credentials are stored locally and never committed to the repository.
-
-## License
-
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+GPL-3.0-or-later.

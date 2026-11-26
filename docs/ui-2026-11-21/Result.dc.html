@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>停止以后</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row on" href="Result.dc.html">
+<span class="row-t">我们从第三章开始。上次停在那座…</span>
+<span class="row-m"><span class="num">42:18</span><span class="shimmer">精修中</span></span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<span class="seg" role="tablist"><button class="seg-i on" role="tab" aria-selected="true">文字稿</button><button class="seg-i" role="tab" aria-selected="false">笔记</button></span>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<article class="doc">
+<input class="title" placeholder="我们从第三章开始。上次停在那座…" aria-label="标题">
+<div class="meta"><span>今天 19:32</span><span class="num">42:18</span><span>中文 · English · ไทย</span><span class="tag">现场稿</span><span class="tag">音频</span></div>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; margin-top: 22px; animation: zt-unfold .42s var(--e-out) both">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px">
+<span style="display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--soft2); color: var(--accent)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 5 5 9-10"></path></svg></span>
+<span style="font-size: 15px; font-weight: 600">录好了</span>
+<span class="num" style="font-size: 15px; color: var(--ink2)">42:18</span>
+<span class="spacer"></span>
+<button class="btn"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>复制</button>
+<button class="pill">导出<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line)" role="status">
+<span class="steps" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></span>
+<span class="shimmer" style="font-size: 12.5px">正在精修 · 转成文字</span>
+</div>
+</section>
+
+<ol class="tl">
+<sc-for list="{{lines}}" as="l" hint-placeholder-count="5">
+<li>
+<div class="who"><span class="num">{{l.t}}</span></div>
+<div>
+<p class="said" lang="zh-Hans">{{l.zh}}</p>
+<p class="tr" lang="en">{{l.en}}</p>
+<p class="tr" lang="th">{{l.th}}</p>
+</div>
+</li>
+</sc-for>
+</ol>
+</article>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      lines: [
+        { t: '0:12', zh: '我们从第三章开始。上次停在那座只存在于记忆里的城。', en: "Let's start from chapter three. Last time we stopped at the city that exists only in memory.", th: 'เราเริ่มจากบทที่สามกันนะ ครั้งก่อนเราหยุดที่เมืองซึ่งมีอยู่แค่ในความทรงจำ' },
+        { t: '0:31', zh: '我觉得他写的每一座城，其实都是同一座。', en: 'I think every city he writes about is really the same one.', th: 'ฉันคิดว่าทุกเมืองที่เขาเขียนถึง จริง ๆ แล้วคือเมืองเดียวกัน' },
+        { t: '0:44', zh: '对，所以读到后面，会觉得是在读一个人的回忆。', en: "Right, so later on it feels like reading one person's memories.", th: 'ใช่ พออ่านไปเรื่อย ๆ จะรู้สึกเหมือนอ่านความทรงจำของคนคนหนึ่ง' },
+      ],
+      rows: [
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

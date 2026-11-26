@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "c4a5b6d7-0e1f-4a2b-9c3d-4e5f6a7b8c03",
+  "about": { "started": 1731800000000, "length_ms": 65000, "title": "", "spoken": ["ja"], "shown": ["ja"], "source": "mic" },
+  "takes": [
+    [ { "t0": 0, "t1": 3000, "speaker": "", "language": "ja", "text": "こんにちは", "translations": {}, "incomplete": false, "via": { "text": "stt-rt-v5" } } ],
+    [
+      { "t0": 0, "t1": 3100, "speaker": "1", "language": "ja", "text": "こんにちは。", "translations": {}, "incomplete": false, "via": { "text": "stt-async-v5" } },
+      { "t0": 3200, "t1": 5000, "speaker": "1", "language": "ja", "text": "よろしくお願いします。", "translations": {}, "incomplete": false, "via": { "text": "hand" } }
+    ]
+  ],
+  "speakers": {},
+  "note": "",
+  "audio": null
+}

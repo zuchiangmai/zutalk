@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>录音中 · 边录边记</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<div class="day">今天</div>
+<a class="row on" href="LiveNotes.dc.html">
+<span class="row-t">正在录音</span>
+<span class="row-m"><span class="dot live"></span><span class="num">{{clock}}</span><span>中文 · English</span></span>
+</a>
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="7">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已交"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+<span class="spacer"></span>
+<a class="pill on" href="Live.dc.html" aria-pressed="true"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4M14 6l4 4"></path></svg>笔记</a>
+<button class="pill quiet"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"></rect><path d="M7 14h4M13 14h4"></path></svg>字幕窗</button>
+<button class="icon-btn" aria-label="更多"><svg class="i fill" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+</header>
+
+<div class="split">
+<div class="left">
+<section class="caps" style="padding: 8px 28px 30px; gap: 28px">
+<div class="cap-col" lang="zh-Hans">
+<h3 class="cap-h">中文</h3>
+<sc-for list="{{zhOld}}" as="o" hint-placeholder-count="3"><p class="cap-old">{{o.text}}</p></sc-for>
+<p class="cap-tail">{{zhTail}}<span class="caret"></span></p>
+</div>
+<div class="cap-col" lang="en">
+<h3 class="cap-h">ENGLISH</h3>
+<sc-for list="{{enOld}}" as="o" hint-placeholder-count="3"><p class="cap-old">{{o.text}}</p></sc-for>
+<p class="cap-tail">{{enTail}}<span class="caret"></span></p>
+</div>
+</section>
+
+<div class="capsule">
+<span class="dot live"></span>
+<span class="clock">{{clock}}</span>
+<span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+<span class="status" role="status">正在录音</span>
+<button class="pill" onClick="{{mark}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"></path></svg>标记<span class="kbd">M</span></button>
+<button class="pill">暂停</button>
+<a class="btn" href="Result.dc.html"><svg class="i s fill" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"></rect></svg>停止</a>
+</div>
+</div>
+
+<aside class="notes" aria-label="笔记">
+<div class="top" style="min-height: 44px; padding: 0">
+<h2 class="h" style="margin: 0">笔记</h2>
+<span class="spacer"></span>
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>不对外</span>
+</div>
+<div class="nlist">
+<sc-for list="{{notes}}" as="n" hint-placeholder-count="3">
+<div class="nrow">
+<button class="at" aria-label="回到这一句">{{n.at}}</button>
+<span class="q">{{n.q}}</span>
+<sc-if value="{{n.has}}" hint-placeholder-val="{{true}}"><span class="tx">{{n.text}}</span></sc-if>
+<sc-if value="{{n.bare}}" hint-placeholder-val="{{false}}"><span class="tx" style="display: inline-flex; align-items: center; gap: 6px; color: var(--ink3); font-weight: 400"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"></path></svg>标记</span></sc-if>
+</div>
+</sc-for>
+</div>
+<div class="anchor"><sc-if value="{{typing}}" hint-placeholder-val="{{false}}"><span class="num" style="color: var(--accent)">{{anchorAt}}</span><span class="q">{{anchorQ}}</span></sc-if></div>
+<form class="composer" onSubmit="{{add}}">
+<input name="t" autocomplete="off" placeholder="记一句" aria-label="记一句" onChange="{{onType}}">
+<button class="icon-btn" aria-label="记下" style="background: var(--accent); color: var(--on-accent)"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"></path></svg></button>
+</form>
+</aside>
+</div>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // A note belongs to the sentence that was on screen when its first letter was typed, not to
+  // the moment Enter is pressed: by then the talk has moved on. A mark is a note with no words.
+  state = { k: 0, notes: [
+    { at: '9:14', q: '书里的可汗到底相不相信他？', text: '留到最后一夜再谈' },
+    { at: '11:02', q: '我们能不能轮流把下一段念出来，一人一段？', text: '' },
+  ], anchor: null };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 90); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const SCRIPT = [
+      ['我们从第三章开始。', "Let's start from chapter three."],
+      ['上次停在那座只存在于记忆里的城。', 'Last time we stopped at the city that exists only in memory.'],
+      ['有人想先说说自己读到的感受吗？', 'Would anyone like to share how it felt to read it?'],
+      ['我觉得他写的每一座城，其实都是同一座。', 'I think every city he writes about is really the same one.'],
+      ['对，所以读到后面，会觉得是在读一个人的回忆。', "Right, so later on it feels like reading one person's memories."],
+      ['那我们今天就从「回忆」这个词讲起。', 'Then let us begin today with the word "memory".'],
+    ];
+    const SAY = 34, PER = 46;
+    const k = this.state.k, n = Math.floor(k / PER), at = k % PER;
+    const line = (i) => SCRIPT[i % SCRIPT.length];
+    const cut = (text, part, byWord) => {
+      const units = byWord ? text.split(' ') : Array.from(text);
+      return units.slice(0, Math.round(units.length * part)).join(byWord ? ' ' : '');
+    };
+    const col = (j, byWord, lag) => ({
+      old: [n - 3, n - 2, n - 1].filter((i) => i >= 0).map((i) => ({ text: line(i)[j] })),
+      tail: cut(line(n)[j], Math.max(0, Math.min(1, (at - lag) / SAY)), byWord),
+    });
+    const zh = col(0, false, 0), en = col(1, true, 4);
+    const fmt = (secs) => Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    const base = 12 * 60 + 48;
+    const now = () => ({ at: fmt(base + Math.floor(n * PER * 0.09)), q: line(n)[0] });
+    const put = (text, where) => this.setState({ notes: [...this.state.notes, { ...where, text }].slice(-5), anchor: null });
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    const anchor = this.state.anchor;
+    return {
+      theme: this.props.theme ?? 'light',
+      clock: fmt(base + Math.floor(k * 0.09)),
+      zhOld: zh.old, zhTail: zh.tail, enOld: en.old, enTail: en.tail,
+      notes: this.state.notes.map((x) => ({ ...x, has: !!x.text, bare: !x.text })),
+      typing: !!anchor, anchorAt: anchor ? anchor.at : '', anchorQ: anchor ? anchor.q : '',
+      onType: (e) => {
+        const has = e.target.value.length > 0;
+        if (has && !this.state.anchor) this.setState({ anchor: now() });
+        if (!has && this.state.anchor) this.setState({ anchor: null });
+      },
+      add: (e) => {
+        e.preventDefault();
+        const field = e.target.elements.t, text = field.value.trim();
+        if (text) put(text, this.state.anchor ?? now());
+        field.value = '';
+      },
+      mark: () => put('', now()),
+      rows: [
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>字幕窗 · 场合与设置</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap; gap: 28px 32px; padding: 32px; background: var(--wash)">
+
+<section style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 14px">
+<div class="screen" aria-label="屏幕">
+<div class="slide" aria-hidden="true"><i style="width: 52%; height: 13%"></i><i style="width: 86%"></i><i style="width: 78%"></i><i style="width: 61%"></i></div>
+
+<sc-if value="{{flat}}" hint-placeholder-val="{{true}}">
+<div class="capwin {{winCls}}">
+<sc-if value="{{zhOn}}" hint-placeholder-val="{{true}}">
+<div class="col w-zh" lang="zh-Hans"><span class="lg">中文</span><p class="roll"><span><span class="o">{{zh.old}}</span>{{zh.t}}</span></p></div>
+</sc-if>
+<sc-if value="{{enOn}}" hint-placeholder-val="{{true}}">
+<div class="col w-en" lang="en"><span class="lg">ENGLISH</span><p class="roll"><span><span class="o">{{en.old}}</span>{{en.t}}</span></p></div>
+</sc-if>
+<sc-if value="{{thOn}}" hint-placeholder-val="{{false}}">
+<div class="col w-th" lang="th"><span class="lg">ไทย</span><p class="roll"><span><span class="o">{{th.old}}</span>{{th.t}}</span></p></div>
+</sc-if>
+</div>
+</sc-if>
+
+</div>
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+<span class="tag">{{arrText}}</span>
+<span class="tag">{{linesText}}</span>
+<span class="tag">字号跟着窗口</span>
+<span class="spacer"></span>
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>记在这台设备</span>
+</div>
+</section>
+
+<aside class="card" style="flex: 1 1 300px; max-width: 400px; align-self: flex-start; display: flex; flex-direction: column; gap: 18px">
+<div>
+<h2 class="h">场合</h2>
+<span class="seg" role="radiogroup" aria-label="场合">
+<sc-for list="{{scenes}}" as="s" hint-placeholder-count="4"><button class="seg-i {{s.cls}}" role="radio" aria-checked="{{s.on}}" onClick="{{s.pick}}">{{s.name}}</button></sc-for>
+</span>
+</div>
+<div>
+<h2 class="h">语言</h2>
+<div class="set-v">
+<sc-for list="{{langs}}" as="l" hint-placeholder-count="3"><button class="pill {{l.cls}}" aria-pressed="{{l.on}}" onClick="{{l.toggle}}">{{l.name}}</button></sc-for>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 18px 24px">
+<div>
+<h2 class="h">行数</h2>
+<span class="seg" role="radiogroup" aria-label="行数"><sc-for list="{{lineOpts}}" as="o" hint-placeholder-count="3"><button class="seg-i {{o.cls}}" role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}">{{o.name}}</button></sc-for></span>
+</div>
+<div>
+<h2 class="h">字号</h2>
+<span class="seg" role="radiogroup" aria-label="字号"><sc-for list="{{sizeOpts}}" as="o" hint-placeholder-count="3"><button class="seg-i {{o.cls}}" role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}">{{o.name}}</button></sc-for></span>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 18px 24px">
+<div>
+<h2 class="h">背景</h2>
+<span class="seg" role="radiogroup" aria-label="背景"><sc-for list="{{bgOpts}}" as="o" hint-placeholder-count="3"><button class="seg-i {{o.cls}}" role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}">{{o.name}}</button></sc-for></span>
+</div>
+<div>
+<h2 class="h">底色</h2>
+<span class="seg" role="radiogroup" aria-label="底色"><button class="seg-i {{darkCls}}" role="radio" aria-checked="{{isDark}}" onClick="{{setDark}}">深</button><button class="seg-i {{lightCls}}" role="radio" aria-checked="{{isLight}}" onClick="{{setLight}}">浅</button></span>
+</div>
+<div>
+<h2 class="h">字体</h2>
+<span class="seg" role="radiogroup" aria-label="字体"><button class="seg-i {{kaiCls}}" role="radio" aria-checked="{{isKai}}" onClick="{{setKai}}">楷</button><button class="seg-i {{heiCls}}" role="radio" aria-checked="{{isHei}}" onClick="{{setHei}}">黑</button></span>
+</div>
+</div>
+<sc-if value="{{band}}" hint-placeholder-val="{{true}}">
+<div>
+<h2 class="h">位置</h2>
+<span class="seg" role="radiogroup" aria-label="位置"><button class="seg-i {{bottomCls}}" role="radio" aria-checked="{{isBottom}}" onClick="{{setBottom}}">下</button><button class="seg-i {{topCls}}" role="radio" aria-checked="{{isTop}}" onClick="{{setTop}}">上</button></span>
+</div>
+</sc-if>
+<div class="set-v" style="padding-top: 16px; border-top: 1px solid var(--line)">
+<button class="pill {{pinCls}}" aria-pressed="{{pin}}" onClick="{{togglePin}}">置顶</button>
+<button class="pill {{passCls}}" aria-pressed="{{pass}}" onClick="{{togglePass}}">锁定</button>
+<button class="pill {{quietCls}}" aria-pressed="{{quiet}}" onClick="{{toggleQuiet}}">自动隐去</button>
+</div>
+</aside>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // A scene is a bundle of the settings below: picking one sets them all, and each can then be
+  // changed. Type size is never a number the person sets. It follows the window, the languages
+  // and the lines; "small / large" only scale that. Languages sit side by side in a wide, short
+  // window and are stacked in a tall one: whichever gives the larger type.
+  state = { k: 0, scene: 'band', on: { zh: true, en: true, th: false }, lines: 2, size: 'm', bg: 3, light: false, sans: false, top: false, pin: true, pass: true, quiet: false };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 90); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const s = this.state;
+    const PRESET = {
+      self: { on: { zh: true, en: false, th: false }, lines: 2, bg: 2, pass: false },
+      band: { on: { zh: true, en: true, th: false }, lines: 2, bg: 3, pass: true },
+      stage: { on: { zh: true, en: true, th: true }, lines: 3, bg: 3, pass: false },
+    };
+    // How wide a line each script needs, in ems, for the same amount said.
+    const W = { zh: 16, en: 21, th: 18 };
+    const SCRIPT = [
+      ['下个月，共享厨房想从每周三天开到五天。', 'Next month, the shared kitchen hopes to open five days a week. ', 'เดือนหน้า ครัวรวมอยากเปิดสัปดาห์ละห้าวัน '],
+      ['需要再多四位愿意排班的人。', 'We need four more people willing to take shifts. ', 'เราต้องการคนเข้าเวรเพิ่มอีกสี่คน '],
+      ['图书馆的开放时间不变，周一照常休息。', 'The library hours stay the same, closed on Mondays. ', 'เวลาเปิดห้องสมุดยังเหมือนเดิม หยุดวันจันทร์ '],
+      ['有想法的人，现在可以上来讲两分钟。', 'Anyone with an idea can come up and speak for two minutes. ', 'ใครมีไอเดีย ขึ้นมาพูดได้สองนาที '],
+    ];
+    const SAY = 34, PER = 48;
+    const n = Math.floor(s.k / PER) + 3, at = s.k % PER;
+    const line = (i, j) => SCRIPT[i % SCRIPT.length][j];
+    const cut = (text, part, byWord) => {
+      const units = byWord ? text.trim().split(' ') : Array.from(text.trim());
+      return units.slice(0, Math.round(units.length * part)).join(byWord ? ' ' : '');
+    };
+    const col = (j, byWord, lag) => ({
+      old: line(n - 3, j) + line(n - 2, j) + line(n - 1, j),
+      t: cut(line(n, j), Math.max(0, Math.min(1, (at - lag) / SAY)), byWord),
+    });
+    const shown = ['zh', 'en', 'th'].filter((x) => s.on[x]);
+    const rows = s.scene === 'stage';
+    const sum = shown.reduce((a, x) => a + W[x], 0), maxw = Math.max(...shown.map((x) => W[x]));
+    const winCls = ['sc-' + s.scene, s.scene === 'band' && s.top ? 'top' : '', rows ? 'rows' : '',
+      'sum-' + sum, 'maxw-' + maxw, 'cnt-' + shown.length, 'lines-' + s.lines,
+      s.size === 's' ? 'size-s' : s.size === 'l' ? 'size-l' : '', 'bg-' + s.bg, s.light ? 'light' : '', s.sans ? 'sans' : ''].join(' ');
+    const opt = (key, list) => list.map(([v, name]) => ({ name, on: s[key] === v, cls: s[key] === v ? 'on' : '', pick: () => this.setState({ [key]: v }) }));
+    const flag = (key) => () => this.setState({ [key]: !s[key] });
+    const count = ['zh', 'en', 'th'].filter((x) => s.on[x]).length;
+    return {
+      theme: this.props.theme ?? 'light',
+      flat: true, band: s.scene === 'band', winCls,
+      zhOn: s.on.zh, enOn: s.on.en, thOn: s.on.th,
+      zh: col(0, false, 0), en: col(1, true, 4), th: col(2, false, 6),
+      arrText: rows ? '叠放' : '并排', linesText: '每种语言 ' + s.lines + ' 行',
+      scenes: [['self', '自己看'], ['band', '投屏'], ['stage', '舞台']].map(([v, name]) => ({
+        name, on: s.scene === v, cls: s.scene === v ? 'on' : '', pick: () => this.setState({ scene: v, ...PRESET[v] }),
+      })),
+      langs: [['zh', '中文'], ['en', 'English'], ['th', 'ไทย']].map(([v, name]) => ({
+        name, on: s.on[v], cls: s.on[v] ? 'on' : '',
+        // The last language cannot be taken away: a caption window with no language is closed, not empty.
+        toggle: () => { if (!s.on[v] || count > 1) this.setState({ on: { ...s.on, [v]: !s.on[v] } }); },
+      })),
+      lineOpts: opt('lines', [[1, '1'], [2, '2'], [3, '3']]),
+      sizeOpts: opt('size', [['s', '小'], ['m', '自动'], ['l', '大']]),
+      bgOpts: opt('bg', [[1, '透'], [2, '半'], [3, '实']]),
+      isDark: !s.light, isLight: s.light, darkCls: s.light ? '' : 'on', lightCls: s.light ? 'on' : '',
+      setDark: () => this.setState({ light: false }), setLight: () => this.setState({ light: true }),
+      isKai: !s.sans, isHei: s.sans, kaiCls: s.sans ? '' : 'on', heiCls: s.sans ? 'on' : '',
+      setKai: () => this.setState({ sans: false }), setHei: () => this.setState({ sans: true }),
+      isBottom: !s.top, isTop: s.top, bottomCls: s.top ? '' : 'on', topCls: s.top ? 'on' : '',
+      setBottom: () => this.setState({ top: false }), setTop: () => this.setState({ top: true }),
+      pin: s.pin, pinCls: s.pin ? 'on' : '', togglePin: flag('pin'),
+      pass: s.pass, passCls: s.pass ? 'on' : '', togglePass: flag('pass'),
+      quiet: s.quiet, quietCls: s.quiet ? 'on' : '', toggleQuiet: flag('quiet'),
+    };
+  }
+}
+</script>
+</body>
+</html>

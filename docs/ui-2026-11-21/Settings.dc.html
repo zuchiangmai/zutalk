@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>设置</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已对外"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置" style="background: var(--soft2); color: var(--accent)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top"></header>
+<div class="page">
+<h1 class="page-t">设置</h1>
+
+<section class="group">
+<h2 class="h">身份</h2>
+<div class="line">
+<span class="avatar" style="width: 36px; height: 36px; font-size: 15px" aria-hidden="true">H</span>
+<span class="grow" style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+<span style="font-size: 15px; font-weight: 600">@demo</span>
+<span class="mono" style="color: var(--ink3)">did:zu:7kq2mxw4…f9a</span>
+</span>
+<button class="pill">退出登录</button>
+</div>
+<div class="line">
+<span class="k">城</span>
+<button class="pill"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg>清迈<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></div>
+<div class="line">
+<span class="k">恢复密钥</span>
+<span class="tag warn">还没存</span>
+<span class="spacer"></span>
+<button class="pill">复制</button>
+<button class="pill">已存好</button>
+</div>
+</section>
+
+<section class="group">
+<h2 class="h">额度</h2>
+<div class="card" style="display: flex; flex-direction: column; gap: 14px; padding: 16px 18px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+<span style="font-size: 14px; font-weight: 600">社区额度</span>
+<span class="tag">清迈</span>
+<span class="tag">居民</span>
+<span class="spacer"></span>
+<span class="k">每天重置</span>
+</div>
+<div style="display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px 14px; align-items: center">
+<span class="k">出字</span><span class="bar"><i style="width: 85%"></i></span><span class="k">今天还剩 <span class="num">34 / 40</span> 次</span>
+<span class="k">AI</span><span class="bar"><i style="width: 87%"></i></span><span class="k">今天还剩 <span class="num">26 / 30</span> 次</span>
+</div>
+<div class="set-v"><span class="tag">现场字幕</span><span class="tag">翻译</span><span class="tag">标题与话题</span></div>
+</div>
+<div class="line" style="margin-top: 16px"><span class="k">自己的密钥</span><span class="tag">额度用完后才用</span></div>
+<div class="line">
+<span style="width: 92px; font-weight: 500">Soniox</span>
+<span class="tag">未设置</span>
+<span class="spacer"></span>
+<input class="field" type="password" autocomplete="off" placeholder="密钥" aria-label="Soniox 密钥" style="width: 168px">
+<button class="pill">保存</button>
+</div>
+<div class="line">
+<span style="width: 92px; font-weight: 500">OpenRouter</span>
+<span class="tag">未设置</span>
+<span class="spacer"></span>
+<input class="field" type="password" autocomplete="off" placeholder="密钥" aria-label="OpenRouter 密钥" style="width: 168px">
+<button class="pill">保存</button>
+</div>
+</section>
+
+<section class="group">
+<h2 class="h">音频</h2>
+<div class="line">
+<span class="seg" role="radiogroup" aria-label="音频留多久">
+<button class="seg-i on" role="radio" aria-checked="true">一直保留</button>
+<button class="seg-i" role="radio" aria-checked="false">30 天</button>
+<button class="seg-i" role="radio" aria-checked="false">7 天</button>
+<button class="seg-i" role="radio" aria-checked="false">转录完就删</button>
+</span>
+</div>
+</section>
+
+<section class="group">
+<h2 class="h">知识库</h2>
+<a class="line" href="Knowledge.dc.html" style="border-radius: 12px">
+<span class="tag">我的词 <span class="num">3</span></span>
+<span class="tag">主题 <span class="num">3</span></span>
+<span class="spacer"></span>
+<svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ink3)"><path d="m9 6 6 6-6 6"></path></svg>
+</a>
+</section>
+
+<section class="group">
+<h2 class="h">语言</h2>
+<div class="line">
+<button class="pill">跟随系统<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+</div>
+</section>
+
+<section class="group">
+<h2 class="h">对外</h2>
+<a class="line" href="Outbound.dc.html" style="border-radius: 12px">
+<span class="tag">现在没有在对外</span>
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg><span class="num">3</span> 场已交到档案馆</span>
+<span class="spacer"></span>
+<svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ink3)"><path d="m9 6 6 6-6 6"></path></svg>
+</a>
+</section>
+
+<section class="group">
+<h2 class="h">更新</h2>
+<div class="line">
+<span class="grow">有新版本</span>
+<button class="btn">更新</button>
+</div>
+</section>
+</div>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":1240}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      rows: [
+        day('今天'),
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+        day('更早'),
+        row('泰语课 第 5 节', '58:20', 'ไทย · 中文'),
+        row('开放麦：十月回顾', '1:21:09', '中文 · English', 'out'),
+        row('木工坊安全说明', '24:47', 'English · 中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

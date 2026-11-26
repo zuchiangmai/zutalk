@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "tokio::sync::mpsc::unbounded_channel", reason = "every queue has a bound, and says what happens when it is full (CLAUDE.md)" },
+  { path = "std::sync::mpsc::channel", reason = "unbounded: use rt::queue, and say what happens when it is full" },
+]

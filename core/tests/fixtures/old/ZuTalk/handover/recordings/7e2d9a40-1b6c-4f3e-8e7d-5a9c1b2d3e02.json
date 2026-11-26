@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "7e2d9a40-1b6c-4f3e-8e7d-5a9c1b2d3e02",
+  "about": { "started": 1731990000000, "length_ms": 400, "title": "interview", "spoken": ["th"], "shown": ["th"], "source": "file" },
+  "takes": [
+    [],
+    [ { "t0": 0, "t1": 400, "speaker": "1", "language": "th", "text": "สวัสดี", "translations": {}, "incomplete": false, "via": { "text": "stt-async-v5" } } ]
+  ],
+  "speakers": {},
+  "note": "",
+  "audio": {
+    "key": "zutalk.audio.7e2d9a40-1b6c-4f3e-8e7d-5a9c1b2d3e02",
+    "rate": 48000,
+    "channels": 2,
+    "format": "f32",
+    "chunks": [ { "path": "audio/7e2d9a40-1b6c-4f3e-8e7d-5a9c1b2d3e02/chunk.00000.enc", "t_ms": 0 } ]
+  }
+}

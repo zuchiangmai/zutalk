@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>观众手机 · 现场字幕</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+
+<header style="display: flex; align-items: center; gap: 10px; padding: 22px 20px 10px">
+<span class="word">ZuTalk</span>
+<span class="spacer"></span>
+<span class="tag" style="height: 26px; padding: 0 10px"><span class="dot live" style="width: 7px; height: 7px"></span>现场字幕</span>
+</header>
+
+<div style="display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 20px 0">
+<sc-for list="{{langs}}" as="l" hint-placeholder-count="3">
+<button class="pill lg {{l.cls}}" aria-pressed="{{l.on}}" onClick="{{l.pick}}">{{l.name}}</button>
+</sc-for>
+</div>
+
+<div style="flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 14px; padding: 0 20px 40px; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 42%); mask-image: linear-gradient(to bottom, transparent 0, #000 42%)">
+<sc-for list="{{old}}" as="o" hint-placeholder-count="3">
+<p class="read" style="margin: 0; font-size: 20px; line-height: 1.5; color: var(--ink3)">{{o.text}}</p>
+</sc-for>
+<p class="read" style="margin: 0; min-height: 4.3em; font-size: 31px; line-height: 1.42; color: var(--ink)">{{tail}}<span class="caret"></span></p>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  state = { k: 0, lang: 1 };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 90); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const NAMES = ['中文', 'English', 'ไทย'];
+    const SCRIPT = [
+      ['下个月，共享厨房想从每周三天开到五天。', 'Next month, the shared kitchen hopes to open five days a week instead of three.', 'เดือนหน้า ครัวรวมอยากเปิดจากสัปดาห์ละสามวันเป็นห้าวัน'],
+      ['需要再多四位愿意排班的人。', 'We need four more people willing to take shifts.', 'เราต้องการคนที่ยินดีเข้าเวรเพิ่มอีกสี่คน'],
+      ['图书馆的开放时间不变，周一照常休息。', 'The library hours stay the same, closed on Mondays as usual.', 'เวลาเปิดห้องสมุดยังเหมือนเดิม หยุดวันจันทร์ตามปกติ'],
+      ['有想法的人，现在可以上来讲两分钟。', 'Anyone with an idea can come up and speak for two minutes now.', 'ใครมีไอเดีย ขึ้นมาพูดได้สองนาทีตอนนี้เลย'],
+    ];
+    const SAY = 34, PER = 46;
+    const j = this.state.lang, k = this.state.k, n = Math.floor(k / PER), at = k % PER;
+    const line = (i) => SCRIPT[i % SCRIPT.length][j];
+    const units = j === 1 ? line(n).split(' ') : Array.from(line(n));
+    const part = Math.max(0, Math.min(1, at / SAY));
+    return {
+      theme: this.props.theme ?? 'dark',
+      langs: NAMES.map((name, i) => ({ name, on: i === j, cls: i === j ? 'on' : '', pick: () => this.setState({ lang: i }) })),
+      old: [n - 3, n - 2, n - 1].filter((i) => i >= 0).map((i) => ({ text: line(i) })),
+      tail: units.slice(0, Math.round(units.length * part)).join(j === 1 ? ' ' : ''),
+    };
+  }
+}
+</script>
+</body>
+</html>

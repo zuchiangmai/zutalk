@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>状态一览</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; padding: 40px; background: var(--wash)">
+<div class="vig">
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">空</h2>
+<p class="read" style="margin: auto 0; font-size: 17px; color: var(--ink3)">还没有录音</p>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 10px; min-height: 168px">
+<h2 class="h" style="margin: 0">搜索</h2>
+<div class="search" style="margin: 0"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><span style="flex: 1; color: var(--ink)">厨房</span><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></div>
+<div class="row on" style="margin: 0"><span class="row-t">开放麦：下个月的城</span><span class="row-m" style="font-family: var(--f-read); font-size: 13px">…共享<mark class="find">厨房</mark>想从每周三天开到五天</span></div>
+<div class="row" style="margin: 0"><span class="row-t">周三分享会：社区厨房</span><span class="row-m" style="font-family: var(--f-read); font-size: 13px">…<mark class="find">厨房</mark>的排班表贴在门口</span></div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">麦克风</h2>
+<div class="banner" style="margin: auto 0"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M9 5a3 3 0 0 1 6 1v5M9 9v2a3 3 0 0 0 5 2.2M5 11a7 7 0 0 0 11.5 5.4M19 11a7 7 0 0 1-.5 2.6M12 18v3"></path></svg><span style="flex: 1">没有麦克风权限</span><button class="pill">打开系统设置</button></div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">没联网</h2>
+<div class="capsule" style="align-self: flex-start; margin: auto 0; animation: none">
+<span class="dot live"></span><span class="clock">3:07</span>
+<span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+<span class="status">正在录音 · 只录音</span>
+<span class="btn" style="height: 34px"><svg class="i s fill" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"></rect></svg>停止</span>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">文字落后</h2>
+<div class="capsule" style="align-self: flex-start; margin: auto 0; animation: none">
+<span class="dot live"></span><span class="clock">27:44</span>
+<span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+<span class="status">正在录音 · 文字慢了一点</span>
+<span class="btn" style="height: 34px"><svg class="i s fill" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"></rect></svg>停止</span>
+</div>
+</section>
+
+<section class="card paused" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">暂停</h2>
+<div class="capsule" style="align-self: flex-start; margin: auto 0; animation: none">
+<span class="dot live"></span><span class="clock">27:44</span>
+<span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+<span class="status">已暂停</span>
+<span class="pill">继续</span>
+<span class="btn" style="height: 34px"><svg class="i s fill" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"></rect></svg>停止</span>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">精修</h2>
+<div style="display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 14px; align-items: center; margin: auto 0">
+<button class="btn" style="height: 28px; padding: 0 14px">精修</button><span class="tag" style="justify-self: start">现场稿</span>
+<span class="steps" aria-hidden="true"><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></span><span class="shimmer" style="font-size: 12.5px; justify-self: start">正在精修 · 转成文字</span>
+<span class="tag warn">精修没写成</span><span style="display: flex; align-items: center; gap: 8px"><span class="k">服务没有及时回应</span><button class="pill">再试</button></span>
+<span class="tag">音频已销毁</span><span class="k">不能再精修</span>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">删除可撤销</h2>
+<div class="toast" style="position: static; transform: none; animation: none; align-self: flex-start; margin: auto 0">已删除<button class="pill"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3"></path></svg>撤销</button><button class="icon-btn" style="color: inherit" aria-label="关闭"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button></div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">销毁音频 · 原处再按一次</h2>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: auto 0">
+<button class="pill danger">销毁音频</button>
+<svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ink3)"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+<button class="pill" style="background: var(--danger); border-color: transparent; color: var(--paper)">确认销毁音频</button>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 12px">
+<h2 class="h" style="margin: 0">更多</h2>
+<div class="pop menu" style="position: static; align-self: flex-start; animation: none">
+<button class="menu-i"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"></path></svg>导出</button>
+<button class="menu-i"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"></rect><path d="M5 9v10h14V9M10 13h4"></path></svg>交到活动</button>
+<hr>
+<button class="menu-i danger"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 9v6M16 5v14M20 10v4"></path></svg>销毁音频</button>
+<button class="menu-i danger"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"></path></svg>删除</button>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 12px">
+<h2 class="h" style="margin: 0">导出</h2>
+<div class="pop menu" style="position: static; align-self: flex-start; animation: none">
+<button class="menu-i">Markdown (.md)</button>
+<button class="menu-i">SRT (.srt)</button>
+<button class="menu-i">WebVTT (.vtt)</button>
+<hr>
+<div class="set-v" style="padding: 4px 10px 6px"><span class="tag">中文</span><span class="tag">English</span></div>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px">
+<h2 class="h" style="margin: 0">从 0.8 搬过来</h2>
+<div style="display: flex; align-items: center; gap: 12px; margin-top: auto">
+<span class="bar" style="flex: 1"><i style="width: 75%"></i></span>
+<span class="k num">132 / 175</span>
+</div>
+<span class="shimmer" style="font-size: 12.5px; align-self: flex-start">正在从 0.8 搬过来</span>
+<div class="line" style="margin-bottom: auto"><span class="tag warn">没能搬过来</span><span class="read" style="font-size: 14px">周会</span><span class="k">缺少它的音频钥匙</span></div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">额度</h2>
+<div class="banner" style="margin: auto 0"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg><span style="flex: 1">今天的出字额度用完了</span><span class="tag">明天重置</span><button class="pill">设置</button></div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">身份 · 有名字用名字</h2>
+<div style="display: flex; flex-direction: column; gap: 12px; margin: auto 0">
+<div style="display: flex; align-items: center; gap: 8px"><span class="avatar" aria-hidden="true">H</span><span style="font-weight: 500">@demo</span></div>
+<div style="display: flex; align-items: center; gap: 8px"><span class="avatar" aria-hidden="true" style="background: var(--sunk); color: var(--ink2)">Z</span><span class="me">did:zu:7kq2…f9a</span></div>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">更新</h2>
+<div style="display: flex; align-items: center; gap: 10px; margin: auto 0">
+<span class="word">ZuTalk</span>
+<span class="spacer"></span>
+<button class="btn" style="height: 30px; padding: 0 14px">更新</button>
+</div>
+</section>
+
+<section class="card" style="display: flex; flex-direction: column; gap: 14px; min-height: 168px">
+<h2 class="h" style="margin: 0">录音时不能更新</h2>
+<div class="toast" style="position: static; transform: none; animation: none; align-self: flex-start; margin: auto 0; padding-right: 18px">录完再更新</div>
+</section>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":1240}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'light' };
+  }
+}
+</script>
+</body>
+</html>

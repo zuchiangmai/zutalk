@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>登录 · 核对数字</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top"><span class="word">ZuTalk</span></div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音"><p class="read" style="margin: 28px 10px; font-size: 15px; color: var(--ink3)">还没有录音</p></nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true" style="background: var(--sunk); color: var(--ink3)"><svg class="i s" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path></svg></span>
+<span class="me" style="font-family: var(--f-ui)">还没有身份</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top">
+<span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span>
+</header>
+<section class="stage">
+<span class="rec" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></span>
+<div class="stage-t">开始录音</div>
+</section>
+</main>
+
+<div class="scrim">
+<div class="dialog" role="dialog" aria-labelledby="ck-t" aria-describedby="ck-d">
+<h2 id="ck-t" class="dialog-t">登录这台设备</h2>
+<p id="ck-d" class="dialog-d">已登录的设备上显示的也是这串数字吗？</p>
+
+<div class="num" style="margin: 24px 0 22px; font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: .04em; text-align: center; animation: zt-unfold .42s var(--e-out) both">482 913</div>
+
+<div style="display: flex; flex-direction: column; gap: 6px; padding-top: 16px; border-top: 1px solid var(--line)">
+<span class="k">以这个身份登录：</span>
+<span style="display: flex; align-items: center; gap: 10px"><span class="avatar" aria-hidden="true">H</span><span style="font-weight: 600">@demo</span><span class="mono" style="color: var(--ink3)">did:zu:7kq2mxw4…f9a</span></span>
+</div>
+
+<div class="dialog-a">
+<a class="btn ghost" href="Login.dc.html">不一致</a>
+<a class="btn" href="Main.dc.html">一致，登录</a>
+</div>
+</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // The same six digits are shown on both devices (pol V0.3 derives them from the two public
+  // keys); the person compares them before the key is kept. The identity is named by its
+  // handle in the city when it has one, with its number beside it.
+  renderVals() { return { theme: this.props.theme ?? 'light' }; }
+}
+</script>
+</body>
+</html>

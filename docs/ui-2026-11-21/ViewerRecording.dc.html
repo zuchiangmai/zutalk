@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>观众手机 · 分享的录音</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden">
+
+<header style="display: flex; align-items: center; gap: 10px; padding: 22px 20px 10px">
+<span class="word">ZuTalk</span>
+</header>
+
+<div style="padding: 10px 20px 0">
+<h1 class="read" style="margin: 0; font-size: 26px; line-height: 1.35; font-weight: 700">读书会：《看不见的城市》第三夜</h1>
+<div class="meta" style="margin-top: 8px"><span>11 月 20 日 19:32</span><span class="num">42:18</span></div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px">
+<button class="pill lg on" aria-pressed="true">中文</button>
+<button class="pill lg" aria-pressed="false">English</button>
+<button class="pill lg" aria-pressed="false">ไทย</button>
+</div>
+</div>
+
+<ol style="flex: 1; list-style: none; margin: 18px 0 0; padding: 0 20px 32px; display: flex; flex-direction: column; gap: 20px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent); mask-image: linear-gradient(to bottom, #000 82%, transparent)">
+<sc-for list="{{lines}}" as="l" hint-placeholder-count="5">
+<li>
+<div style="display: flex; gap: 10px; font-size: 12px; color: var(--ink3)"><b style="font-weight: 600; color: var(--ink2)">{{l.who}}</b><span class="num">{{l.t}}</span></div>
+<p class="said" style="margin-top: 4px; font-size: 18px">{{l.a}}</p>
+<sc-if value="{{l.hasB}}" hint-placeholder-val="{{false}}"><p class="tr">{{l.b}}</p></sc-if>
+</li>
+</sc-for>
+</ol>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The reader's own language under a line said in another; nothing under a line already in it.
+    const line = (who, t, a, b) => ({ who, t, a, b: b ?? '', hasB: !!b });
+    return {
+      theme: this.props.theme ?? 'light',
+      lines: [
+        line('主持人', '0:12', '我们从第三章开始。上次停在那座只存在于记忆里的城。'),
+        line('说话人 2', '0:31', 'I think every city he writes about is really the same one.', '我觉得他写的每一座城，其实都是同一座。'),
+        line('主持人', '0:44', '对，所以读到后面，会觉得是在读一个人的回忆。'),
+        line('说话人 3', '1:05', '我想问一下，书里的可汗到底相不相信他？'),
+        line('主持人', '1:20', '这是个好问题。我们先把它记下来，读到第九章再回来看。'),
+        line('说话人 2', '1:38', 'Could we read the next passage aloud, one paragraph each?', '我们能不能轮流把下一段念出来，一人一段？'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

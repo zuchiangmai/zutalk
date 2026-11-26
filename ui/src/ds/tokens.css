@@ -1,0 +1,151 @@
+/* 4seas + ZuTalk Design Tokens — offline-safe font stacks, light & dark themes.
+   Paper is private (on this device only). The inverse band (.band) means "leaving this device".
+   Orange (--live) means actively capturing audio only; red (--danger) means irreversible only. */
+
+:root {
+  /* 4seas brand palette */
+  --c-forest-900: #004A33;
+  --c-forest-800: #005E3F;
+  --c-forest-700: #006A47;
+  --c-forest-600: #007A52;
+  --c-forest-500: #0F8A61;
+
+  --c-mint-500: #8EF2C4;
+  --c-mint-400: #A6F6D1;
+  --c-mint-300: #BFF8DD;
+  --c-mint-200: #D8FAE8;
+  --c-mint-100: #ECFDF4;
+
+  --c-ink-900: #0A0A0A;
+  --c-ink-800: #1A1A1A;
+  --c-ink-700: #333333;
+  --c-ink-500: #6B6B6B;
+  --c-ink-400: #9A9A9A;
+  --c-ink-300: #C9C9C9;
+  --c-ink-200: #E6E6E6;
+  --c-ink-100: #F3F3F3;
+  --c-paper: #FFFFFF;
+
+  /* Spacing scale (4px base) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+
+  /* Radii */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 420ms;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+.zt {
+  --paper: #fff;
+  --wash: #F4FAF7;
+  --sunk: #EDF5F1;
+  --raise: #fff;
+  --ink: #0A0A0A;
+  --ink2: #49534F;
+  --ink3: #66706B;
+  --line: rgba(0, 74, 51, 0.12);
+  --line2: rgba(0, 74, 51, 0.22);
+  --accent: var(--c-forest-700, #006A47);
+  --accent-h: var(--c-forest-600, #007A52);
+  --on-accent: #fff;
+  --soft: rgba(0, 106, 71, 0.07);
+  --soft2: rgba(0, 106, 71, 0.13);
+  --mint: var(--c-mint-500, #8EF2C4);
+  --live: #F2600C;
+  --danger: #C00511;
+  --danger-soft: rgba(192, 5, 17, 0.07);
+  --warn: #A85B00;
+  --warn-soft: rgba(242, 96, 12, 0.11);
+  --out: var(--c-forest-700, #006A47);
+  --on-out: #D8FAE8;
+  --on-out-strong: #fff;
+  --out-chip: rgba(255, 255, 255, 0.16);
+  --out-sweep: #8EF2C4;
+  --shadow: 0 12px 32px rgba(0, 74, 51, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 74, 51, 0.06), 0 4px 12px rgba(0, 74, 51, 0.08);
+  /* Offline-safe font stacks matching System.dc.html without external network imports */
+  --f-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Segoe UI', sans-serif;
+  --f-read: 'LXGW WenKai', 'LXGW WenKai TC', 'Kaiti SC', 'STKaiti', 'Inter', serif;
+  --f-num: 'Oxanium', 'Inter', sans-serif;
+  --e-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --e-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  font: 13px/1.5 var(--f-ui);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.zt[data-theme="dark"] {
+  --paper: #01291F;
+  --wash: #00211A;
+  --sunk: #073528;
+  --raise: #0A3B2D;
+  --ink: #F1FDF7;
+  --ink2: rgba(216, 250, 232, 0.76);
+  --ink3: rgba(216, 250, 232, 0.58);
+  --line: rgba(142, 242, 196, 0.14);
+  --line2: rgba(142, 242, 196, 0.26);
+  --accent: #8EF2C4;
+  --accent-h: #A6F6D1;
+  --on-accent: #00271B;
+  --soft: rgba(142, 242, 196, 0.09);
+  --soft2: rgba(142, 242, 196, 0.17);
+  --live: #FF7A2B;
+  --danger: #FF6B73;
+  --danger-soft: rgba(255, 107, 115, 0.13);
+  --warn: #FFB26B;
+  --warn-soft: rgba(255, 122, 43, 0.16);
+  --out: #8EF2C4;
+  --on-out: #004A33;
+  --on-out-strong: #00271B;
+  --out-chip: rgba(0, 74, 51, 0.14);
+  --out-sweep: #006A47;
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 4px 12px rgba(0, 0, 0, 0.22);
+}
+
+.zt * {
+  box-sizing: border-box;
+}
+
+.zt :focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.zt a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zt *,
+  .zt *::before,
+  .zt *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>设计语言</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; padding: 44px 48px; display: flex; flex-direction: column; gap: 36px">
+
+<section>
+<h2 class="h">纸与色带</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 16px">
+
+<div class="zt" data-theme="light" style="border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 168px">
+<div class="top" style="min-height: 40px; padding: 0 14px"><span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span></div>
+<p class="read" style="margin: auto 14px 14px; font-size: 17px">白纸：这一场只在这台设备上。</p>
+</div>
+
+<div class="zt" data-theme="light" style="border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 168px">
+<div class="band" style="min-height: 40px; padding: 6px 14px"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"></circle><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4"></path></svg><b>对外</b><span class="chip"><span class="num">12</span> 人在看</span></div>
+<p class="read" style="margin: auto 14px 14px; font-size: 17px">色带：有东西正在离开设备。</p>
+</div>
+
+<div class="zt" data-theme="dark" style="border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 168px">
+<div class="top" style="min-height: 40px; padding: 0 14px"><span class="private"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>只在本机</span></div>
+<p class="read" style="margin: auto 14px 14px; font-size: 17px">深色里，深绿是纸。</p>
+</div>
+
+<div class="zt" data-theme="dark" style="border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-height: 168px">
+<div class="band" style="min-height: 40px; padding: 6px 14px"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"></circle><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4"></path></svg><b>对外</b><span class="chip"><span class="num">12</span> 人在看</span></div>
+<p class="read" style="margin: auto 14px 14px; font-size: 17px">薄荷色带是对外。</p>
+</div>
+
+</div>
+</section>
+
+<section>
+<h2 class="h">颜色</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 14px">
+<div><div class="swatch" style="background: #FFFFFF"></div><div style="margin-top: 8px; font-weight: 500">纸</div><div class="k num">#FFFFFF</div></div>
+<div><div class="swatch" style="background: #F4FAF7"></div><div style="margin-top: 8px; font-weight: 500">侧栏</div><div class="k num">#F4FAF7</div></div>
+<div><div class="swatch" style="background: #0A0A0A"></div><div style="margin-top: 8px; font-weight: 500">字</div><div class="k num">#0A0A0A</div></div>
+<div><div class="swatch" style="background: #006A47"></div><div style="margin-top: 8px; font-weight: 500">森林 · 主操作与色带</div><div class="k num">#006A47</div></div>
+<div><div class="swatch" style="background: #8EF2C4"></div><div style="margin-top: 8px; font-weight: 500">薄荷 · 深色里的主色</div><div class="k num">#8EF2C4</div></div>
+<div><div class="swatch" style="background: #F2600C"></div><div style="margin-top: 8px; font-weight: 500">橙 · 只表示正在收音</div><div class="k num">#F2600C</div></div>
+<div><div class="swatch" style="background: #C00511"></div><div style="margin-top: 8px; font-weight: 500">红 · 只表示撤不回</div><div class="k num">#C00511</div></div>
+</div>
+</section>
+
+<section>
+<h2 class="h">字</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px">
+<div class="card"><div class="k">界面 · Inter</div><div style="margin-top: 10px; font-size: 22px; font-weight: 600">开始录音 Start</div><div style="margin-top: 6px">一个控件一个词，当前的值写在控件上。</div></div>
+<div class="card"><div class="k">读的字 · 霞鹜文楷</div><div class="read" style="margin-top: 10px; font-size: 22px; font-weight: 700">说出来的话，用楷体。</div><div class="read" style="margin-top: 6px; font-size: 17px; line-height: 1.75">标题、文字稿、字幕都是它。Every city is the same one.</div></div>
+<div class="card"><div class="k">数字 · Oxanium</div><div class="num" style="margin-top: 10px; font-size: 34px; font-weight: 600; line-height: 1.1">42:18</div><div class="num" style="margin-top: 8px; font-size: 15px; color: var(--ink2)">1:12:40 · 132 / 175 · $12.40</div></div>
+</div>
+</section>
+
+<section>
+<h2 class="h">控件</h2>
+<div class="card" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px">
+<button class="btn">复制</button>
+<button class="btn ghost">撤销</button>
+<span class="sep" style="width: 1px; height: 20px; background: var(--line2)"></span>
+<button class="pill">麦克风<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button>
+<button class="pill on">中文<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+<button class="pill add" aria-label="添加"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+<button class="pill quiet">导入</button>
+<button class="pill danger">销毁音频</button>
+<span class="sep" style="width: 1px; height: 20px; background: var(--line2)"></span>
+<span class="seg"><button class="seg-i on">文字稿</button><button class="seg-i">笔记</button></span>
+<span class="sep" style="width: 1px; height: 20px; background: var(--line2)"></span>
+<span class="tag">现场稿</span>
+<span class="tag out"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>已交</span>
+<span class="tag warn">听不清</span>
+<input class="field" placeholder="词" aria-label="词" style="width: 120px">
+</div>
+</section>
+
+<section>
+<h2 class="h">动效</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 16px">
+
+<div class="card" style="display: flex; flex-direction: column; align-items: center; gap: 14px; min-height: 190px">
+<div style="flex: 1; display: grid; place-items: center; width: 100%"><span class="rec" style="width: 56px; height: 56px"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="width: 22px; height: 22px"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></span></div>
+<div style="text-align: center"><div style="font-weight: 500">等你开始</div><div class="k num">涟漪 3.6 s</div></div>
+</div>
+
+<div class="card" style="display: flex; flex-direction: column; align-items: center; gap: 14px; min-height: 190px">
+<div style="flex: 1; display: flex; align-items: center; gap: 12px"><span class="dot live"></span><span class="clock">12:48</span><span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span></div>
+<div style="text-align: center"><div style="font-weight: 500">正在收音</div><div class="k num">电平 1.1 s · 呼吸 2 s</div></div>
+</div>
+
+<div class="card" style="display: flex; flex-direction: column; align-items: center; gap: 14px; min-height: 190px">
+<div style="flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 4px; width: 100%"><span class="cap-old" style="font-size: 15px">我们从第三章开始。</span><span class="read" style="font-size: 19px">上次停在那座{{typed}}<span class="caret"></span></span></div>
+<div style="text-align: center"><div style="font-weight: 500">逐字显现</div><div class="k">按每种语言的语速</div></div>
+</div>
+
+<div class="card" style="display: flex; flex-direction: column; align-items: center; gap: 14px; min-height: 190px; padding: 0 0 18px; overflow: hidden">
+<div class="band" style="width: 100%; min-height: 40px; padding: 6px 14px"><b>对外</b><span class="chip"><span class="num">12</span> 人在看</span></div>
+<div style="flex: 1"></div>
+<div style="text-align: center"><div style="font-weight: 500">色带</div><div class="k num">落下 420 ms · 扫光 3.2 s</div></div>
+</div>
+
+<div class="card" style="display: flex; flex-direction: column; align-items: center; gap: 14px; min-height: 190px">
+<div style="flex: 1; display: flex; align-items: center; gap: 12px; color: var(--accent)"><svg class="ring" viewBox="0 0 22 22" aria-hidden="true" style="width: 34px; height: 34px"><circle class="bg" cx="11" cy="11" r="9"></circle><circle class="fg" cx="11" cy="11" r="9" style="animation-iteration-count: infinite"></circle></svg><span style="color: var(--ink); font-weight: 600">8 秒后交出</span></div>
+<div style="text-align: center"><div style="font-weight: 500">按住，再留一步</div><div class="k num">按住 1.4 s · 可撤销 8 s</div></div>
+</div>
+
+</div>
+</section>
+
+<section>
+<h2 class="h">规矩</h2>
+<ol class="read" style="margin: 0; padding-left: 1.4em; font-size: 17px; line-height: 1.9; columns: 2 380px; column-gap: 48px">
+<li>一屏一个主按钮。</li>
+<li>表面不写句子；告知只出现在动作发生的那一刻。</li>
+<li>橙色只表示正在收音，红色只表示撤不回。</li>
+<li>离开设备的东西只有一种样子：色带。</li>
+<li>对外的事不记忆：每一场都从「只在本机」开始。</li>
+<li>动效只说状态：等你、在听、在写、在对外。</li>
+</ol>
+</section>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":1240}}'>
+class Component extends DCLogic {
+  state = { k: 0 };
+  componentDidMount() { this.timer = setInterval(() => this.setState({ k: this.state.k + 1 }), 160); }
+  componentWillUnmount() { clearInterval(this.timer); }
+  renderVals() {
+    const tail = Array.from('只存在于记忆里的城。');
+    const n = this.state.k % (tail.length + 8);
+    return { theme: this.props.theme ?? 'light', typed: tail.slice(0, Math.min(n, tail.length)).join('') };
+  }
+}
+</script>
+</body>
+</html>

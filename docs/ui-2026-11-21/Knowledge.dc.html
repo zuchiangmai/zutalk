@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>知识库 · 按主题准备</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/ds4seasdesignsystem_af6e46/colors_and_type.css">
+<link rel="stylesheet" href="./zt.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Oxanium:wght@500;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+</style>
+</helmet>
+<div class="zt" data-theme="{{theme}}" style="min-height: 100vh; display: flex; flex-wrap: wrap">
+
+<aside class="side">
+<div class="side-top">
+<span class="word">ZuTalk</span>
+<a class="icon-btn" href="Main.dc.html" aria-label="新录音"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></a>
+</div>
+<label class="search"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><input type="search" placeholder="搜索录音" aria-label="搜索录音"></label>
+<nav class="list" aria-label="录音">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+<sc-if value="{{r.day}}" hint-placeholder-val="{{false}}"><div class="day">{{r.name}}</div></sc-if>
+<sc-if value="{{r.row}}" hint-placeholder-val="{{true}}">
+<a class="row" href="Reader.dc.html">
+<span class="row-t">{{r.title}}</span>
+<span class="row-m"><span class="num">{{r.len}}</span><span>{{r.langs}}</span>
+<sc-if value="{{r.out}}" hint-placeholder-val="{{false}}"><svg class="i s" viewBox="0 0 24 24" role="img" aria-label="已交"><path d="M7 17 17 7M8 7h9v9"></path></svg></sc-if>
+<sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}"><span class="tag">现场稿</span></sc-if>
+</span>
+</a>
+</sc-if>
+</sc-for>
+</nav>
+<div class="side-foot">
+<span class="avatar" aria-hidden="true">H</span>
+<span class="me" style="font-family: var(--f-ui); font-weight: 500">@demo</span>
+<a class="icon-btn" href="Settings.dc.html" aria-label="设置" style="background: var(--soft2); color: var(--accent)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"></path></svg></a>
+</div>
+</aside>
+
+<main class="main">
+<header class="top" style="padding: 0 28px">
+<a class="pill quiet" href="Settings.dc.html"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"></path></svg>设置</a>
+<h1 class="read" style="margin: 0 0 0 4px; font-size: 20px; font-weight: 700">知识库</h1>
+</header>
+
+<div class="lib">
+<div class="rail" style="max-width: 220px">
+<sc-for list="{{packs}}" as="p" hint-placeholder-count="4">
+<button class="month {{p.cls}}" onClick="{{p.pick}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{p.name}}</span><span class="n">{{p.n}}</span></button>
+</sc-for>
+<button class="month" style="margin-top: 6px; color: var(--ink3)"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新主题</button>
+</div>
+
+<div class="days" style="display: flex; flex-direction: column; gap: 22px; padding-bottom: 8px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 10px">
+<h2 class="read" style="margin: 0; font-size: 24px; font-weight: 700">{{pack.name}}</h2>
+<sc-if value="{{pack.always}}" hint-placeholder-val="{{false}}"><span class="tag">每场都用</span></sc-if>
+<span class="spacer"></span>
+<span class="bar" style="width: 96px" role="img" aria-label="篇幅"><i style="width: 22%"></i></span>
+<span class="k num">{{pack.size}} / 10,000</span>
+</div>
+
+<section>
+<h3 class="h">概况</h3>
+<div class="set-v">
+<sc-for list="{{pack.facts}}" as="f" hint-placeholder-count="4">
+<span class="pill" style="cursor: default"><span style="color: var(--ink3)">{{f.k}}</span>{{f.v}}</span>
+</sc-for>
+<button class="pill add" aria-label="添加一条概况"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+</div>
+</section>
+
+<section>
+<h3 class="h">背景</h3>
+<p class="read" style="margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--sunk); font-size: 15px; line-height: 1.75; max-width: 640px">{{pack.text}}</p>
+</section>
+
+<section>
+<h3 class="h">词</h3>
+<div class="set-v">
+<sc-for list="{{terms}}" as="t" hint-placeholder-count="5">
+<button class="pill on" onClick="{{t.drop}}" aria-label="{{t.label}}">{{t.text}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
+</sc-for>
+<button class="pill add" aria-label="添加词"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+</div>
+<sc-if value="{{hasFound}}" hint-placeholder-val="{{true}}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px">
+<span class="k" style="display: inline-flex; align-items: center; gap: 6px"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7zM14 3v5h5"></path></svg>第三夜讲义.pdf 里还有</span>
+<sc-for list="{{found}}" as="t" hint-placeholder-count="3">
+<button class="pill" style="border-style: dashed" onClick="{{t.take}}" aria-label="{{t.label}}"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>{{t.text}}</button>
+</sc-for>
+</div>
+</sc-if>
+</section>
+
+<section>
+<h3 class="h">译法</h3>
+<div class="set-v">
+<sc-for list="{{pack.pairs}}" as="x" hint-placeholder-count="2">
+<span class="pill" style="cursor: default">{{x.a}}<svg class="i s" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--ink3)"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>{{x.b}}</span>
+</sc-for>
+<button class="pill add" aria-label="添加译法"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+</div>
+</section>
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line)">
+<button class="pill"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"></path></svg>从文件里提</button>
+<span class="spacer"></span>
+<span class="tag"><svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>用到它的录音，会把这一页随声音发给出字服务</span>
+</div>
+</div>
+</div>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  // A topic is what the transcription service is told before it listens: a few facts, some
+  // background, the words to spell right and how to translate them. Words found in a file are
+  // offered, never added on their own; a correction made while reading can be put here too.
+  state = { pack: 1, taken: [], dropped: [] };
+  renderVals() {
+    const PACKS = [
+      { name: '我的词', n: 3, always: true, size: '86', facts: [], text: '每一场都会用上的词：自己的名字、常去的地方。', terms: ['清迈 · Chiang Mai · เชียงใหม่', '四海 · 4seas', '共享厨房 · shared kitchen · ครัวรวม'], found: [], pairs: [] },
+      { name: '读书会 · 看不见的城市', n: 9, always: false, size: '2,180',
+        facts: [{ k: '领域', v: '文学读书会' }, { k: '作品', v: '《看不见的城市》' }, { k: '作者', v: '卡尔维诺' }, { k: '地点', v: '清迈' }],
+        text: '每周一次，轮流朗读再讨论。书里马可·波罗向忽必烈讲述他到过的城市；大家常把忽必烈叫作「可汗」。讨论时中文、英文混着说。',
+        terms: ['马可·波罗 · Marco Polo', '忽必烈 · Kublai Khan · กุบไลข่าน', '可汗 · Khan', '卡尔维诺 · Calvino', '威尼斯 · Venice'],
+        found: ['瓦尔德拉达 · Valdrada', '伊西多拉 · Isidora', '芝诺比亚 · Zenobia'],
+        pairs: [{ a: '看不见的城市', b: 'Invisible Cities' }, { a: '可汗', b: 'the Khan' }] },
+      { name: '泰语课', n: 30, always: false, size: '1,020', facts: [{ k: '领域', v: '语言课' }, { k: '语言', v: '泰语、中文' }], text: '初级泰语，老师用泰语讲、中文解释。', terms: ['量词 · ลักษณนาม', '声调 · วรรณยุกต์'], found: [], pairs: [] },
+      { name: '社区例会', n: 18, always: false, size: '640', facts: [{ k: '领域', v: '社区事务' }], text: '每周例会：排班、采购、下周的活动。', terms: ['共享厨房 · shared kitchen', '木工坊 · woodshop'], found: [], pairs: [] },
+    ];
+    const p = PACKS[this.state.pack];
+    const key = (t) => this.state.pack + ':' + t;
+    const taken = this.state.taken, dropped = this.state.dropped;
+    const terms = [...p.terms, ...p.found.filter((t) => taken.includes(key(t)))].filter((t) => !dropped.includes(key(t)));
+    const found = p.found.filter((t) => !taken.includes(key(t)));
+    const day = (name) => ({ day: true, row: false, name });
+    const row = (title, len, langs, flag) => ({ day: false, row: true, title, len, langs, out: flag === 'out', draft: flag === 'draft' });
+    return {
+      theme: this.props.theme ?? 'light',
+      packs: PACKS.map((x, i) => ({ name: x.name, n: x.n, cls: i === this.state.pack ? 'on' : '', pick: () => this.setState({ pack: i }) })),
+      pack: p,
+      terms: terms.map((t) => ({ text: t, label: '去掉' + t, drop: () => this.setState({ dropped: [...dropped, key(t)] }) })),
+      found: found.map((t) => ({ text: t, label: '加上' + t, take: () => this.setState({ taken: [...taken, key(t)] }) })),
+      hasFound: found.length > 0,
+      rows: [
+        day('今天'),
+        row('读书会：《看不见的城市》第三夜', '42:18', '中文 · English · ไทย'),
+        row('和房东谈续租', '18:05', '中文 · ไทย'),
+        day('昨天'),
+        row('周会', '55:40', '中文'),
+        row('泰语课 第 6 节', '1:02:11', 'ไทย · 中文', 'draft'),
+        day('本周'),
+        row('周三分享会：社区厨房', '1:34:02', '中文 · English', 'out'),
+        row('访谈 · 木工坊', '47:26', 'English'),
+        row('采购清单口述', '3:12', '中文'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

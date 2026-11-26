@@ -1,0 +1,57 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-11-20T17:15:00Z" },
+  "title": "ZuTalk 界面重设计",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 0, "w": 1280, "h": 800, "title": "首页 · 开始录音", "expand": "fill", "is_interactive": true },
+    "Live.dc.html": { "x": 1360, "y": 0, "w": 1280, "h": 800, "title": "录音中 · 只在本机", "expand": "fill", "is_interactive": true },
+    "LiveNotes.dc.html": { "x": 2720, "y": 0, "w": 1280, "h": 800, "title": "录音中 · 边录边记", "expand": "fill", "is_interactive": true },
+    "Result.dc.html": { "x": 4080, "y": 0, "w": 1280, "h": 800, "title": "停止以后", "expand": "fill" },
+    "Refine.dc.html": { "x": 5440, "y": 0, "w": 1280, "h": 800, "title": "精修稿 · 录完以后写的那一版", "expand": "fill", "is_interactive": true },
+    "Reader.dc.html": { "x": 6800, "y": 0, "w": 1280, "h": 800, "title": "读一场录音", "expand": "fill", "is_interactive": true },
+
+    "HostArm.dc.html": { "x": 0, "y": 1200, "w": 1280, "h": 800, "title": "主持 · 开场前", "expand": "fill", "is_interactive": true },
+    "HostLive.dc.html": { "x": 1360, "y": 1200, "w": 1280, "h": 800, "title": "主持 · 对外中", "expand": "fill", "is_interactive": true },
+    "HostFile.dc.html": { "x": 2720, "y": 1200, "w": 1280, "h": 800, "title": "主持 · 交到档案馆", "expand": "fill", "is_interactive": true },
+    "Outbound.dc.html": { "x": 4080, "y": 1200, "w": 1280, "h": 800, "title": "设置 · 对外", "expand": "fill" },
+
+    "Settings.dc.html": { "x": 0, "y": 2400, "w": 1280, "h": 1240, "title": "设置", "expand": "fill" },
+    "Ask.dc.html": { "x": 1360, "y": 2400, "w": 1280, "h": 800, "title": "身份 · 需要时才问", "expand": "fill" },
+    "Login.dc.html": { "x": 2720, "y": 2400, "w": 1280, "h": 800, "title": "登录 · 用手机扫码", "expand": "fill" },
+    "Check.dc.html": { "x": 4080, "y": 2400, "w": 1280, "h": 800, "title": "登录 · 核对数字", "expand": "fill" },
+    "Recovery.dc.html": { "x": 5440, "y": 2400, "w": 1280, "h": 800, "title": "新建身份 · 句柄与恢复密钥", "expand": "fill" },
+    "States.dc.html": { "x": 6800, "y": 2400, "w": 1280, "h": 1240, "title": "状态一览", "expand": "fill" },
+    "System.dc.html": { "x": 8160, "y": 2400, "w": 1280, "h": 1240, "title": "设计语言", "expand": "fill" },
+
+    "CaptionsLatest.dc.html": { "x": 0, "y": 4040, "w": 960, "h": 260, "title": "字幕窗 · 近看", "radius": 22, "is_interactive": true },
+    "ViewerLive.dc.html": { "x": 1040, "y": 4040, "w": 390, "h": 844, "title": "观众手机 · 现场字幕", "is_interactive": true },
+    "ViewerEnded.dc.html": { "x": 1510, "y": 4040, "w": 390, "h": 844, "title": "观众手机 · 字幕结束" },
+    "CaptionScenes.dc.html": { "x": 1980, "y": 4040, "w": 1280, "h": 800, "title": "字幕窗 · 场合与设置", "expand": "fill", "is_interactive": true },
+
+    "Library.dc.html": { "x": 0, "y": 5284, "w": 1280, "h": 800, "title": "全部录音 · 录音很多时", "expand": "fill", "is_interactive": true },
+    "Titles.dc.html": { "x": 1360, "y": 5284, "w": 1280, "h": 800, "title": "标题与话题 · 自动生成", "expand": "fill", "is_interactive": true },
+    "Knowledge.dc.html": { "x": 2720, "y": 5284, "w": 1280, "h": 800, "title": "知识库 · 按主题准备", "expand": "fill", "is_interactive": true }
+  },
+  "order": [
+    "Main.dc.html", "Live.dc.html", "LiveNotes.dc.html", "Result.dc.html", "Refine.dc.html", "Reader.dc.html",
+    "HostArm.dc.html", "HostLive.dc.html", "HostFile.dc.html", "Outbound.dc.html",
+    "Settings.dc.html", "Ask.dc.html", "Login.dc.html", "Check.dc.html", "Recovery.dc.html", "States.dc.html", "System.dc.html",
+    "CaptionsLatest.dc.html", "ViewerLive.dc.html", "ViewerEnded.dc.html", "CaptionScenes.dc.html",
+    "Library.dc.html", "Titles.dc.html", "Knowledge.dc.html"
+  ],
+  "notes": {
+    "t-private": { "x": 0, "y": -300, "text": "主流程 · 只在本机", "kind": "title1", "maxW": 8080 },
+    "t-host": { "x": 0, "y": 900, "text": "主持一场活动 · 对外", "kind": "title1", "maxW": 5360 },
+    "t-rest": { "x": 0, "y": 2100, "text": "设置、身份、状态与设计语言", "kind": "title1", "maxW": 9440 },
+    "t-other": { "x": 0, "y": 3740, "text": "字幕窗与观众页", "kind": "title1", "maxW": 3260 },
+    "t-more": { "x": 0, "y": 4984, "text": "录音很多时 · 标题与话题 · 知识库", "kind": "title1", "maxW": 4000 },
+    "n-paper": { "x": 8160, "y": 0, "w": 420, "size": "m", "fill": "green", "text": "纸＝私有，色带＝对外\n\n页面是白纸时，这一场只在这台设备上，顶栏写着「只在本机」。\n\n只有顶上出现绿色色带，才有东西在离开设备：色带上写着给谁看、几个人在看，右边永远有一键停止。\n\n深色主题里反过来：深绿是纸，薄荷色带是对外。\n\n笔记永远是纸：对外的时候也不跟着出去。" },
+    "n-host": { "x": 5440, "y": 1200, "w": 460, "size": "m", "fill": "orange", "text": "主持的四条规矩\n\n1. 私有是底色。每一场都从「只在本机」开始。\n\n2. 主持是一场，不是开关。它不写进设置，也不写进磁盘：离开首页、录完、重开应用，都回到私有。在「开场前」点左边任何一场录音再回来，就看得到。\n\n3. 对外时色带常亮。停止对外只要一下；再打开要重新走一遍。\n\n4. 停了才交，按住才交。开始录音不等于同意交；交到档案馆在录完以后，一场一次：转写稿和全程录音默认一起交，全程录音可以关；按住 1.4 秒才交出，交出前还有 8 秒可以撤销。" },
+    "n-id": { "x": 9520, "y": 2400, "w": 440, "size": "m", "fill": "blue", "text": "身份照 pol V0.3\n\n1. 需要时才问。没有登录墙：没有身份也能打开、能看；要签名的那一刻（按下开始录音）才弹这一张纸。\n\n2. 扫码：要身份的这台设备亮码，存着身份的那台来扫。码五分钟失效，可以复制链接；不在这里选城。扫到以后两台设备各显示同一串六位数，人核对过才登录。另一条路是恢复密钥。\n\n3. 句柄：新建身份时取，城里一人一个、先到先得；有就显示 @句柄，没有才显示 did。\n\n4. 额度是城给的：出字和 AI 各按每人每天的次数算，每天重置。\n\n5. 没送到的标「未发送」，不拦着人继续用。" }
+  },
+  "designSystems": [
+    { "title": "4seas Design System", "namespace": "ds4seasdesignsystem_af6e46", "artifact": "https://claude.ai/code/artifact/0fcbf7ae-2078-49a7-88fb-59193d966300", "version": "1795194315-02b9", "copiedAt": "2026-11-20T17:15:00Z" }
+  ]
+}

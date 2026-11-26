@@ -1,0 +1,10 @@
+//! The runtime: recovery, and what every layer is built on. It knows nothing of the app.
+//! Budget: none of its own; it runs inside the layer that calls it, on that layer's budget.
+//! Must not use any other module of this crate.
+
+pub mod keep;
+pub mod queue;
+pub mod signal;
+pub mod stats;
+pub mod supervise;
+pub mod water;

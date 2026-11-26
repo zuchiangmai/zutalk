@@ -1,48 +1,16 @@
 [workspace]
-resolver = "2"
-exclude = ["fuzz"]
-members = [
-    "crates/vt-model",
-    "crates/vt-store",
-    "crates/vt-crypto",
-    "crates/vt-stt",
-    "crates/vt-audio",
-    "crates/vt-pipeline",
-    "crates/vt-export",
-    "crates/vt-ffi",
-    "crates/vt-i18n",
-    "crates/vt-llm",
-    "crates/vt-mirror",
-    "crates/vt-sync",
-    "crates/vt-city",
-    "tools/uniffi-bindgen",
-]
+resolver = "3"
+members = ["zu", "log", "core", "server", "app"]
 
 [workspace.package]
-version = "0.8.6"
-edition = "2021"
-rust-version = "1.91"
+version = "0.9.0"
+edition = "2024"
+rust-version = "1.90"
 license = "GPL-3.0-or-later"
 
-[workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-thiserror = "2"
-anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "multipart", "gzip"] }
+[profile.dev.package."*"]
+opt-level = 1
 
-# 保留行号信息以支持堆栈定位，同时减少本地构建产物体积。
-# 关闭 incremental 以便共享编译缓存；需要时可用 CARGO_INCREMENTAL=1 覆盖。
-[profile.dev]
-debug = "line-tables-only"
-incremental = false
-
-# Release 使用 thin LTO，并由 Xcode 单独生成 dSYM。
 [profile.release]
-strip = "debuginfo"
 lto = "thin"
+strip = "debuginfo"
