@@ -331,8 +331,6 @@ async fn nothing_said_or_secret_reaches_the_log() {
     let _ = bench.query(Query::Search { query: secret_query.into(), limit: 50 }).await;
     let _ = bench.query(Query::Recording { id: rec_id.clone() }).await;
     let _ = bench.query(Query::Transcript { id: rec_id.clone(), take: Some(0), chunk: 0 }).await;
-    let _ =
-        bench.query(Query::Compare { id: rec_id.clone(), take_a: 0, take_b: 0, chunk: 0 }).await;
     let _ = bench.query(Query::LibrarySummary { tz_offset_min: 480 }).await;
 
     tokio::time::sleep(Duration::from_millis(60_000)).await;

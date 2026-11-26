@@ -14,7 +14,14 @@ import {
 } from '../bus';
 import {
   activeStyle,
-  bgAlpha,
+  CAPTION_FONT_DEFAULT_PX,
+  CAPTION_FONT_MAX_PX,
+  CAPTION_FONT_MIN_PX,
+  CAPTION_FONT_STEP_PX,
+  CAPTION_OPACITY_MAX_PCT,
+  CAPTION_OPACITY_MIN_PCT,
+  effectiveBgAlpha,
+  opacityPercent,
   sceneClassName,
   sceneSummary,
   sizeScale,
@@ -70,7 +77,6 @@ export function CaptionScenesView({
     { value: 'SelfView', label: t('captions.scene.SelfView') },
     { value: 'Band', label: t('captions.scene.Band') },
     { value: 'Stage', label: t('captions.scene.Stage') },
-    { value: 'Facing', label: t('captions.scene.Facing') },
   ];
 
   const lineOptions: SegOption<string>[] = [
@@ -109,7 +115,6 @@ export function CaptionScenesView({
   const selectScene = (nextScene: CaptionScene) => {
     onSetup({
       ...setup,
-      mode: nextScene === 'Facing' ? 'Conversation' : 'Audience',
       caption: { ...prefs, scene: nextScene },
     });
   };
@@ -123,13 +128,15 @@ export function CaptionScenesView({
 
   const toggleLanguage = (lang: string) => {
     const isOn = setup.shown.includes(lang);
-    // Keep at least one caption language active; a caption window with no language is closed, not empty.
+    // Keep at least one caption language active; Plan B keeps spoken and shown identical.
     if (isOn) {
       if (setup.shown.length <= 1) return;
-      onSetup({ ...setup, shown: setup.shown.filter((x) => x !== lang) });
+      const next = setup.shown.filter((x) => x !== lang);
+      onSetup({ ...setup, spoken: next, shown: next });
     } else {
       if (setup.shown.length >= MAX_CAPTION_COLUMNS) return;
-      onSetup({ ...setup, shown: [...setup.shown, lang] });
+      const next = [...setup.shown, lang];
+      onSetup({ ...setup, spoken: next, shown: next });
     }
   };
 
@@ -145,11 +152,15 @@ export function CaptionScenesView({
     .join(' ');
 
   const previewStyle = {
-    '--a': String(bgAlpha(style.bg)),
-    '--k': String(sizeScale(style.size)),
+    '--a': String(effectiveBgAlpha(style)),
+    '--k': String(
+      style.font_px != null ? style.font_px / CAPTION_FONT_DEFAULT_PX : sizeScale(style.size),
+    ),
     '--l': String(summary.lines),
     '--cnt': String(previewLangs.length),
   } as CSSProperties;
+  const opacityPct = opacityPercent(style);
+  const sliderFontPx = style.font_px ?? CAPTION_FONT_DEFAULT_PX;
 
   const displayedLangs = languages.length > 0 ? languages : ['zh', 'en', 'th'];
 
@@ -181,7 +192,7 @@ export function CaptionScenesView({
             </div>
 
             <div className={capwinClasses} style={previewStyle} data-scene={prefs.scene}>
-              {previewLangs.slice(0, prefs.scene === 'Facing' ? 2 : MAX_CAPTION_COLUMNS).map((lang) => {
+              {previewLangs.slice(0, MAX_CAPTION_COLUMNS).map((lang) => {
                 const sample = previewFor(lang);
                 return (
                   <div key={lang} className="col" lang={lang}>
@@ -262,7 +273,45 @@ export function CaptionScenesView({
                 options={sizeOptions}
                 value={style.size}
                 ariaLabel={t('captions.size')}
-                onChange={(v) => patchStyle({ size: v })}
+                onChange={(v) => patchStyle({ size: v, font_px: null })}
+              />
+            </div>
+          </div>
+
+          <div className="scenes-row">
+            <div style={{ flex: 1 }}>
+              <h2 className="h">
+                {t('captions.size')} · {style.font_px == null ? t('captions.size.Auto') : `${sliderFontPx}px`}
+              </h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={CAPTION_FONT_MIN_PX}
+                  max={CAPTION_FONT_MAX_PX}
+                  step={CAPTION_FONT_STEP_PX}
+                  value={sliderFontPx}
+                  aria-label={t('captions.size')}
+                  onChange={(e) => patchStyle({ font_px: Number(e.target.value) })}
+                />
+                {style.font_px != null && (
+                  <Pill quiet onClick={() => patchStyle({ font_px: null, size: 'Auto' })}>
+                    {t('captions.size.Auto')}
+                  </Pill>
+                )}
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <h2 className="h">
+                {t('captions.bg_opacity')} · {opacityPct}%
+              </h2>
+              <input
+                type="range"
+                min={CAPTION_OPACITY_MIN_PCT}
+                max={CAPTION_OPACITY_MAX_PCT}
+                step={2}
+                value={opacityPct}
+                aria-label={t('captions.bg_opacity')}
+                onChange={(e) => patchStyle({ opacity: Number(e.target.value) })}
               />
             </div>
           </div>
@@ -274,7 +323,7 @@ export function CaptionScenesView({
                 options={bgOptions}
                 value={style.bg}
                 ariaLabel={t('captions.bg')}
-                onChange={(v) => patchStyle({ bg: v })}
+                onChange={(v) => patchStyle({ bg: v, opacity: null })}
               />
             </div>
             <div>

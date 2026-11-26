@@ -62,20 +62,27 @@ export function HomeView({
   onOpenSettings,
   onOpenKnowledge,
 }: HomeViewProps) {
-  const [picker, setPicker] = useState<'spoken' | 'shown' | 'topics' | null>(null);
+  const [picker, setPicker] = useState<'languages' | 'topics' | null>(null);
   const { setup, devices, languages, unmoved } = state;
   const recording = session !== null;
 
-  const remainingFor = (field: 'spoken' | 'shown') =>
-    languages.filter((lang) => !setup[field].includes(lang));
+  // Plan B: unified single language list drives both recognition hints (spoken) and live captions (shown).
+  const activeLanguages = (setup.shown.length > 0 ? setup.shown : setup.spoken).slice(
+    0,
+    MAX_CAPTION_COLUMNS,
+  );
+  const remainingLanguages = languages.filter((lang) => !activeLanguages.includes(lang));
+  const langsAtCap = activeLanguages.length >= MAX_CAPTION_COLUMNS;
 
-  const removeLang = (field: 'spoken' | 'shown', lang: string) => {
-    onSetup({ ...setup, [field]: setup[field].filter((x) => x !== lang) });
+  const removeLang = (lang: string) => {
+    const next = activeLanguages.filter((x) => x !== lang);
+    onSetup({ ...setup, spoken: next, shown: next });
   };
 
-  const addLang = (field: 'spoken' | 'shown', lang: string) => {
-    if (field === 'shown' && setup.shown.length >= MAX_CAPTION_COLUMNS) return;
-    onSetup({ ...setup, [field]: [...setup[field], lang] });
+  const addLang = (lang: string) => {
+    if (langsAtCap || activeLanguages.includes(lang)) return;
+    const next = [...activeLanguages, lang];
+    onSetup({ ...setup, spoken: next, shown: next });
     setPicker(null);
   };
 
@@ -95,7 +102,6 @@ export function HomeView({
     setPicker(null);
   };
 
-  const shownAtCap = setup.shown.length >= MAX_CAPTION_COLUMNS;
   const moveOld = progress.move_old;
   const movePct = moveOld && moveOld.of > 0 ? Math.min(100, Math.round((moveOld.done / moveOld.of) * 100)) : 0;
 
@@ -120,77 +126,38 @@ export function HomeView({
       )}
 
       <div className="setup">
-        <span className="set-k">{t('setup.spoken')}</span>
+        <span className="set-k">{t('s.language')}</span>
         <div className="set-v">
-          {setup.spoken.map((lang) => (
+          {activeLanguages.map((lang) => (
             <Pill
               key={lang}
               active
               aria-label={t('remove.one', langName(lang, lang))}
-              onClick={() => removeLang('spoken', lang)}
+              onClick={() => removeLang(lang)}
             >
               {langName(lang, lang)}
               <Icon name="x" size="s" />
             </Pill>
           ))}
-          {remainingFor('spoken').length > 0 && (
+          {!langsAtCap && remainingLanguages.length > 0 && (
             <Pill
               add
-              aria-label={t('lang.add', t('setup.spoken'))}
-              onClick={() => setPicker((prev) => (prev === 'spoken' ? null : 'spoken'))}
+              aria-label={t('lang.add', t('s.language'))}
+              onClick={() => setPicker((prev) => (prev === 'languages' ? null : 'languages'))}
             >
               <Icon name="plus" size="s" />
             </Pill>
           )}
-          {picker === 'spoken' && (
+          {langsAtCap && <span className="k">{t('code.captions.columns')}</span>}
+          {picker === 'languages' && !langsAtCap && (
             <div className="pop menu" role="menu">
-              {remainingFor('spoken').map((lang) => (
+              {remainingLanguages.map((lang) => (
                 <button
                   key={lang}
                   type="button"
                   role="menuitem"
                   className="menu-i"
-                  onClick={() => addLang('spoken', lang)}
-                >
-                  {langName(lang, lang)}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <span className="set-k">{t('setup.shown')}</span>
-        <div className="set-v">
-          {setup.shown.map((lang) => (
-            <Pill
-              key={lang}
-              active
-              aria-label={t('remove.one', langName(lang, lang))}
-              onClick={() => removeLang('shown', lang)}
-            >
-              {langName(lang, lang)}
-              <Icon name="x" size="s" />
-            </Pill>
-          ))}
-          {!shownAtCap && remainingFor('shown').length > 0 && (
-            <Pill
-              add
-              aria-label={t('lang.add', t('setup.shown'))}
-              onClick={() => setPicker((prev) => (prev === 'shown' ? null : 'shown'))}
-            >
-              <Icon name="plus" size="s" />
-            </Pill>
-          )}
-          {shownAtCap && <span className="k">{t('code.captions.columns')}</span>}
-          {picker === 'shown' && !shownAtCap && (
-            <div className="pop menu" role="menu">
-              {remainingFor('shown').map((lang) => (
-                <button
-                  key={lang}
-                  type="button"
-                  role="menuitem"
-                  className="menu-i"
-                  onClick={() => addLang('shown', lang)}
+                  onClick={() => addLang(lang)}
                 >
                   {langName(lang, lang)}
                 </button>

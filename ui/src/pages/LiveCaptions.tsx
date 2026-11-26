@@ -38,11 +38,13 @@ function prefersReducedMotion(): boolean {
 export type LiveCaptionsProps = {
   columns: readonly Column[];
   layout: CaptionLayout;
+  /** Optional canvas-driven override for how many finished lines to keep per column. */
+  keepLines?: number;
   onReconnect?: () => void;
 };
 
 /** Reusable multi-column progressive caption display with per-column health & reconnect (LivePage, CaptionsWindow, ViewerPage). */
-export function LiveCaptions({ columns, layout, onReconnect }: LiveCaptionsProps) {
+export function LiveCaptions({ columns, layout, keepLines, onReconnect }: LiveCaptionsProps) {
   const reduced = prefersReducedMotion();
   const lastMarksRef = useRef<Map<string, RevealMark>>(new Map());
   const [now, setNow] = useState<number>(() => performance.now());
@@ -92,7 +94,7 @@ export function LiveCaptions({ columns, layout, onReconnect }: LiveCaptionsProps
     );
   }
 
-  const keep = KEEP_LINES_BY_LAYOUT[layout];
+  const keep = keepLines ?? KEEP_LINES_BY_LAYOUT[layout];
 
   return (
     <section className={`caps ${layout}`}>

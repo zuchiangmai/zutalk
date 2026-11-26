@@ -6,7 +6,7 @@ export type Route =
   | { page: 'host' }
   | { page: 'live' }
   | { page: 'result'; id: string; hostEvent?: HostEvent }
-  | { page: 'reader'; id: string; tab?: 'transcript' | 'notes'; take?: number; compare?: boolean; lineKey?: string }
+  | { page: 'reader'; id: string; tab?: 'transcript' | 'notes'; take?: number; lineKey?: string }
   | { page: 'library'; month?: string | null }
   | { page: 'settings' }
   | { page: 'knowledge'; topicId?: string }

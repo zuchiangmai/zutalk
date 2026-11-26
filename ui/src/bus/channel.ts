@@ -40,6 +40,23 @@ export type NoticeItem = {
 export type ThemePref = 'system' | 'light' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
 
+/** Inline loading/error state for city calendar fetches (`Command::City`). */
+export type CityLoadState = {
+  status: 'idle' | 'loading' | 'error';
+  address: string | null;
+  error: string | null;
+};
+
+const IDLE_CITY_LOAD: CityLoadState = { status: 'idle', address: null, error: null };
+
+const CITY_CALENDAR_ERROR_CODES = new Set([
+  'city.address',
+  'city.unknown',
+  'city.unreachable',
+  'city.busy',
+  'city.deny',
+]);
+
 export type Bus = {
   send(command: Command): Promise<void>;
   query?(query: Query): Promise<QueryReply>;
@@ -84,6 +101,7 @@ const initialThemePref = loadThemePref();
 const themeCell = createCell<ThemePref>(initialThemePref);
 const resolvedThemeCell = createCell<ResolvedTheme>(resolveTheme(initialThemePref));
 const overlayCell = createCell<boolean>(false);
+const cityLoadCell = createCell<CityLoadState>(IDLE_CITY_LOAD);
 
 export const stateSource: Source<State | null> = stateCell;
 export const frameSource: Source<Frame | null> = frameCell;
@@ -96,6 +114,15 @@ export const noticesSource: Source<NoticeItem[]> = noticesCell;
 export const themeSource: Source<ThemePref> = themeCell;
 export const resolvedThemeSource: Source<ResolvedTheme> = resolvedThemeCell;
 export const overlaySource: Source<boolean> = overlayCell;
+export const cityLoadSource: Source<CityLoadState> = cityLoadCell;
+
+export function beginCityLoad(address: string): void {
+  cityLoadCell.set({ status: 'loading', address: address.trim(), error: null });
+}
+
+export function failCityLoad(address: string, error: string): void {
+  cityLoadCell.set({ status: 'error', address: address.trim(), error });
+}
 
 let noticeSeq = 0;
 
@@ -248,8 +275,16 @@ export function take(event: Event): void {
       applySignal(signal);
     }
   } else if (event.kind === 'Invalidate') {
+    if (event.is.view === 'Calendar') {
+      cityLoadCell.set(IDLE_CITY_LOAD);
+    }
     queryCache.invalidate(event.is);
   } else if (event.kind === 'Notice') {
+    if (CITY_CALENDAR_ERROR_CODES.has(event.is)) {
+      cityLoadCell.update((prev) =>
+        prev.status === 'loading' ? { status: 'error', address: prev.address, error: event.is } : prev,
+      );
+    }
     say(event.is);
   }
 }
@@ -358,6 +393,7 @@ export function resetChannel(): void {
   statsCell.set(null);
   noticesCell.set([]);
   overlayCell.set(false);
+  cityLoadCell.set(IDLE_CITY_LOAD);
   queryCache.clear();
   resetIdentitySheet();
   resetRoute();

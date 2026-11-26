@@ -18,9 +18,7 @@ use crate::rt::supervise::Tree;
 use crate::view::index::{
     LibraryFilter, LibraryPage, LibraryRow, LibrarySummary, Reader, SearchResult,
 };
-use crate::view::transcript::{
-    self, CompareChunk, TRANSCRIPT_CHUNK_LINES, TranscriptChunk, compare_lines, slice_chunk,
-};
+use crate::view::transcript::{self, TRANSCRIPT_CHUNK_LINES, TranscriptChunk, slice_chunk};
 use rusqlite::InterruptHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -151,7 +149,6 @@ pub enum QuerySlot {
     Library,
     Recording,
     Transcript,
-    Compare,
     Knowledge,
     Other,
 }
@@ -197,12 +194,6 @@ pub enum Query {
         take: Option<u32>,
         chunk: u32,
     },
-    Compare {
-        id: String,
-        take_a: u32,
-        take_b: u32,
-        chunk: u32,
-    },
     Glossary,
     Topics,
     Topic {
@@ -222,7 +213,6 @@ impl Query {
             Query::Search { .. } => "search",
             Query::Recording { .. } => "recording",
             Query::Transcript { .. } => "transcript",
-            Query::Compare { .. } => "compare",
             Query::Glossary => "glossary",
             Query::Topics => "topics",
             Query::Topic { .. } => "topic",
@@ -240,7 +230,6 @@ impl Query {
             Query::Search { .. } => QuerySlot::Search,
             Query::Recording { .. } => QuerySlot::Recording,
             Query::Transcript { .. } => QuerySlot::Transcript,
-            Query::Compare { .. } => QuerySlot::Compare,
             Query::Topic { .. } => QuerySlot::Knowledge,
             Query::Glossary | Query::Topics | Query::Calendar | Query::Outbound => QuerySlot::Other,
         }
@@ -257,7 +246,6 @@ pub enum QueryValue {
     Search(SearchResult),
     Recording(Option<Box<RecordingView>>),
     Transcript(TranscriptChunk),
-    Compare(CompareChunk),
     Glossary(Vec<Term>),
     Topics(Vec<TopicSummary>),
     Topic(Option<Topic>),
@@ -621,7 +609,6 @@ fn execute_blocking(
             | Query::LibraryRecent { .. }
             | Query::Search { .. }
             | Query::Transcript { .. }
-            | Query::Compare { .. }
             | Query::Outbound
     );
     let reader = if needs_reader { open_reader(&src, &cancel, &interrupt)? } else { None };
@@ -754,38 +741,6 @@ fn execute_blocking(
             };
             let rows = reply.lines.len();
             Ok((QueryValue::Transcript(reply), rows))
-        }
-        Query::Compare { id, take_a, take_b, chunk } => {
-            let reply = if let Some(r) = reader {
-                let total_b = r.take_line_count(&id, take_b)?;
-                let offset = chunk.saturating_mul(TRANSCRIPT_CHUNK_LINES as u32);
-                let lines_b =
-                    r.take_lines_slice(&id, take_b, offset, TRANSCRIPT_CHUNK_LINES as u32)?;
-                let lines_a = if lines_b.is_empty() {
-                    if chunk == 0 {
-                        r.take_lines_slice(&id, take_a, 0, TRANSCRIPT_CHUNK_LINES as u32)?
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    let has_time = lines_b.iter().any(|(_, s)| s.line.t0 > 0 || s.line.t1 > 0);
-                    if has_time {
-                        let min_t0 = lines_b.iter().map(|(_, s)| s.line.t0).min().unwrap_or(0);
-                        let max_t1 = lines_b.iter().map(|(_, s)| s.line.t1).max().unwrap_or(0);
-                        r.take_lines_in_time(&id, take_a, min_t0, max_t1)?
-                    } else {
-                        r.take_lines_slice(&id, take_a, offset, TRANSCRIPT_CHUNK_LINES as u32)?
-                    }
-                };
-                let rows = compare_lines(&lines_a, &lines_b);
-                let total_chunks =
-                    transcript::total_chunks(total_b).max(u32::from(!rows.is_empty()));
-                CompareChunk { id, take_a, take_b, chunk, total_chunks, rows }
-            } else {
-                CompareChunk { id, take_a, take_b, chunk, total_chunks: 0, rows: Vec::new() }
-            };
-            let rows = reply.rows.len();
-            Ok((QueryValue::Compare(reply), rows))
         }
         Query::Glossary => {
             let mut terms = match &src.shelf {

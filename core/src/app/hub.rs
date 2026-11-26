@@ -8,8 +8,8 @@ pub(crate) use crate::app::core::Voice;
 pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
-    AuthFlow, CaptionScene, Change, Command, Device, From, HostState, Level as SoundLevel,
-    LocalShelf, Mode as LayoutMode, Quota, Session, Sound, State, Status,
+    AuthFlow, Change, Command, Device, From, HostState, Level as SoundLevel, LocalShelf, Quota,
+    Session, Sound, State, Status,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -206,7 +206,8 @@ pub(crate) struct Hub {
     recording: Option<(String, watch::Sender<Mode>, watch::Sender<u64>)>,
     refining: BTreeSet<String>,
     filing: BTreeSet<String>,
-    moving: bool, // the 0.8 library is being moved in
+    moving: bool,             // the 0.8 library is being moved in
+    shelf_by: Option<String>, // active shelf DID (did:zu when signed in, did:key when local)
     dirty: u64,
     refresh_in_flight: Option<u64>,
     refresh_synced: u64,
@@ -266,6 +267,7 @@ impl Hub {
             refining: BTreeSet::new(),
             filing: BTreeSet::new(),
             moving: false,
+            shelf_by: None,
             dirty: 0,
             refresh_in_flight: None,
             refresh_synced: 0,
@@ -442,6 +444,7 @@ impl Hub {
         }
         self.set_auth(AuthEvent::Completed, "signed");
         self.state.me = out.me;
+        self.shelf_by = out.shelf_by;
         self.state.handle = out.handle;
         if self.state.me.is_none() {
             self.state.quota = None;
@@ -603,7 +606,7 @@ impl Hub {
             }
             Msg::Moved(by, skipped) => {
                 self.moving = false;
-                if self.state.me.as_deref() != Some(by.as_str()) {
+                if self.shelf_by.as_deref() != Some(by.as_str()) {
                     let _ = skipped; // dropped: stale migration result from previous identity
                     self.migrate();
                 } else {
@@ -652,20 +655,6 @@ impl Hub {
                 }
                 setup.caption = setup.caption.normalized();
                 setup.topics = topic::normalize_selected_topics(setup.topics);
-                if setup.caption.scene == self.state.setup.caption.scene
-                    && setup.mode != self.state.setup.mode
-                {
-                    setup.caption.scene = match setup.mode {
-                        LayoutMode::Conversation => CaptionScene::Facing,
-                        LayoutMode::Audience => CaptionScene::SelfView,
-                    };
-                }
-                setup.mode = match setup.caption.scene {
-                    CaptionScene::Facing => LayoutMode::Conversation,
-                    CaptionScene::SelfView | CaptionScene::Band | CaptionScene::Stage => {
-                        LayoutMode::Audience
-                    }
-                };
                 // Apply immediately in memory so the next Start uses it; desk persists it.
                 self.state.setup = setup.clone();
                 self.work.save_setup(setup)?;
@@ -1033,15 +1022,15 @@ impl Hub {
         }
     }
 
-    /// The library the 0.8 app left here comes to whoever is signed in: once, on its own.
-    /// Never moved to the device's local identity because `moved.json` records one recipient
-    /// once (`docs/build/phases/P1.md` §3.14.8).
+    /// The library the 0.8 app left here moves in on first boot without requiring `did:zu`
+    /// sign-in: onto the active local `did:key` shelf (later adopted cleanly on sign-in) or
+    /// directly onto the signed-in `did:zu` shelf. `moved.json` records the single first recipient.
     fn migrate(&mut self) {
-        let Some(me) = self.state.me.clone() else { return };
+        let Some(by) = self.shelf_by.clone() else { return };
         if self.moving {
             return;
         }
-        if self.work.migrate(me) {
+        if self.work.migrate(by) {
             self.moving = true;
         }
     }

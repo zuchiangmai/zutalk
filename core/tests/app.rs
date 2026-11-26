@@ -2869,23 +2869,29 @@ async fn setup_caption_prefs_and_geometry_persist_per_scene_in_settings_json() {
     assert_eq!(booted.setup.spoken, vec!["en"]);
     assert_eq!(booted.setup.caption.scene, CaptionScene::SelfView);
     assert!(booted.setup.caption.scenes.band.always_on_top);
-    assert!(booted.setup.caption.scenes.band.click_through);
+    assert!(booted.setup.caption.scenes.band.top);
+    assert!(!booted.setup.caption.scenes.band.click_through);
     assert!(booted.setup.caption.scenes.stage.fullscreen);
     assert_eq!(booted.setup.city, None);
 
-    // 2. Switching to Facing syncs `mode = Conversation`, clamps out-of-range lines, and stores city.
+    // 2. Switching scene and mode independently clamps lines, font_px, opacity, and stores city.
     let mut next = booted.setup.clone();
-    next.caption.scene = CaptionScene::Facing;
-    next.caption.scenes.facing.lines = 99;
-    next.caption.scenes.facing.size = CaptionSize::Large;
-    next.caption.scenes.facing.bg = CaptionBg::Clear;
+    next.mode = Mode::Conversation;
+    next.caption.scene = CaptionScene::Band;
+    next.caption.scenes.band.lines = 99;
+    next.caption.scenes.band.font_px = Some(999);
+    next.caption.scenes.band.opacity = Some(5);
+    next.caption.scenes.band.size = CaptionSize::Large;
+    next.caption.scenes.band.bg = CaptionBg::Clear;
     next.city = Some("zuchiangmai.com".into());
     app.send(Command::Setup { setup: next });
-    let after_setup = app.until(|s| s.setup.caption.scene == CaptionScene::Facing).await;
+    let after_setup = app.until(|s| s.setup.caption.scene == CaptionScene::Band).await;
     assert_eq!(after_setup.setup.mode, Mode::Conversation);
-    assert_eq!(after_setup.setup.caption.scenes.facing.lines, 3);
-    assert_eq!(after_setup.setup.caption.scenes.facing.size, CaptionSize::Large);
-    assert_eq!(after_setup.setup.caption.scenes.facing.bg, CaptionBg::Clear);
+    assert_eq!(after_setup.setup.caption.scenes.band.lines, 8);
+    assert_eq!(after_setup.setup.caption.scenes.band.font_px, Some(160));
+    assert_eq!(after_setup.setup.caption.scenes.band.opacity, Some(20));
+    assert_eq!(after_setup.setup.caption.scenes.band.size, CaptionSize::Large);
+    assert_eq!(after_setup.setup.caption.scenes.band.bg, CaptionBg::Clear);
     assert_eq!(after_setup.setup.city.as_deref(), Some("zuchiangmai.com"));
 
     // 3. CaptionGeometry updates only the named scene's geometry (clamping degenerate values)
@@ -2912,7 +2918,7 @@ async fn setup_caption_prefs_and_geometry_persist_per_scene_in_settings_json() {
         after_geo.setup.caption.scenes.self_view.geometry,
         Some(WindowRect { x: 10, y: 20, width: 240, height: 80 })
     );
-    assert_eq!(after_geo.setup.caption.scenes.facing.geometry, None);
+    assert_eq!(after_geo.setup.caption.scenes.stage.geometry, None);
     assert_eq!(after_geo.setup.city.as_deref(), Some("zuchiangmai.com"));
 
     // Wait for desk to finish flushing settings.json before restarting.

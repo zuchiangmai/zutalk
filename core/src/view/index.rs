@@ -299,17 +299,6 @@ impl Reader {
         query_take_lines_slice(&self.0, id, take, offset, limit)
     }
 
-    /// Fetches lines of `(id, take)` overlapping `[t0_ms, t1_ms]` using `idx_take_lines_time`.
-    pub fn take_lines_in_time(
-        &self,
-        id: &str,
-        take: u32,
-        t0_ms: u32,
-        t1_ms: u32,
-    ) -> Result<Vec<(String, Said)>, &'static str> {
-        query_take_lines_in_time(&self.0, id, take, t0_ms, t1_ms)
-    }
-
     /// Looks up one recording's projected summary row.
     pub fn recording_row(&self, id: &str) -> Result<Option<LibraryRow>, &'static str> {
         query_recording_row(&self.0, id)
@@ -626,16 +615,6 @@ impl Index {
         limit: u32,
     ) -> Result<Vec<(String, Said)>, &'static str> {
         query_take_lines_slice(&self.conn, id, take, offset, limit)
-    }
-
-    pub fn take_lines_in_time(
-        &self,
-        id: &str,
-        take: u32,
-        t0_ms: u32,
-        t1_ms: u32,
-    ) -> Result<Vec<(String, Said)>, &'static str> {
-        query_take_lines_in_time(&self.conn, id, take, t0_ms, t1_ms)
     }
 
     pub fn recording_row(&self, id: &str) -> Result<Option<LibraryRow>, &'static str> {
@@ -1298,34 +1277,6 @@ fn query_take_lines_slice(
     let rows = stmt
         .query_map(
             params![id, i64::from(take), i64::from(limit), i64::from(offset)],
-            said_from_sqlite,
-        )
-        .map_err(|_| "index")?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|_| "index")?);
-    }
-    Ok(out)
-}
-
-fn query_take_lines_in_time(
-    conn: &Connection,
-    id: &str,
-    take: u32,
-    t0_ms: u32,
-    t1_ms: u32,
-) -> Result<Vec<(String, Said)>, &'static str> {
-    let mut stmt = conn
-        .prepare_cached(
-            "SELECT line_key, t0, t1, speaker, language, text, translations_json, via_json, incomplete \
-             FROM take_lines \
-             WHERE recording_id = ?1 AND take = ?2 AND t0 <= ?3 AND t1 >= ?4 \
-             ORDER BY seq ASC",
-        )
-        .map_err(|_| "index")?;
-    let rows = stmt
-        .query_map(
-            params![id, i64::from(take), i64::from(t1_ms), i64::from(t0_ms)],
             said_from_sqlite,
         )
         .map_err(|_| "index")?;

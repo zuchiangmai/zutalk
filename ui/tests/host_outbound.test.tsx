@@ -9,7 +9,8 @@ import type { RecordingView } from '$proto/RecordingView';
 import type { Session } from '$proto/Session';
 import type { State } from '$proto/State';
 import { EMPTY } from '../dev/mock';
-import { resetChannel, startBus } from '../src/bus/channel';
+import { send } from '../src/bus/act';
+import { cityLoadSource, resetChannel, startBus } from '../src/bus/channel';
 import {
   estimateAudioMb,
   FILE_GRACE_MS,
@@ -21,6 +22,7 @@ import {
 } from '../src/bus/filing';
 import { go, leavingHostArm, type Route } from '../src/bus/route';
 import { ui } from '../src/bus/words';
+import { partitionCityEvents, RECENT_EVENT_WINDOW_MS } from '../src/pages/CityEventPicker';
 import { FileArchiveView } from '../src/pages/FileArchiveCard';
 import { HostView } from '../src/pages/HostPage';
 import { LiveView } from '../src/pages/LivePage';
@@ -728,5 +730,143 @@ describe('P5-04 hosting, filing, and outbound flows', () => {
     expect(screen.getByText('7 watching')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Stop outbound' }));
     expect(onStopOutbound).toHaveBeenCalledTimes(1);
+  });
+
+  it('CityEventPicker_opens_searchable_dropdown_with_status_and_selection', () => {
+    const now = 1_760_000_000_000;
+    const cal: Calendar = {
+      address: 'zuchiangmai.com',
+      did: 'did:zu:zcm',
+      events: [
+        { path: 'ev/past-old', title: 'Old retro', start: now - RECENT_EVENT_WINDOW_MS - 10_000_000 },
+        { path: 'ev/past-recent', title: 'Yesterday salon', start: now - RECENT_EVENT_WINDOW_MS - 1_000_000 },
+        { path: 'ev/now', title: 'Live town hall', start: now + 60_000 },
+        { path: 'ev/next', title: 'Tomorrow workshop', start: now + 86_400_000 },
+      ],
+    };
+
+    const grouped = partitionCityEvents(cal.events, now);
+    expect(grouped.upcoming.map((e) => e.path)).toEqual(['ev/now', 'ev/next']);
+    expect(grouped.past.map((e) => e.path)).toEqual(['ev/past-recent', 'ev/past-old']);
+
+    const onArm = vi.fn();
+    const onLoadCity = vi.fn();
+    const onSetup = vi.fn();
+    const onToggleCaptionsWindow = vi.fn();
+    const armedState: State = {
+      ...EMPTY,
+      me: 'did:zu:host',
+      languages: ['zh', 'en', 'th', 'ja'],
+      setup: { ...EMPTY.setup, spoken: ['zh', 'en'], shown: ['zh', 'en'] },
+      host: { is: 'Armed', event: null, captions: true, link: null, viewers: 0 },
+    };
+
+    const { rerender } = render(
+      <HostView
+        state={armedState}
+        calendar={cal}
+        recording={false}
+        nowMs={now}
+        onLoadCity={onLoadCity}
+        onArm={onArm}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onCopyLink={vi.fn()}
+        onSetup={onSetup}
+        onToggleCaptionsWindow={onToggleCaptionsWindow}
+      />,
+    );
+
+    // Open event dropdown and verify all 4 events + Nearest badge + search filter work.
+    fireEvent.click(screen.getByRole('button', { name: 'Event' }));
+    expect(screen.getByRole('listbox', { name: 'Event' })).toBeTruthy();
+    expect(screen.getByText('4 events')).toBeTruthy();
+    expect(screen.getByText('Nearest')).toBeTruthy();
+    expect(screen.getByText('Upcoming & recent')).toBeTruthy();
+    expect(screen.getByText('Earlier events')).toBeTruthy();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Filter events…' }), {
+      target: { value: 'salon' },
+    });
+    expect(screen.getByRole('option', { name: /Yesterday salon/ })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: /Tomorrow workshop/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('option', { name: /Yesterday salon/ }));
+    expect(onArm).toHaveBeenCalledWith(
+      {
+        city: 'zuchiangmai.com',
+        event: 'ev/past-recent',
+        title: 'Yesterday salon',
+        start: now - RECENT_EVENT_WINDOW_MS - 1_000_000,
+      },
+      true,
+    );
+
+    // Refresh button reloads the current city calendar.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh calendar' }));
+    expect(onLoadCity).toHaveBeenCalledWith('zuchiangmai.com');
+
+    // Interactive setup controls on HostView update sound & local caption window.
+    fireEvent.click(screen.getByRole('button', { name: 'Computer sound' }));
+    expect(onSetup).toHaveBeenCalledWith({ ...armedState.setup, sound: 'System' });
+    fireEvent.click(screen.getByRole('button', { name: 'Open caption window' }));
+    expect(onToggleCaptionsWindow).toHaveBeenCalledTimes(1);
+
+    // Inline error state with Retry button.
+    rerender(
+      <HostView
+        state={armedState}
+        calendar={null}
+        recording={false}
+        cityLoad={{ status: 'error', address: 'bad.example', error: 'city.unknown' }}
+        nowMs={now}
+        onLoadCity={onLoadCity}
+        onArm={onArm}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onCopyLink={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('No city answers at this address')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onLoadCity).toHaveBeenCalledWith('bad.example');
+  });
+
+  it('cityLoadSource_tracks_loading_invalidate_and_city_notice_errors', async () => {
+    let emit: (e: import('$proto/Event').Event) => void = () => {};
+    const stop = startBus({
+      send: async () => {},
+      listen: (on) => {
+        emit = on;
+        return () => {};
+      },
+    });
+    try {
+      await send({ do: 'City', address: 'zuchiangmai.com' });
+      expect(cityLoadSource.getSnapshot()).toEqual({
+        status: 'loading',
+        address: 'zuchiangmai.com',
+        error: null,
+      });
+
+      emit({ kind: 'Notice', is: 'city.unreachable' });
+      expect(cityLoadSource.getSnapshot()).toEqual({
+        status: 'error',
+        address: 'zuchiangmai.com',
+        error: 'city.unreachable',
+      });
+
+      await send({ do: 'City', address: 'zuchiangmai.com' });
+      expect(cityLoadSource.getSnapshot().status).toBe('loading');
+
+      emit({ kind: 'Invalidate', is: { view: 'Calendar', key: null, version: 2 } });
+      expect(cityLoadSource.getSnapshot()).toEqual({
+        status: 'idle',
+        address: null,
+        error: null,
+      });
+    } finally {
+      stop();
+    }
   });
 });

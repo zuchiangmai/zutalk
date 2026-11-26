@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { VList, type VListHandle } from 'virtua';
-import type { CompareChunk } from '$proto/CompareChunk';
-import type { CompareRow } from '$proto/CompareRow';
 import type { Note } from '$proto/Note';
 import type { Query } from '$proto/Query';
 import type { Said } from '$proto/Said';
@@ -63,9 +61,6 @@ type SpeakerEditTarget = {
 export type TranscriptListProps = {
   id: string;
   take: number;
-  compare: boolean;
-  compareTakeA?: number;
-  expectedCompareLines?: number;
   speakers: Record<string, string>;
   notes: readonly Note[];
   activeLangs: readonly string[];
@@ -80,13 +75,10 @@ export type TranscriptListProps = {
   onLoadedLinesChange?: (lines: [string, Said][]) => void;
 };
 
-/** Virtualized 64-line chunked transcript and Compare viewer (I8: DOM count bounded by viewport). */
+/** Virtualized 64-line chunked transcript viewer (I8: DOM count bounded by viewport). */
 export function TranscriptList({
   id,
   take,
-  compare,
-  compareTakeA = 0,
-  expectedCompareLines = 0,
   speakers,
   notes,
   activeLangs,
@@ -154,7 +146,7 @@ export function TranscriptList({
     setRememberWritten('');
   };
 
-  // Reset range and edit targets when switching recording, take, or compare mode.
+  // Reset range and edit targets when switching recording or take.
   useEffect(() => {
     setVisibleRange({ start: 0, end: INITIAL_VISIBLE_ROWS });
     setTotalChunksKnown(1);
@@ -166,7 +158,7 @@ export function TranscriptList({
     setRememberSaid('');
     setRememberLang('');
     setRememberWritten('');
-  }, [id, take, compare, compareTakeA]);
+  }, [id, take]);
 
   const neededChunks = useMemo(() => {
     const chunks = chunksForRange(visibleRange.start, visibleRange.end, totalChunksKnown);
@@ -175,20 +167,11 @@ export function TranscriptList({
   }, [visibleRange.start, visibleRange.end, totalChunksKnown]);
 
   const transcriptQueries = useMemo<readonly Extract<Query, { view: 'Transcript' }>[]>(
-    () => (compare ? [] : neededChunks.map((chunk) => ({ view: 'Transcript', id, take, chunk }))),
-    [compare, neededChunks, id, take],
-  );
-
-  const compareQueries = useMemo<readonly Extract<Query, { view: 'Compare' }>[]>(
-    () =>
-      compare
-        ? neededChunks.map((chunk) => ({ view: 'Compare', id, take_a: compareTakeA, take_b: take, chunk }))
-        : [],
-    [compare, neededChunks, id, compareTakeA, take],
+    () => neededChunks.map((chunk) => ({ view: 'Transcript', id, take, chunk })),
+    [neededChunks, id, take],
   );
 
   const transcriptStates = useQueries(transcriptQueries);
-  const compareStates = useQueries(compareQueries);
 
   const transcriptMap = useMemo(() => {
     const map = new Map<number, TranscriptChunk>();
@@ -199,34 +182,19 @@ export function TranscriptList({
     return map;
   }, [transcriptQueries, transcriptStates]);
 
-  const compareMap = useMemo(() => {
-    const map = new Map<number, CompareChunk>();
-    for (let i = 0; i < compareQueries.length; i++) {
-      const data = compareStates[i]?.data;
-      if (data) map.set(compareQueries[i].chunk, data);
-    }
-    return map;
-  }, [compareQueries, compareStates]);
-
   const chunkErrorMap = useMemo(() => {
     const map = new Map<number, string>();
-    const queries = compare ? compareQueries : transcriptQueries;
-    const states = compare ? compareStates : transcriptStates;
-    for (let i = 0; i < queries.length; i++) {
-      const st = states[i];
+    for (let i = 0; i < transcriptQueries.length; i++) {
+      const st = transcriptStates[i];
       if (st?.status === 'error' && st.error) {
-        map.set(queries[i].chunk, st.error);
+        map.set(transcriptQueries[i].chunk, st.error);
       }
     }
     return map;
-  }, [compare, compareQueries, compareStates, transcriptQueries, transcriptStates]);
+  }, [transcriptQueries, transcriptStates]);
 
   const chunk0Transcript = transcriptMap.get(0) ?? null;
-  const chunk0Compare = compareMap.get(0) ?? null;
-
-  const actualTotalChunks = compare
-    ? (chunk0Compare?.total_chunks ?? 0)
-    : (chunk0Transcript?.total_chunks ?? 0);
+  const actualTotalChunks = chunk0Transcript?.total_chunks ?? 0;
 
   useEffect(() => {
     if (actualTotalChunks > 0 && actualTotalChunks !== totalChunksKnown) {
@@ -234,27 +202,11 @@ export function TranscriptList({
     }
   }, [actualTotalChunks, totalChunksKnown]);
 
-  const totalLines = useMemo(() => {
-    if (compare) {
-      if (!chunk0Compare || chunk0Compare.total_chunks <= 0) return 0;
-      if (chunk0Compare.total_chunks === 1) return chunk0Compare.rows.length;
-      const lastIdx = chunk0Compare.total_chunks - 1;
-      const lastChunk = compareMap.get(lastIdx);
-      if (lastChunk) {
-        return lastIdx * TRANSCRIPT_CHUNK_LINES + lastChunk.rows.length;
-      }
-      const minTotal = lastIdx * TRANSCRIPT_CHUNK_LINES + 1;
-      const maxTotal = chunk0Compare.total_chunks * TRANSCRIPT_CHUNK_LINES;
-      return expectedCompareLines > 0
-        ? Math.min(maxTotal, Math.max(minTotal, expectedCompareLines))
-        : maxTotal;
-    }
-    return chunk0Transcript?.total_lines ?? 0;
-  }, [compare, expectedCompareLines, chunk0Compare, compareMap, chunk0Transcript]);
+  const totalLines = chunk0Transcript?.total_lines ?? 0;
 
   // Report currently loaded lines so Copy can format loaded text without fetching all chunks.
   useEffect(() => {
-    if (!onLoadedLinesChange || compare) return;
+    if (!onLoadedLinesChange) return;
     const loaded: [string, Said][] = [];
     const sortedChunks = [...transcriptMap.keys()].sort((a, b) => a - b);
     for (const c of sortedChunks) {
@@ -262,7 +214,7 @@ export function TranscriptList({
       if (chunk) loaded.push(...chunk.lines);
     }
     onLoadedLinesChange(loaded);
-  }, [transcriptMap, compare, onLoadedLinesChange]);
+  }, [transcriptMap, onLoadedLinesChange]);
 
   // Scroll to target row when requested (e.g., jumping from a timestamped note).
   useEffect(() => {
@@ -322,8 +274,8 @@ export function TranscriptList({
     setEditingSpeaker(null);
   };
 
-  const initialState = compare ? compareStates[0] : transcriptStates[0];
-  const hasChunk0 = compare ? chunk0Compare !== null : chunk0Transcript !== null;
+  const initialState = transcriptStates[0];
+  const hasChunk0 = chunk0Transcript !== null;
 
   if (!hasChunk0) {
     if (initialState?.status === 'error') {
@@ -354,61 +306,6 @@ export function TranscriptList({
       {(_, index) => {
         const chunkIdx = Math.floor(index / TRANSCRIPT_CHUNK_LINES);
         const offset = index % TRANSCRIPT_CHUNK_LINES;
-
-        if (compare) {
-          const row: CompareRow | undefined = compareMap.get(chunkIdx)?.rows[offset];
-          if (!row) {
-            const errCode = chunkErrorMap.get(chunkIdx);
-            return (
-              <li key={index} data-row-index={index} className="tl-row">
-                <div className="who">
-                  <span className="num">…</span>
-                </div>
-                <div>
-                  <p className="k" role={errCode ? 'status' : undefined}>
-                    {errCode ? word('code', errCode) : t('reader.loading')}
-                  </p>
-                </div>
-              </li>
-            );
-          }
-          const lineKey = row.key_b ?? row.key_a ?? `cmp-${index}`;
-          const isHit = highlightLineKey !== null && highlightLineKey === lineKey;
-          return (
-            <li
-              key={index}
-              data-row-index={index}
-              data-line-key={lineKey}
-              className={`tl-row${isHit ? ' hit' : ''}`}
-            >
-              <div className="who">
-                {row.speaker && <b>{speakerLabel(row.speaker)}</b>}
-                <span className="num">{clock(row.t0)}</span>
-              </div>
-              <div>
-                <p className="said" lang={row.language}>
-                  {row.ops.map((op, opIdx) => {
-                    if (op.kind === 'Delete') {
-                      return (
-                        <del key={opIdx} className="diff-del">
-                          {op.text}
-                        </del>
-                      );
-                    }
-                    if (op.kind === 'Insert') {
-                      return (
-                        <mark key={opIdx} className="find">
-                          {op.text}
-                        </mark>
-                      );
-                    }
-                    return <span key={opIdx}>{op.text}</span>;
-                  })}
-                </p>
-              </div>
-            </li>
-          );
-        }
 
         const entry = transcriptMap.get(chunkIdx)?.lines[offset];
         if (!entry) {

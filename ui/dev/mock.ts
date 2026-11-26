@@ -2,8 +2,6 @@
 import type { Calendar } from '$proto/Calendar';
 import type { Column } from '$proto/Column';
 import type { Command } from '$proto/Command';
-import type { CompareRow } from '$proto/CompareRow';
-import type { DiffOp } from '$proto/DiffOp';
 import type { Event } from '$proto/Event';
 import type { Filing } from '$proto/Filing';
 import type { Level } from '$proto/Level';
@@ -45,7 +43,9 @@ export const DEFAULT_CAPTION_PREFS = {
     self_view: {
       lines: 2,
       size: 'Auto' as const,
+      font_px: null,
       bg: 'Half' as const,
+      opacity: null,
       light: false,
       sans: false,
       top: false,
@@ -58,20 +58,24 @@ export const DEFAULT_CAPTION_PREFS = {
     band: {
       lines: 2,
       size: 'Auto' as const,
+      font_px: null,
       bg: 'Solid' as const,
+      opacity: null,
       light: false,
       sans: false,
-      top: false,
+      top: true,
       always_on_top: true,
-      click_through: true,
+      click_through: false,
       auto_hide: false,
       fullscreen: false,
       geometry: null,
     },
     stage: {
       lines: 3,
-      size: 'Large' as const,
+      size: 'Auto' as const,
+      font_px: null,
       bg: 'Solid' as const,
+      opacity: null,
       light: false,
       sans: false,
       top: false,
@@ -79,19 +83,6 @@ export const DEFAULT_CAPTION_PREFS = {
       click_through: false,
       auto_hide: false,
       fullscreen: true,
-      geometry: null,
-    },
-    facing: {
-      lines: 2,
-      size: 'Auto' as const,
-      bg: 'Solid' as const,
-      light: false,
-      sans: false,
-      top: false,
-      always_on_top: false,
-      click_through: false,
-      auto_hide: false,
-      fullscreen: false,
       geometry: null,
     },
   },
@@ -145,27 +136,6 @@ function matchesFilter(r: LibraryRow, filter: LibraryFilter): boolean {
   if (filter.language && !r.spoken.includes(filter.language)) return false;
   if (filter.tag && !r.tags.some((t) => t.label === filter.tag)) return false;
   return true;
-}
-
-/** Minimal prefix/suffix character diff yielding Equal / Delete / Insert ops for mock Compare. */
-function diffOps(a: string, b: string): DiffOp[] {
-  if (a === b) return a ? [{ kind: 'Equal', text: a }] : [];
-  const ca = Array.from(a);
-  const cb = Array.from(b);
-  let start = 0;
-  while (start < ca.length && start < cb.length && ca[start] === cb[start]) start++;
-  let endA = ca.length;
-  let endB = cb.length;
-  while (endA > start && endB > start && ca[endA - 1] === cb[endB - 1]) {
-    endA--;
-    endB--;
-  }
-  const ops: DiffOp[] = [];
-  if (start > 0) ops.push({ kind: 'Equal', text: ca.slice(0, start).join('') });
-  if (endA > start) ops.push({ kind: 'Delete', text: ca.slice(start, endA).join('') });
-  if (endB > start) ops.push({ kind: 'Insert', text: cb.slice(start, endB).join('') });
-  if (endA < ca.length) ops.push({ kind: 'Equal', text: ca.slice(endA).join('') });
-  return ops;
 }
 
 const sayScript = (lang: string) => SCRIPT[lang] ?? SCRIPT.en;
@@ -777,13 +747,7 @@ export function mockBus(recording = false): Bus {
     },
     CaptionGeometry: (c) => {
       const key =
-        c.scene === 'SelfView'
-          ? 'self_view'
-          : c.scene === 'Band'
-            ? 'band'
-            : c.scene === 'Stage'
-              ? 'stage'
-              : 'facing';
+        c.scene === 'SelfView' ? 'self_view' : c.scene === 'Band' ? 'band' : 'stage';
       s.setup.caption.scenes[key].geometry = c.rect;
     },
     DestroyAudio: (c) => {
@@ -884,19 +848,25 @@ export function mockBus(recording = false): Bus {
       emitInvalidate('Recording', c.id);
     },
     City: (c) => {
-      const ev = (key: string, title: string, ago: number) => ({
+      const ev = (key: string, title: string, offsetMs: number) => ({
         path: `zu://did:zu:organizer/ev/event/${key}`,
         title,
-        start: Date.now() - ago,
+        start: Date.now() + offsetMs,
       });
       setTimeout(() => {
         city = {
           address: c.address,
           did: 'did:zu:cityexample',
-          events: [ev('k1', 'Quarterly review', 2 * HOUR_MS), ev('k2', 'Open mic', 50 * HOUR_MS)],
+          events: [
+            ev('k0', 'Town hall: next season plan', 26 * HOUR_MS),
+            ev('k1', 'Open mic: multilingual salon', HOUR_MS),
+            ev('k2', 'Community kitchen sync', -2 * HOUR_MS),
+            ev('k3', 'Quarterly review', -30 * HOUR_MS),
+            ev('k4', 'Reading circle: urban commons', -76 * HOUR_MS),
+          ],
         };
         emitInvalidate('Calendar');
-      }, 400);
+      }, 300);
     },
     File: (c) => {
       const title = city?.events.find((e) => e.path === c.event)?.title ?? '';
@@ -1071,50 +1041,6 @@ export function mockBus(recording = false): Bus {
               total_lines: all.length,
               total_chunks: totalChunks,
               lines: structuredClone(slice),
-            },
-          },
-        };
-      }
-
-      if (q.view === 'Compare') {
-        const rec = recs.find((r) => r.row.id === q.id);
-        const linesA = rec?.takes.get(q.take_a)?.lines ?? [];
-        const linesB = rec?.takes.get(q.take_b)?.lines ?? [];
-        const len = Math.max(linesA.length, linesB.length);
-        const allRows: CompareRow[] = [];
-        for (let i = 0; i < len; i++) {
-          const a = linesA[i];
-          const b = linesB[i];
-          const ref = b?.[1] ?? a?.[1];
-          if (!ref) continue;
-          const textA = a?.[1].text ?? '';
-          const textB = b?.[1].text ?? '';
-          allRows.push({
-            key_a: a?.[0] ?? null,
-            key_b: b?.[0] ?? null,
-            t0: ref.t0,
-            t1: ref.t1,
-            speaker: ref.speaker,
-            language: ref.language,
-            changed: textA !== textB,
-            text_a: textA,
-            text_b: textB,
-            ops: diffOps(textA, textB),
-          });
-        }
-        const totalChunks = allRows.length === 0 ? 0 : Math.ceil(allRows.length / MOCK_CHUNK_LINES);
-        const start = q.chunk * MOCK_CHUNK_LINES;
-        return {
-          version,
-          value: {
-            view: 'Compare',
-            data: {
-              id: q.id,
-              take_a: q.take_a,
-              take_b: q.take_b,
-              chunk: q.chunk,
-              total_chunks: totalChunks,
-              rows: allRows.slice(start, start + MOCK_CHUNK_LINES),
             },
           },
         };

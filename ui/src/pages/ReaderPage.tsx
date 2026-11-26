@@ -80,7 +80,6 @@ export type ReaderViewProps = {
   topics?: readonly TopicSummary[];
   initialTab?: 'transcript' | 'notes';
   initialTake?: number;
-  initialCompare?: boolean;
   highlightLineKey?: string | null;
   onChangeTitle: (text: string) => void;
   onPickTitle?: (title: string, by: TitleBy) => void;
@@ -101,7 +100,7 @@ export type ReaderViewProps = {
   archiveSlot?: ReactNode;
 };
 
-/** Pure presentational Reader page with virtualized chunked transcript, Compare, titles/tags, and Notes (Reader.dc.html + Titles.dc.html + Refine.dc.html). */
+/** Pure presentational Reader page with virtualized chunked transcript, titles/tags, and Notes (Reader.dc.html + Titles.dc.html + Refine.dc.html). */
 export function ReaderView({
   recording,
   progressRefine,
@@ -111,7 +110,6 @@ export function ReaderView({
   topics = [],
   initialTab = 'transcript',
   initialTake,
-  initialCompare = false,
   highlightLineKey = null,
   onChangeTitle,
   onPickTitle,
@@ -134,7 +132,6 @@ export function ReaderView({
   const { row } = recording;
   const [tab, setTab] = useState<'transcript' | 'notes'>(initialTab);
   const [selectedTake, setSelectedTake] = useState<number>(initialTake ?? recording.take);
-  const [compare, setCompare] = useState<boolean>(initialCompare);
   const [titleDraft, setTitleDraft] = useState(row.title);
   const [titleMenuOpen, setTitleMenuOpen] = useState(false);
   const [activeTag, setActiveTag] = useState<string | null>(null);
@@ -177,10 +174,6 @@ export function ReaderView({
   }, [row.id, initialTab]);
 
   useEffect(() => {
-    setCompare(initialCompare);
-  }, [row.id, initialCompare]);
-
-  useEffect(() => {
     setFocusLineKey(highlightLineKey);
     setScrollToIndex(parseLineIndex(highlightLineKey));
   }, [row.id, highlightLineKey]);
@@ -213,12 +206,6 @@ export function ReaderView({
   }, [recording.takes]);
 
   const hasMultipleTakes = recording.takes.length > 1;
-  const liveTakeNumber = recording.takes.find((tk) => tk.is_live)?.take ?? 0;
-  const expectedCompareLines = useMemo(() => {
-    const a = recording.takes.find((tk) => tk.take === liveTakeNumber)?.lines ?? 0;
-    const b = recording.takes.find((tk) => tk.take === selectedTake)?.lines ?? 0;
-    return Math.max(a, b);
-  }, [recording.takes, liveTakeNumber, selectedTake]);
 
   const tabOptions: SegOption<'transcript' | 'notes'>[] = [
     { value: 'transcript', label: t('reader.tab.transcript') },
@@ -294,7 +281,6 @@ export function ReaderView({
     }
     setActiveTag(tag.label);
     setTab('transcript');
-    setCompare(false);
     const loaded = loadedLinesRef.current;
     const idx = findLineIndexForTime(loaded, tag.at_ms);
     if (idx !== null) {
@@ -326,7 +312,6 @@ export function ReaderView({
 
   const jumpToNote = (note: Note) => {
     setTab('transcript');
-    setCompare(false);
     setActiveTag(null);
     pendingTagAtMsRef.current = null;
     setFocusLineKey(note.anchor);
@@ -570,27 +555,9 @@ export function ReaderView({
                 value={String(selectedTake)}
                 ariaLabel={t('reader.version')}
                 onChange={(val) => {
-                  const next = Number(val);
-                  setSelectedTake(next);
-                  if (next === liveTakeNumber) setCompare(false);
+                  setSelectedTake(Number(val));
                 }}
               />
-            )}
-
-            {hasMultipleTakes && (
-              <Pill
-                active={compare}
-                aria-pressed={compare}
-                onClick={() => {
-                  if (!compare && selectedTake === liveTakeNumber) {
-                    const refinedTake = recording.takes.find((tk) => !tk.is_live)?.take ?? recording.take;
-                    setSelectedTake(refinedTake);
-                  }
-                  setCompare((v) => !v);
-                }}
-              >
-                {t('reader.compare')}
-              </Pill>
             )}
 
             <span className="spacer" />
@@ -628,9 +595,6 @@ export function ReaderView({
           <TranscriptList
             id={row.id}
             take={selectedTake}
-            compare={compare}
-            compareTakeA={liveTakeNumber}
-            expectedCompareLines={expectedCompareLines}
             speakers={recording.speakers}
             notes={recording.notes}
             activeLangs={activeLangs}
@@ -748,12 +712,11 @@ export type ReaderPageProps = {
   id: string;
   tab?: 'transcript' | 'notes';
   take?: number;
-  compare?: boolean;
   lineKey?: string;
 };
 
 /** Bus-connected Reader page. */
-export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps) {
+export function ReaderPage({ id, tab, take, lineKey }: ReaderPageProps) {
   const state = useSource(stateSource);
   const session = useSource(sessionSource);
   const progress = useSource(progressSource);
@@ -821,7 +784,6 @@ export function ReaderPage({ id, tab, take, compare, lineKey }: ReaderPageProps)
       topics={Array.isArray(topicsQuery.data) ? topicsQuery.data : []}
       initialTab={tab}
       initialTake={take}
-      initialCompare={compare}
       highlightLineKey={lineKey ?? null}
       onChangeTitle={(text) => void send({ do: 'Change', id, change: { what: 'Title', text } })}
       onPickTitle={(title, by) => void send({ do: 'PickTitle', id, title, by })}

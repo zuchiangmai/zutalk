@@ -2,6 +2,6 @@
 import type { SceneStyle } from "./SceneStyle";
 
 /**
- * Fixed 4-scene caption style table (bounded struct, zero dynamic map for I8).
+ * Fixed 3-scene caption style table (bounded struct, zero dynamic map for I8).
  */
-export type CaptionScenes = { self_view: SceneStyle, band: SceneStyle, stage: SceneStyle, facing: SceneStyle, };
+export type CaptionScenes = { self_view: SceneStyle, band: SceneStyle, stage: SceneStyle, };

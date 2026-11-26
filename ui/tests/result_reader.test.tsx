@@ -2,7 +2,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Command } from '$proto/Command';
-import type { CompareRow } from '$proto/CompareRow';
 import type { Event } from '$proto/Event';
 import type { Query } from '$proto/Query';
 import type { QueryReply } from '$proto/QueryReply';
@@ -74,7 +73,6 @@ function makeRecording(overrides: Partial<RecordingView> = {}): RecordingView {
 function createTestBus(opts: {
   recording: RecordingView;
   totalLines: number;
-  compareRows?: CompareRow[];
 }) {
   const sent: Command[] = [];
   const queried: Query[] = [];
@@ -106,41 +104,6 @@ function createTestBus(opts: {
               total_lines: opts.totalLines,
               total_chunks: totalChunks,
               lines,
-            },
-          },
-        };
-      }
-      if (q.view === 'Compare') {
-        const rows = opts.compareRows ?? [
-          {
-            key_a: 'k0',
-            key_b: 'k0',
-            t0: 0,
-            t1: 4_800,
-            speaker: '1',
-            language: 'en',
-            changed: true,
-            text_a: 'Chapter tree begins.',
-            text_b: 'Chapter three begins.',
-            ops: [
-              { kind: 'Equal', text: 'Chapter t' },
-              { kind: 'Delete', text: 'r' },
-              { kind: 'Insert', text: 'hr' },
-              { kind: 'Equal', text: 'ee begins.' },
-            ],
-          },
-        ];
-        return {
-          version: 1,
-          value: {
-            view: 'Compare',
-            data: {
-              id: q.id,
-              take_a: q.take_a,
-              take_b: q.take_b,
-              chunk: q.chunk,
-              total_chunks: 1,
-              rows: q.chunk === 0 ? rows : [],
             },
           },
         };
@@ -258,7 +221,7 @@ describe('ResultView four refine states', () => {
   });
 });
 
-describe('ReaderPage virtualization, Compare, inline edits, notes, and confirmable actions', () => {
+describe('ReaderPage virtualization, inline edits, notes, and confirmable actions', () => {
   it('virtualizes a 4-hour 2,560-line recording and fetches only visible chunks (I8)', async () => {
     const rec = makeRecording({
       takes: [{ take: 1, lines: 2_560, is_live: false, is_current: true, written_at: 1_760_002_568_000 }],
@@ -281,23 +244,6 @@ describe('ReaderPage virtualization, Compare, inline edits, notes, and confirmab
     expect(transcriptChunks).toContain(0);
     expect(transcriptChunks).not.toContain(39);
     expect(new Set(transcriptChunks).size).toBeLessThanOrEqual(3);
-  });
-
-  it('switches into Compare mode and highlights Delete and Insert diffs', async () => {
-    const rec = makeRecording();
-    const harness = createTestBus({ recording: rec, totalLines: 8 });
-    stopBus = startBus(harness.bus);
-
-    const { container } = render(<ReaderPage id="rec-1" />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Compare' })).toBeTruthy());
-
-    fireEvent.click(screen.getByRole('button', { name: 'Compare' }));
-
-    await waitFor(() => {
-      expect(harness.queried.some((q) => q.view === 'Compare')).toBe(true);
-      expect(container.querySelector('mark.find')?.textContent).toBe('hr');
-      expect(container.querySelector('del')?.textContent).toBe('r');
-    });
   });
 
   it('edits lines with IME protection, edits title, and renames speakers', async () => {
@@ -459,54 +405,6 @@ describe('ReaderPage virtualization, Compare, inline edits, notes, and confirmab
       expect(screen.getByRole('status').textContent).toContain('Local index could not be read or updated');
     });
     expect(screen.queryByText('No transcript yet')).toBeNull();
-  });
-
-  it('uses exact Compare chunk row counts without ghost loading rows or truncation', async () => {
-    // Case A: takes have 8 lines each, but Compare merges them into 1 row -> must render exactly 1 row, 0 ghost rows.
-    const recA = makeRecording();
-    const harnessA = createTestBus({ recording: recA, totalLines: 8 });
-    stopBus = startBus(harnessA.bus);
-
-    const viewA = render(<ReaderPage id="rec-1" compare />);
-    await waitFor(() => {
-      expect(viewA.container.querySelector('mark.find')?.textContent).toBe('hr');
-    });
-    expect(viewA.container.querySelectorAll('li[data-row-index]')).toHaveLength(1);
-    expect(screen.queryByText('Loading…')).toBeNull();
-    viewA.unmount();
-    stopBus();
-    resetChannel();
-
-    // Case B: takes report 2 lines each, but Compare produces 4 aligned rows -> all 4 rows rendered without truncation.
-    const recB = makeRecording({
-      takes: [
-        { take: 0, lines: 2, is_live: true, is_current: false, written_at: 1_760_002_538_000 },
-        { take: 1, lines: 2, is_live: false, is_current: true, written_at: 1_760_002_568_000 },
-      ],
-    });
-    const fourCompareRows: CompareRow[] = Array.from({ length: 4 }, (_, i) => ({
-      key_a: `k${i}`,
-      key_b: `k${i}`,
-      t0: i * 3_000,
-      t1: i * 3_000 + 2_500,
-      speaker: '1',
-      language: 'en',
-      changed: true,
-      text_a: `Old ${i}`,
-      text_b: `New ${i}`,
-      ops: [
-        { kind: 'Delete', text: `Old ${i}` },
-        { kind: 'Insert', text: `New ${i}` },
-      ],
-    }));
-    const harnessB = createTestBus({ recording: recB, totalLines: 2, compareRows: fourCompareRows });
-    stopBus = startBus(harnessB.bus);
-
-    const viewB = render(<ReaderPage id="rec-1" compare />);
-    await waitFor(() => {
-      expect(viewB.container.querySelectorAll('li[data-row-index]')).toHaveLength(4);
-    });
-    expect(screen.getByText('New 3')).toBeTruthy();
   });
 
   it('scrolls to and fetches the target chunk when opening ReaderPage with a deep search lineKey', async () => {

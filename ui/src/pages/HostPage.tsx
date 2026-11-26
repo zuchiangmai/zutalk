@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Calendar } from '$proto/Calendar';
 import type { CityEvent } from '$proto/CityEvent';
 import type { HostEvent } from '$proto/HostEvent';
 import type { HostState } from '$proto/HostState';
+import type { Setup } from '$proto/Setup';
+import type { Sound } from '$proto/Sound';
 import type { State } from '$proto/State';
 import {
+  cityLoadSource,
   go,
   langName,
   langSource,
@@ -17,11 +20,15 @@ import {
   t,
   useQuery,
   useSource,
-  when,
+  type CityLoadState,
 } from '../bus';
 import { Icon } from '../ds/icons';
 import { Button, Pill, Tag } from '../ds/primitives';
 import { QrCode } from '../ds/QrCode';
+import { CityEventPicker } from './CityEventPicker';
+import { MAX_CAPTION_COLUMNS } from './HomePage';
+
+const SOUND_OPTIONS: readonly Sound[] = ['Mic', 'System', 'Both'];
 
 /** Shortens an audience URL for display while keeping the host and masked prefix/fragment visible. */
 export function shortenAudienceLink(url: string): string {
@@ -52,12 +59,15 @@ export type HostViewProps = {
   state: State;
   calendar: Calendar | null;
   recording: boolean;
+  cityLoad?: CityLoadState;
   nowMs?: number;
   onLoadCity: (address: string) => void;
   onArm: (event: HostEvent | null, captions: boolean) => void;
   onStart: () => void;
   onCancel: () => void;
   onCopyLink: (link: string) => void;
+  onSetup?: (setup: Setup) => void;
+  onToggleCaptionsWindow?: () => void;
 };
 
 /** Pure props pre-session Host screen (`HostArm.dc.html`): band vs quiet paper, city event, QR, waiting viewers. */
@@ -65,37 +75,41 @@ export function HostView({
   state,
   calendar,
   recording,
+  cityLoad,
   nowMs = Date.now(),
   onLoadCity,
   onArm,
   onStart,
   onCancel,
   onCopyLink,
+  onSetup,
+  onToggleCaptionsWindow,
 }: HostViewProps) {
-  const { host, setup } = state;
-  const [cityInput, setCityInput] = useState(calendar?.address ?? setup.city ?? '');
-  const [editingCity, setEditingCity] = useState(false);
+  const { host, setup, devices, languages } = state;
   const [selectedPath, setSelectedPath] = useState<string | null>(() => {
     if (host.is === 'Armed' || host.is === 'Arming' || host.is === 'Live') {
       return host.event?.event ?? null;
     }
     return null;
   });
+  const [clearedEvent, setClearedEvent] = useState(false);
+  const [langPickerOpen, setLangPickerOpen] = useState(false);
   const [qrExpanded, setQrExpanded] = useState(false);
 
   const events = calendar?.events ?? [];
   const nearestEvent = useMemo(() => pickNearestEvent(events, nowMs), [events, nowMs]);
 
   const activeCityEvent: CityEvent | null = useMemo(() => {
-    if (events.length === 0) return null;
+    if (clearedEvent || events.length === 0) return null;
     if (selectedPath) {
       const found = events.find((e) => e.path === selectedPath);
       if (found) return found;
     }
     return nearestEvent;
-  }, [events, selectedPath, nearestEvent]);
+  }, [clearedEvent, events, selectedPath, nearestEvent]);
 
   const activeHostEvent: HostEvent | null = useMemo(() => {
+    if (clearedEvent) return null;
     if (activeCityEvent && calendar) {
       return toHostEvent(calendar.address, activeCityEvent);
     }
@@ -103,7 +117,7 @@ export function HostView({
       return host.event;
     }
     return null;
-  }, [activeCityEvent, calendar, host]);
+  }, [clearedEvent, activeCityEvent, calendar, host]);
 
   const captionsOn =
     host.is === 'Arming'
@@ -119,6 +133,26 @@ export function HostView({
   const viewers = host.is === 'Armed' || host.is === 'Live' ? host.viewers : 0;
   const eventTitle = activeHostEvent?.title ?? null;
 
+  const activeLanguages = (setup.shown.length > 0 ? setup.shown : setup.spoken).slice(
+    0,
+    MAX_CAPTION_COLUMNS,
+  );
+  const remainingLanguages = languages.filter((lang) => !activeLanguages.includes(lang));
+  const langsAtCap = activeLanguages.length >= MAX_CAPTION_COLUMNS;
+
+  const removeLang = (lang: string) => {
+    if (!onSetup) return;
+    const next = activeLanguages.filter((x) => x !== lang);
+    onSetup({ ...setup, spoken: next, shown: next });
+  };
+
+  const addLang = (lang: string) => {
+    if (!onSetup || langsAtCap || activeLanguages.includes(lang)) return;
+    const next = [...activeLanguages, lang];
+    onSetup({ ...setup, spoken: next, shown: next });
+    setLangPickerOpen(false);
+  };
+
   useEffect(() => {
     if (!qrExpanded) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -131,20 +165,16 @@ export function HostView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [qrExpanded]);
 
-  const handleCitySubmit = (e: FormEvent) => {
-    e.preventDefault();
-    const trimmed = cityInput.trim();
-    if (!trimmed) return;
-    onLoadCity(trimmed);
-    setEditingCity(false);
-  };
-
-  const handleCycleEvent = () => {
-    if (!calendar || events.length === 0) return;
-    const idx = activeCityEvent ? events.findIndex((e) => e.path === activeCityEvent.path) : -1;
-    const next = events[(idx + 1) % events.length];
-    setSelectedPath(next.path);
-    onArm(toHostEvent(calendar.address, next), captionsOn);
+  const handleSelectEvent = (ev: CityEvent | null) => {
+    if (ev && calendar) {
+      setClearedEvent(false);
+      setSelectedPath(ev.path);
+      onArm(toHostEvent(calendar.address, ev), captionsOn);
+    } else {
+      setClearedEvent(true);
+      setSelectedPath(null);
+      onArm(null, captionsOn);
+    }
   };
 
   const handleToggleCaptions = () => {
@@ -191,63 +221,27 @@ export function HostView({
 
         <div className="sheet" style={{ marginTop: 22 }}>
           {/* Event selection */}
-          <div className="sheet-row">
-            <span className="k">{t('city.event')}</span>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
-              {calendar && events.length > 0 && !editingCity ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <button
-                    type="button"
-                    className="pill wide"
-                    aria-label={t('city.event')}
-                    onClick={handleCycleEvent}
-                  >
-                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {activeCityEvent?.title ?? t('host.event_none')}
-                    </span>
-                    <span
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        font: '12px var(--f-ui)',
-                        color: 'var(--ink3)',
-                      }}
-                    >
-                      {calendar.address}
-                      {activeCityEvent?.start ? ` · ${when(activeCityEvent.start)}` : ''}
-                      <Icon name="chevron-down" size="s" />
-                    </span>
-                  </button>
-                  <Pill quiet onClick={() => setEditingCity(true)}>
-                    {t('city')}
-                  </Pill>
-                </div>
-              ) : (
-                <form className="host-city-bar" onSubmit={handleCitySubmit}>
-                  <input
-                    className="field"
-                    type="text"
-                    aria-label={t('city')}
-                    placeholder={t('host.city_placeholder')}
-                    value={cityInput}
-                    onChange={(e) => setCityInput(e.target.value)}
-                    style={{ flex: 1, minWidth: 180 }}
-                  />
-                  <Pill type="submit" disabled={!cityInput.trim()}>
-                    {t('host.city_load')}
-                  </Pill>
-                  {editingCity && (
-                    <Pill quiet onClick={() => setEditingCity(false)}>
-                      {t('reader.cancel')}
-                    </Pill>
-                  )}
-                </form>
-              )}
-              {calendar && events.length === 0 && !editingCity && (
-                <span className="k">{t('city.empty')}</span>
-              )}
-            </div>
+          <div className="sheet-row" style={{ alignItems: 'start' }}>
+            <span className="k" style={{ paddingTop: 8 }}>
+              {t('city.event')}
+            </span>
+            <CityEventPicker
+              calendar={calendar}
+              selectedPath={activeCityEvent?.path ?? null}
+              fallbackTitle={activeHostEvent?.title ?? null}
+              fallbackCity={activeHostEvent?.city ?? null}
+              defaultCity={setup.city ?? null}
+              cityLoad={cityLoad}
+              nowMs={nowMs}
+              allowClear
+              wide
+              onSelect={handleSelectEvent}
+              onLoadCity={(address) => {
+                setClearedEvent(false);
+                setSelectedPath(null);
+                onLoadCity(address);
+              }}
+            />
           </div>
 
           {/* Audience captions */}
@@ -312,24 +306,112 @@ export function HostView({
           </div>
         </div>
 
-        {/* Spoken / Captions language echo */}
+        {/* Unified recording setup (Plan B languages, sound source, device, local caption window) */}
         <div className="setup" style={{ maxWidth: 560, marginTop: 18, padding: '0 20px' }}>
-          <span className="set-k">{t('setup.spoken')}</span>
+          <span className="set-k">{t('s.language')}</span>
           <div className="set-v">
-            {setup.spoken.map((lang) => (
-              <span key={lang} className="pill on">
-                {langName(lang, lang)}
-              </span>
-            ))}
+            {onSetup ? (
+              <>
+                {activeLanguages.map((lang) => (
+                  <Pill
+                    key={lang}
+                    active
+                    aria-label={t('remove.one', langName(lang, lang))}
+                    onClick={() => removeLang(lang)}
+                  >
+                    {langName(lang, lang)}
+                    <Icon name="x" size="s" />
+                  </Pill>
+                ))}
+                {!langsAtCap && remainingLanguages.length > 0 && (
+                  <Pill
+                    add
+                    aria-label={t('lang.add', t('s.language'))}
+                    onClick={() => setLangPickerOpen((prev) => !prev)}
+                  >
+                    <Icon name="plus" size="s" />
+                  </Pill>
+                )}
+                {langsAtCap && <span className="k">{t('code.captions.columns')}</span>}
+                {langPickerOpen && !langsAtCap && (
+                  <div className="pop menu" role="menu">
+                    {remainingLanguages.map((lang) => (
+                      <button
+                        key={lang}
+                        type="button"
+                        role="menuitem"
+                        className="menu-i"
+                        onClick={() => addLang(lang)}
+                      >
+                        {langName(lang, lang)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              activeLanguages.map((lang) => (
+                <span key={lang} className="pill on">
+                  {langName(lang, lang)}
+                </span>
+              ))
+            )}
           </div>
-          <span className="set-k">{t('setup.shown')}</span>
-          <div className="set-v">
-            {setup.shown.map((lang) => (
-              <span key={lang} className="pill on">
-                {langName(lang, lang)}
-              </span>
-            ))}
-          </div>
+
+          {onSetup && (
+            <>
+              <span className="set-k">{t('sound')}</span>
+              <div className="set-v" role="group" aria-label={t('sound')}>
+                {SOUND_OPTIONS.map((sound) => (
+                  <Pill
+                    key={sound}
+                    active={setup.sound === sound}
+                    aria-pressed={setup.sound === sound}
+                    onClick={() => onSetup({ ...setup, sound })}
+                  >
+                    {t(`sound.${sound}`)}
+                  </Pill>
+                ))}
+              </div>
+
+              {setup.sound !== 'System' && (
+                <>
+                  <span className="set-k">{t('device')}</span>
+                  <div className="set-v">
+                    <select
+                      className="field"
+                      aria-label={t('device')}
+                      value={setup.device ?? ''}
+                      onChange={(e) => onSetup({ ...setup, device: e.target.value || null })}
+                    >
+                      <option value="">{t('device.default')}</option>
+                      {devices.map((dev) => (
+                        <option key={dev.id} value={dev.id}>
+                          {dev.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {onToggleCaptionsWindow && (
+            <>
+              <span className="set-k">{t('captions')}</span>
+              <div className="set-v">
+                <Pill
+                  active={state.captions}
+                  aria-pressed={state.captions}
+                  onClick={onToggleCaptionsWindow}
+                >
+                  <Icon name="captions" size="s" />
+                  {state.captions ? t('captions.close') : t('captions.open')}
+                </Pill>
+              </div>
+            </>
+          )}
         </div>
       </section>
 
@@ -372,10 +454,12 @@ export function HostView({
 export function HostPage() {
   const state = useSource(stateSource);
   const session = useSource(sessionSource);
+  const cityLoad = useSource(cityLoadSource);
   useSource(langSource);
   const calendarQuery = useQuery({ view: 'Calendar' });
   const armedOnEntryRef = useRef(false);
   const loadedCityRef = useRef<string | null>(null);
+  const autoAttachedCityRef = useRef<string | null>(null);
 
   const calendar = calendarQuery.data;
 
@@ -398,17 +482,20 @@ export function HostPage() {
       armedOnEntryRef.current = true;
       const nearest = calendar ? pickNearestEvent(calendar.events, Date.now()) : null;
       const ev = nearest && calendar ? toHostEvent(calendar.address, nearest) : null;
+      if (calendar && ev) autoAttachedCityRef.current = calendar.address;
       void send({ do: 'HostArm', event: ev, captions: true });
     }
   }, [state, calendar]);
 
-  // Once the city calendar arrives, attach the nearest event if still armed without one.
+  // Once a city calendar arrives, attach its nearest event once if still armed without one.
   useEffect(() => {
     if (!state || !calendar || calendar.events.length === 0) return;
+    if (autoAttachedCityRef.current === calendar.address) return;
     const host: HostState = state.host;
     if (host.is === 'Armed' && host.event === null) {
       const nearest = pickNearestEvent(calendar.events, Date.now());
       if (nearest) {
+        autoAttachedCityRef.current = calendar.address;
         void send({
           do: 'HostArm',
           event: toHostEvent(calendar.address, nearest),
@@ -431,8 +518,10 @@ export function HostPage() {
       state={state}
       calendar={calendar}
       recording={session !== null}
+      cityLoad={cityLoad}
       onLoadCity={(address) => {
         loadedCityRef.current = address;
+        autoAttachedCityRef.current = null;
         if (state.setup.city !== address) {
           void send({ do: 'Setup', setup: { ...state.setup, city: address } });
         }
@@ -443,6 +532,7 @@ export function HostPage() {
           openIdentitySheet('ask');
           return;
         }
+        if (calendar) autoAttachedCityRef.current = calendar.address;
         void send({ do: 'HostArm', event, captions });
       }}
       onStart={() => void send({ do: 'Start' })}
@@ -450,6 +540,8 @@ export function HostPage() {
         void send({ do: 'HostCancel' });
         go({ page: 'home' });
       }}
+      onSetup={(setup) => void send({ do: 'Setup', setup })}
+      onToggleCaptionsWindow={() => void send({ do: 'Captions', show: !state.captions })}
       onCopyLink={(link) => {
         if (globalThis.navigator?.clipboard?.writeText) {
           void globalThis.navigator.clipboard.writeText(link).then(

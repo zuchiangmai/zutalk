@@ -201,6 +201,7 @@ pub(crate) struct Survey {
 /// Complete result of switching the signing identity on `desk` (carries no keys).
 pub(crate) struct SignedOut {
     pub me: Option<String>,
+    pub shelf_by: Option<String>,
     pub handle: Option<String>,
     pub rotation_unsaved: bool,
     pub local_shelf: LocalShelf,
@@ -2777,19 +2778,19 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 let ms = t.elapsed().as_millis() as u64;
                 warn!("boot.step", step = "settings", code = "settings", ms = ms);
                 boot_say.push("settings");
-                Setup::default()
+                Setup::initial()
             }
         },
         Err(e) if e.kind() == ErrorKind::NotFound => {
             let ms = t.elapsed().as_millis() as u64;
             info!("boot.step", step = "settings", code = "ok", ms = ms);
-            Setup::default()
+            Setup::initial()
         }
         Err(_) => {
             let ms = t.elapsed().as_millis() as u64;
             warn!("boot.step", step = "settings", code = "settings", ms = ms);
             boot_say.push("settings");
-            Setup::default()
+            Setup::initial()
         }
     };
     *env.keep_hint.lock().unwrap_or_else(PoisonError::into_inner) = setup.keep;
@@ -3002,7 +3003,8 @@ fn run_sign(
         }
     };
 
-    Ok(SignedOut { me, handle, rotation_unsaved, local_shelf, refreshed, survey, say })
+    let shelf_by = snap.shelf.as_ref().ok().map(|s| s.by().to_owned());
+    Ok(SignedOut { me, shelf_by, handle, rotation_unsaved, local_shelf, refreshed, survey, say })
 }
 
 fn refresh_topic_caches(env: &DeskEnv, shelf: &Shelf) {

@@ -6,6 +6,7 @@ import type { Column } from '$proto/Column';
 import type { Command } from '$proto/Command';
 import type { Event } from '$proto/Event';
 import type { Frame } from '$proto/Frame';
+import type { Session } from '$proto/Session';
 import type { Setup } from '$proto/Setup';
 import { DEFAULT_CAPTION_PREFS, EMPTY } from '../dev/mock';
 import { type Bus, flushPendingSignals, resetChannel, startBus } from '../src/bus/channel';
@@ -15,7 +16,13 @@ import {
   activeStyle,
   bgAlpha,
   CAPTION_AUTO_HIDE_MS,
+  computeAdaptiveColumns,
+  computeAdaptiveRows,
+  computeAutoFontPx,
+  computeBannerRect,
+  effectiveBgAlpha,
   isCaptionQuiet,
+  reconcileFollowing,
   sceneSummary,
   sizeScale,
   updateActiveStyle,
@@ -53,6 +60,17 @@ function makeColumns(dead = false): Column[] {
   ];
 }
 
+function makeSession(paused = false): Session {
+  return {
+    id: 'rec-live-1',
+    started: 1_760_000_000_000,
+    status: paused ? { is: 'Paused' } : { is: 'Recording' },
+    outbound: false,
+    viewers: 0,
+    event_title: null,
+  };
+}
+
 beforeEach(() => {
   restoreDom = installDomMocks({ reducedMotion: true });
   resetChannel();
@@ -68,8 +86,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', () => {
-  it('caption_style_and_auto_hide_rules', () => {
+describe('Caption scenes, 0.8-parity CaptionsWindow, and mobile ViewerPage', () => {
+  it('caption_style_auto_font_adaptive_layout_banner_and_follow_policies', () => {
     expect(isCaptionQuiet(1_000, 1_000 + CAPTION_AUTO_HIDE_MS - 1, true)).toBe(false);
     expect(isCaptionQuiet(1_000, 1_000 + CAPTION_AUTO_HIDE_MS, true)).toBe(true);
     expect(isCaptionQuiet(1_000, 1_000 + CAPTION_AUTO_HIDE_MS + 5_000, false)).toBe(false);
@@ -78,33 +96,86 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
     expect(bgAlpha('Clear')).toBe(0.42);
     expect(bgAlpha('Half')).toBe(0.72);
     expect(bgAlpha('Solid')).toBe(0.94);
+    expect(effectiveBgAlpha({ bg: 'Half', opacity: 86 })).toBe(0.86);
     expect(sizeScale('Small')).toBe(0.85);
     expect(sizeScale('Auto')).toBe(1);
     expect(sizeScale('Large')).toBe(1.22);
+
+    // 0.8 automatic canvas-driven font sizing: projector canvas gets larger type than desk strip.
+    const deskFont = computeAutoFontPx(900, 220, 2, 'Audience');
+    const projectorFont = computeAutoFontPx(1920, 1080, 2, 'Audience');
+    expect(deskFont).toBeGreaterThanOrEqual(16);
+    expect(projectorFont).toBeGreaterThan(deskFont);
+    expect(projectorFont % 2).toBe(0);
+
+    // 0.8 adaptive column count degrades one column at a time.
+    expect(computeAdaptiveColumns(1200, 3, 30, 'Audience')).toBe(3);
+    expect(computeAdaptiveColumns(800, 3, 30, 'Audience')).toBe(2);
+    expect(computeAdaptiveColumns(400, 3, 30, 'Audience')).toBe(1);
+
+    // 0.8 adaptive row retention grows with canvas height.
+    expect(computeAdaptiveRows(200, 30, 'Audience')).toBe(2);
+    expect(computeAdaptiveRows(900, 30, 'Audience')).toBe(8);
+    expect(computeAdaptiveRows(200, 24, 'Conversation', 1)).toBeGreaterThanOrEqual(4);
+
+    // 0.8 banner rect fills display width at top edge and clamps height.
+    expect(
+      computeBannerRect({ left: 0, top: 25, width: 1440, height: 875 }, 2, true, null),
+    ).toEqual({ x: 0, y: 50, width: 2880, height: 438 });
+
+    // 0.8 scroll-back follow policy: scrolling up detaches; aging-out shrink keeps following.
+    expect(
+      reconcileFollowing(
+        true,
+        { offsetY: 500, distanceFromBottom: 10, contentHeight: 1000 },
+        { offsetY: 200, distanceFromBottom: 310, contentHeight: 1000 },
+      ),
+    ).toBe(false);
+    expect(
+      reconcileFollowing(
+        true,
+        { offsetY: 500, distanceFromBottom: 10, contentHeight: 1000 },
+        { offsetY: 350, distanceFromBottom: 160, contentHeight: 850 },
+      ),
+    ).toBe(true);
+    expect(
+      reconcileFollowing(
+        false,
+        { offsetY: 200, distanceFromBottom: 310, contentHeight: 1000 },
+        { offsetY: 460, distanceFromBottom: 50, contentHeight: 1000 },
+      ),
+    ).toBe(true);
 
     const base: CaptionPrefs = structuredClone(DEFAULT_CAPTION_PREFS);
     const updated = updateActiveStyle({ ...base, scene: 'Band' }, {
       top: true,
       lines: 1,
       auto_hide: true,
+      font_px: 42,
+      opacity: 80,
     });
-    expect(activeStyle(updated)).toMatchObject({ top: true, lines: 1, auto_hide: true });
+    expect(activeStyle(updated)).toMatchObject({
+      top: true,
+      lines: 1,
+      auto_hide: true,
+      font_px: 42,
+      opacity: 80,
+    });
     // Other scenes must stay untouched.
     expect(updated.scenes.self_view).toEqual(base.scenes.self_view);
     expect(updated.scenes.stage).toEqual(base.scenes.stage);
-    expect(updated.scenes.facing).toEqual(base.scenes.facing);
 
     expect(sceneSummary('Stage', updated.scenes.stage)).toEqual({ stacked: true, lines: 3 });
     expect(sceneSummary('Band', updated.scenes.band)).toEqual({ stacked: false, lines: 1 });
   });
 
-  it('CaptionScenesView_switches_scenes_guards_last_language_and_updates_window_flags', () => {
+  it('CaptionScenesView_switches_3_scenes_without_Facing_and_syncs_spoken_and_shown', () => {
     const onSetup = vi.fn<(setup: Setup) => void>();
     const onToggleWindow = vi.fn();
 
     const setup: Setup = {
       ...EMPTY.setup,
-      spoken: ['zh', 'en'],
+      spoken: ['zh'],
       shown: ['zh'],
       caption: structuredClone(DEFAULT_CAPTION_PREFS),
     };
@@ -119,8 +190,9 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
       />,
     );
 
-    // 16:10 desktop screen preview present
+    // 16:10 desktop screen preview present; no Facing/对照 scene tab exists.
     expect(container.querySelector('.screen .capwin')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Facing' })).toBeNull();
 
     // Last active language cannot be turned off.
     const zhBtn = screen.getByRole('button', { name: '中文' });
@@ -128,9 +200,11 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
     fireEvent.click(zhBtn);
     expect(onSetup).not.toHaveBeenCalled();
 
-    // Adding English works.
+    // Adding English updates BOTH spoken and shown (Plan B).
     fireEvent.click(screen.getByRole('button', { name: 'English' }));
-    expect(onSetup).toHaveBeenCalledWith(expect.objectContaining({ shown: ['zh', 'en'] }));
+    expect(onSetup).toHaveBeenCalledWith(
+      expect.objectContaining({ spoken: ['zh', 'en'], shown: ['zh', 'en'] }),
+    );
 
     // Switching to Band scene updates caption.scene -> 'Band'.
     onSetup.mockClear();
@@ -141,9 +215,10 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
       }),
     );
 
-    // Render with Band scene active: position control appears and window flag toggles fire.
+    // Render with Band scene active: window flag toggles & sliders fire.
     const bandSetup: Setup = {
       ...setup,
+      spoken: ['zh', 'en'],
       shown: ['zh', 'en'],
       caption: { ...structuredClone(DEFAULT_CAPTION_PREFS), scene: 'Band' },
     };
@@ -156,9 +231,6 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
         onToggleWindow={onToggleWindow}
       />,
     );
-
-    // Band defaults click_through = true -> hint banner visible.
-    expect(screen.getByText(/unlock it here in the main window/i)).toBeTruthy();
 
     onSetup.mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Always on top' }));
@@ -178,7 +250,7 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
       expect.objectContaining({
         caption: expect.objectContaining({
           scenes: expect.objectContaining({
-            band: expect.objectContaining({ click_through: false }),
+            band: expect.objectContaining({ click_through: true }),
           }),
         }),
       }),
@@ -197,15 +269,10 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
     );
   });
 
-  it('CaptionsWindow_renders_facing_rotated_180_and_makes_zero_queries', () => {
+  it('CaptionsWindow_supports_recording_controls_font_pin_more_menu_shortcuts_and_zero_queries', () => {
     const sent: Command[] = [];
     const querySpy = vi.fn();
     let listener: (e: Event) => void = () => {};
-
-    const facingPrefs: CaptionPrefs = {
-      ...structuredClone(DEFAULT_CAPTION_PREFS),
-      scene: 'Facing',
-    };
 
     const bus: Bus = {
       async send(cmd) {
@@ -218,7 +285,13 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
           kind: 'State',
           is: {
             ...EMPTY,
-            setup: { ...EMPTY.setup, mode: 'Conversation', caption: facingPrefs },
+            setup: {
+              ...EMPTY.setup,
+              spoken: ['zh', 'en'],
+              shown: ['zh', 'en'],
+              mode: 'Audience',
+              caption: structuredClone(DEFAULT_CAPTION_PREFS),
+            },
           },
         });
         return () => {};
@@ -231,33 +304,121 @@ describe('P5-05 caption scenes, 4-scene CaptionsWindow, and mobile ViewerPage', 
     act(() => {
       listener({
         kind: 'Signal',
-        is: { seq: 1, signal: { of: 'Frame', is: { t_audio: 5_000, columns: makeColumns(false) } } },
+        is: { seq: 1, signal: { of: 'Session', is: makeSession(false) } },
+      });
+      listener({
+        kind: 'Signal',
+        is: { seq: 2, signal: { of: 'Frame', is: { t_audio: 5_000, columns: makeColumns(true) } } },
       });
       flushPendingSignals();
       listener({ kind: 'Invalidate', is: { view: 'Library', key: null, version: 2 } });
       listener({ kind: 'Invalidate', is: { view: 'Transcript', key: 'r1', version: 3 } });
     });
 
-    // Strict zero-query isolation preserved.
+    // Strict zero-query isolation preserved; no upside-down rotated Facing panel.
     expect(querySpy).not.toHaveBeenCalled();
-
-    // Facing scene renders rotated top half (180 deg) and upright bottom half.
-    const rotated = container.querySelector('[data-rotated="180"]');
-    expect(rotated).toBeTruthy();
-    expect(rotated?.textContent).toContain('city in memory');
+    expect(container.querySelector('[data-rotated="180"]')).toBeNull();
     expect(screen.getByText('记忆里的城')).toBeTruthy();
 
-    // Switching back to Latest dispatches Setup with SelfView & Audience.
-    fireEvent.click(screen.getByRole('button', { name: 'Latest' }));
+    // Hover reveals toolbar; degraded language badge visible because English column is Dead.
+    const root = container.querySelector('[data-window="captions"]')!;
+    fireEvent.mouseEnter(root);
+    expect(root.classList.contains('chrome-on')).toBe(true);
+
+    // In-window Mark, Pause, Stop commands work directly without switching to main window.
+    fireEvent.click(screen.getByRole('button', { name: 'Mark' }));
+    expect(sent).toContainEqual({
+      do: 'Note',
+      id: 'rec-live-1',
+      op: { op: 'Add', at_ms: 5_000, text: '', anchor: null },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(sent).toContainEqual({ do: 'Pause' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(sent).toContainEqual({ do: 'Stop' });
+
+    // Pin toggle updates always_on_top on active scene.
+    sent.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: 'Always on top' }));
     expect(sent).toContainEqual({
       do: 'Setup',
       setup: expect.objectContaining({
-        mode: 'Audience',
-        caption: expect.objectContaining({ scene: 'SelfView' }),
+        caption: expect.objectContaining({
+          scenes: expect.objectContaining({
+            self_view: expect.objectContaining({ always_on_top: true }),
+          }),
+        }),
       }),
     });
 
-    // Close dispatches Command::Captions { show: false }.
+    // Manual font slider sets font_px (opting out of auto).
+    sent.length = 0;
+    fireEvent.change(screen.getByRole('slider', { name: 'Size' }), { target: { value: '48' } });
+    expect(sent).toContainEqual({
+      do: 'Setup',
+      setup: expect.objectContaining({
+        caption: expect.objectContaining({
+          scenes: expect.objectContaining({
+            self_view: expect.objectContaining({ font_px: 48 }),
+          }),
+        }),
+      }),
+    });
+
+    // More menu opens with auto-font toggle, light/dark, continuous opacity slider, fill & top strip.
+    fireEvent.click(screen.getByRole('button', { name: 'More caption options' }));
+    sent.length = 0;
+    fireEvent.change(screen.getByRole('slider', { name: 'Backdrop opacity' }), {
+      target: { value: '84' },
+    });
+    expect(sent).toContainEqual({
+      do: 'Setup',
+      setup: expect.objectContaining({
+        caption: expect.objectContaining({
+          scenes: expect.objectContaining({
+            self_view: expect.objectContaining({ opacity: 84 }),
+          }),
+        }),
+      }),
+    });
+
+    // ⌃⌘F switches to Stage fullscreen; ⌃⌘B switches to Band with top-edge banner geometry.
+    sent.length = 0;
+    fireEvent.keyDown(window, { key: 'f', ctrlKey: true, metaKey: true });
+    expect(sent).toContainEqual({
+      do: 'Setup',
+      setup: expect.objectContaining({
+        caption: expect.objectContaining({ scene: 'Stage' }),
+      }),
+    });
+
+    sent.length = 0;
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true, metaKey: true });
+    expect(sent).toContainEqual({
+      do: 'Setup',
+      setup: expect.objectContaining({
+        caption: expect.objectContaining({
+          scene: 'Band',
+          scenes: expect.objectContaining({
+            band: expect.objectContaining({
+              geometry: expect.objectContaining({ width: expect.any(Number) }),
+            }),
+          }),
+        }),
+      }),
+    });
+
+    // Switching mode to Conversation updates setup.mode without changing scene.
+    sent.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation' }));
+    expect(sent).toContainEqual({
+      do: 'Setup',
+      setup: expect.objectContaining({ mode: 'Conversation' }),
+    });
+
+    // Close hides caption window without stopping recording.
     fireEvent.click(screen.getByRole('button', { name: 'Close caption window' }));
     expect(sent).toContainEqual({ do: 'Captions', show: false });
   });

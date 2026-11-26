@@ -153,7 +153,6 @@ export function Shell() {
             id={route.id}
             tab={route.tab}
             take={route.take}
-            compare={route.compare}
             lineKey={route.lineKey}
           />
         ) : route.page === 'library' ? (

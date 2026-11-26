@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Calendar } from '$proto/Calendar';
-import type { CityEvent } from '$proto/CityEvent';
 import type { HostEvent } from '$proto/HostEvent';
 import type { RecordingView } from '$proto/RecordingView';
 import type { Writing } from '$proto/Writing';
 import {
   FILE_GRACE_MS,
   HOLD_TO_FILE_MS,
+  cityLoadSource,
   clock,
   estimateAudioMb,
   filePhaseStep,
@@ -21,10 +21,12 @@ import {
   useQuery,
   useSource,
   word,
+  type CityLoadState,
   type FilePhase,
 } from '../bus';
 import { Icon } from '../ds/icons';
 import { Button, Card, Pill, Tag } from '../ds/primitives';
+import { CityEventPicker } from './CityEventPicker';
 
 /** Countdown display refresh interval during the 8 s undoable grace window (`HostFile.dc.html`). */
 const GRACE_COUNTDOWN_TICK_MS = 1_000;
@@ -53,6 +55,7 @@ export type FileArchiveViewProps = {
   refining?: boolean;
   signedIn: boolean;
   defaultCity?: string | null;
+  cityLoad?: CityLoadState;
   nowMs?: number;
   onLoadCity: (address: string) => void;
   onConfirmFile: (eventPath: string, audio: boolean) => Promise<boolean> | boolean | void;
@@ -69,6 +72,7 @@ export function FileArchiveView({
   refining = false,
   signedIn,
   defaultCity = null,
+  cityLoad,
   nowMs = Date.now(),
   onLoadCity,
   onConfirmFile,
@@ -79,10 +83,6 @@ export function FileArchiveView({
     deriveInitialPhase(recording, progressFile, defaultOpen),
   );
   const [includeAudio, setIncludeAudio] = useState<boolean>(row.audio);
-  const [cityInput, setCityInput] = useState<string>(
-    hostEvent?.city ?? calendar?.address ?? defaultCity ?? '',
-  );
-  const [editingCity, setEditingCity] = useState(false);
   const [selectedEventPath, setSelectedEventPath] = useState<string | null>(
     hostEvent?.event ?? recording.filed?.event ?? null,
   );
@@ -146,7 +146,6 @@ export function FileArchiveView({
     setIncludeAudio(row.audio);
     setSelectedEventPath(hostEvent?.event ?? recording.filed?.event ?? null);
     setGraceRemainingSec(Math.ceil(FILE_GRACE_MS / 1_000));
-    setEditingCity(false);
   }, [row.id, row.audio, recording, progressFile, defaultOpen, hostEvent]);
 
   // Synchronize external server filing truth into local state machine.
@@ -233,23 +232,6 @@ export function FileArchiveView({
     if (e.key !== ' ' && e.key !== 'Enter') return;
     e.preventDefault();
     cancelHold();
-  };
-
-  const handleCycleEvent = () => {
-    if (events.length === 0) return;
-    const currentIdx = resolvedEvent
-      ? events.findIndex((ev: CityEvent) => ev.path === resolvedEvent.path)
-      : -1;
-    const next = events[(currentIdx + 1) % events.length];
-    setSelectedEventPath(next.path);
-  };
-
-  const handleCitySubmit = (e: FormEvent) => {
-    e.preventDefault();
-    const trimmed = cityInput.trim();
-    if (!trimmed) return;
-    onLoadCity(trimmed);
-    setEditingCity(false);
   };
 
   const summaryText = effectiveAudio
@@ -395,39 +377,20 @@ export function FileArchiveView({
 
       <div className="file-grid">
         <span className="k">{t('city.event')}</span>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-          {resolvedEvent && !editingCity ? (
-            <>
-              <Pill onClick={events.length > 1 ? handleCycleEvent : () => setEditingCity(true)}>
-                {eventDisplay}
-                <Icon name="chevron-down" size="s" />
-              </Pill>
-              <Pill quiet onClick={() => setEditingCity(true)}>
-                {t('city')}
-              </Pill>
-            </>
-          ) : (
-            <form className="host-city-bar" onSubmit={handleCitySubmit}>
-              <input
-                className="field"
-                type="text"
-                aria-label={t('city')}
-                placeholder={t('host.city_placeholder')}
-                value={cityInput}
-                onChange={(e) => setCityInput(e.target.value)}
-                style={{ width: 220 }}
-              />
-              <Pill type="submit" disabled={!cityInput.trim()}>
-                {t('host.city_load')}
-              </Pill>
-              {editingCity && (
-                <Pill quiet onClick={() => setEditingCity(false)}>
-                  {t('reader.cancel')}
-                </Pill>
-              )}
-            </form>
-          )}
-        </div>
+        <CityEventPicker
+          calendar={calendar}
+          selectedPath={resolvedEvent?.path ?? null}
+          fallbackTitle={resolvedEvent?.title ?? null}
+          fallbackCity={hostEvent?.city ?? recording.filed?.city ?? null}
+          defaultCity={defaultCity}
+          cityLoad={cityLoad}
+          nowMs={nowMs}
+          onSelect={(ev) => setSelectedEventPath(ev?.path ?? null)}
+          onLoadCity={(address) => {
+            setSelectedEventPath(null);
+            onLoadCity(address);
+          }}
+        />
 
         <span className="k">{t('file.transcript')}</span>
         <div className="set-v">
@@ -504,6 +467,7 @@ export function FileArchiveCard({
 }: FileArchiveCardProps) {
   const state = useSource(stateSource);
   const progress = useSource(progressSource);
+  const cityLoad = useSource(cityLoadSource);
   useSource(langSource);
   const calendarQuery = useQuery({ view: 'Calendar' });
   const loadedCityRef = useRef<string | null>(null);
@@ -533,7 +497,9 @@ export function FileArchiveCard({
       refining={refining}
       signedIn={Boolean(state?.me)}
       defaultCity={state?.setup.city ?? null}
+      cityLoad={cityLoad}
       onLoadCity={(address) => {
+        loadedCityRef.current = address;
         if (state && state.setup.city !== address) {
           void send({ do: 'Setup', setup: { ...state.setup, city: address } });
         }

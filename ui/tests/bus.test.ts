@@ -457,8 +457,6 @@ describe('QueryCache', () => {
           return 'Recording';
         case 'Transcript':
           return 'Transcript';
-        case 'Compare':
-          return 'Compare';
         default:
           return 'Other';
       }
@@ -678,14 +676,6 @@ describe('mockBus contract across all 10 queries and key commands', () => {
       expect(transcript.value.view).toBe('Transcript');
       if (transcript.value.view === 'Transcript') {
         expect(transcript.value.data.lines.length).toBeGreaterThan(0);
-      }
-
-      const compare = await bus.query!({ view: 'Compare', id: 'r1', take_a: 0, take_b: 1, chunk: 0 });
-      expect(compare.value.view).toBe('Compare');
-      if (compare.value.view === 'Compare') {
-        expect(compare.value.data.rows.some((row) => row.changed && row.ops.some((op) => op.kind !== 'Equal'))).toBe(
-          true,
-        );
       }
 
       const glossary = await bus.query!({ view: 'Glossary' });

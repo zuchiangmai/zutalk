@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use zutalk::windows::{
     CAPTION_GEO_DEBOUNCE_MS, CaptionWindowOp, CaptionWindowSpec, CaptionWindowTracker,
-    GeometrySample, run_geometry_saver,
+    DisplaySleep, GeometrySample, run_display_sleep, run_geometry_saver,
 };
 use zutalk_core::app::proto::{
     CAPTION_MAX_EXTENT_PX, CAPTION_MIN_HEIGHT_PX, CAPTION_MIN_WIDTH_PX, CaptionPrefs, CaptionScene,
@@ -222,4 +222,18 @@ fn window_rect_clamping_rejects_degenerate_dimensions() {
             height: CAPTION_MIN_HEIGHT_PX,
         })
     );
+}
+
+#[tokio::test]
+async fn display_sleep_watcher_tracks_caption_visibility_and_releases_on_drop() {
+    let mut guard = DisplaySleep::new();
+    guard.set_active(false);
+    drop(guard);
+
+    let state_reg = Register::new(State { captions: false, ..State::default() });
+    let handle = tokio::spawn(run_display_sleep(state_reg.read()));
+    tokio::task::yield_now().await;
+    state_reg.change(|cur| Some(State { captions: false, ..cur.clone() }));
+    drop(state_reg);
+    handle.await.expect("display sleep watcher exits cleanly");
 }

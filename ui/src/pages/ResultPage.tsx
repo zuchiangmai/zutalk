@@ -52,7 +52,7 @@ export type ResultViewProps = {
   onChangeTitle: (text: string) => void;
   onRefine: () => void;
   onOpenSettings: () => void;
-  onOpenReader: (opts?: { compare?: boolean }) => void;
+  onOpenReader: () => void;
   onCopy: () => void;
   onExport: (exporter: string, languages: string[]) => void;
   onEditLine: (key: string, language: string, text: string) => void;
@@ -102,7 +102,6 @@ export function ResultView({
 
   const stepIdx = refineView.stepCode ? refineStepIndex(refineView.stepCode) : -1;
   const langsLabel = row.spoken.map((l) => langName(l, l)).join(' · ');
-  const canCompare = recording.takes.length > 1;
 
   const commitTitle = () => {
     const trimmed = titleDraft.trim();
@@ -265,11 +264,6 @@ export function ResultView({
               <Pill active onClick={() => onOpenReader()}>
                 {t('result.open_reader')}
               </Pill>
-              {canCompare && (
-                <Pill onClick={() => onOpenReader({ compare: true })}>
-                  {t('reader.compare')}
-                </Pill>
-              )}
             </>
           )}
         </div>
@@ -280,7 +274,6 @@ export function ResultView({
       <TranscriptList
         id={row.id}
         take={recording.take}
-        compare={false}
         speakers={recording.speakers}
         notes={recording.notes}
         activeLangs={recording.shown}
@@ -359,7 +352,7 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
       onChangeTitle={(text) => void send({ do: 'Change', id, change: { what: 'Title', text } })}
       onRefine={() => void send({ do: 'Refine', id })}
       onOpenSettings={() => go({ page: 'settings' })}
-      onOpenReader={(opts) => go({ page: 'reader', id, compare: opts?.compare })}
+      onOpenReader={() => go({ page: 'reader', id })}
       onCopy={handleCopy}
       onExport={handleExport}
       onEditLine={(key, language, text) =>

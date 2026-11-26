@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
 import type { Calendar } from '$proto/Calendar';
-import type { CompareChunk } from '$proto/CompareChunk';
 import type { Invalidate } from '$proto/Invalidate';
 import type { LibraryPage } from '$proto/LibraryPage';
 import type { LibrarySummary } from '$proto/LibrarySummary';
@@ -23,7 +22,7 @@ export const QUERY_CACHE_MAX_ENTRIES = 128;
 export const QUERY_CANCEL_RETRY_LIMIT = 1;
 
 /** Core cancellation slots matching core/src/view/query.rs::QuerySlot. */
-export type QuerySlot = 'Library' | 'Search' | 'Recording' | 'Transcript' | 'Compare' | 'Knowledge' | 'Other';
+export type QuerySlot = 'Library' | 'Search' | 'Recording' | 'Transcript' | 'Knowledge' | 'Other';
 
 export type QueryStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -41,7 +40,6 @@ export type QueryDataMap = {
   Search: SearchResult;
   Recording: RecordingView | null;
   Transcript: TranscriptChunk;
-  Compare: CompareChunk;
   Glossary: Term[];
   Topics: TopicSummary[];
   Topic: Topic | null;
@@ -80,8 +78,6 @@ export function queryViewKind(q: Query): ViewKind {
     case 'LibraryMonth':
     case 'LibraryRecent':
       return 'Library';
-    case 'Compare':
-      return 'Transcript';
     case 'Topics':
     case 'Topic':
       return 'Knowledge';
@@ -108,8 +104,6 @@ export function querySlot(q: Query): QuerySlot {
       return 'Recording';
     case 'Transcript':
       return 'Transcript';
-    case 'Compare':
-      return 'Compare';
     case 'Topic':
       return 'Knowledge';
     case 'Glossary':
@@ -125,7 +119,6 @@ export function queryRecordingId(q: Query): string | null {
   switch (q.view) {
     case 'Recording':
     case 'Transcript':
-    case 'Compare':
       return q.id;
     default:
       return null;

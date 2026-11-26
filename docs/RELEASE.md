@@ -1,6 +1,6 @@
-# 发布、应用内更新与 0.8.6 交接
+# 发布、应用内更新与 0.8.7 交接
 
-> 2026-11-26（原稿 2026-11-16，P7-02 收拢升级）。新版怎么自己更新、负责人发一版（v0.9.0 及之后）要做的事、在旧仓库 `zulangue` 发 0.8.6 交接版并经 Sparkle 跳到新版、服务器与边缘反代部署，以及发布前真机与 8 小时手工验收清单。设计落在哪里见 `DESIGN.md` §5.10。
+> 2026-11-26（原稿 2026-11-16，P7-02 收拢升级，并按现行 0.8.6 现状对齐为 0.8.7 交接）。新版怎么自己更新、负责人发一版（v0.9.0 及之后）要做的事、在旧仓库 `release/0.8` 分支发 0.8.7 交接版并经 Sparkle 跳到新版、服务器与边缘反代部署，以及发布前真机与 8 小时手工验收清单。设计落在哪里见 `DESIGN.md` §5.10。
 
 ## 1. 应用怎么更新自己
 
@@ -39,7 +39,7 @@ rm -P "$K"
    - 根目录 `Cargo.toml` 的 `workspace.package.version`（5 个成员 crate 均继承 `version.workspace = true`）；
    - `core/Cargo.toml` 与 `server/Cargo.toml` 里 `zu = { version = "<版本>", path = "../zu" }`；
    - `ui/package.json`（及 `ui/package-lock.json` 顶层自身字段）的 `"version"`；
-   - `app/tauri.conf.json` 的 `bundle.macOS.bundleVersion` 加一（省略顶层 `"version"` 由 Tauri v2 继承 `app/Cargo.toml`）。构建号接着旧版往上数，永不复用（0.8.5 是 65，交接录音的 0.8.6 是 66，新版第一版 v0.9.0 是 67）。
+   - `app/tauri.conf.json` 的 `bundle.macOS.bundleVersion` 加一（省略顶层 `"version"` 由 Tauri v2 继承 `app/Cargo.toml`）。构建号接着旧版往上数，永不复用（0.8.5 是 65，0.8.6 是 66，交接录音的 0.8.7 是 67，新版第一版 v0.9.0 是 68）。
 2. **门禁。** 在仓库根目录跑全仓门禁，覆盖 `rustfmt`、`clippy -D warnings`、全部 10 个 `scripts/build/rules/*.sh`、全部 Rust 测试与 UI `check` / `test` / `build`（含 `index.html`、`captions.html`、`viewer.html` 三入口）：
 
    ```sh
@@ -85,27 +85,28 @@ rm -P "$K"
 
    传完下载 `…/releases/latest/download/latest.json` 看一眼，版本对、各平台的地址都打得开。
 
-## 4. 在 `zulangue` 发 0.8.6 交接版与 Sparkle `zu` 频道跳跃
+## 4. 在 `release/0.8` 发 0.8.7 交接版与 Sparkle `zu` 频道跳跃
 
-旧版（0.8.x）用 Sparkle 读 `https://github.com/4seas-community/ZuTalk/releases/latest/download/appcast.xml`（仓库已转到 `zuchiangmai/ZuTalk`，靠 GitHub 的重定向）。旧版当前是 `0.8.5`（构建号 `65`），最后一版是 `0.8.6`（构建号 `66`）：它把录音交接给新版，交接完才看得到新版（[migrate.md](migrate.md) §4）。
+旧版（0.8.x）用 Sparkle 读 `https://github.com/4seas-community/ZuTalk/releases/latest/download/appcast.xml`（仓库如转到 `zuchiangmai/ZuTalk` 靠 GitHub 重定向）。旧版已发布到 `0.8.6`（构建号 `66`），最后一版是 `0.8.7`（构建号 `67`）：它把录音交接给新版，交接完才看得到新版（[migrate.md](migrate.md) §4）。新版打开即自动把 0.8 录音搬入本机书架（无需登录 `did:zu` 即可查看和使用），后续登录 `did:zu` 再无缝领回。
 
-### 4.1 在 `/Users/kant/Zuzalu/zulangue` 构建并发布 0.8.6（负责人手工执行）
+### 4.1 在 `release/0.8` 构建并发布 0.8.7（构建号 67）
 
-以下命令均在旧仓库 `/Users/kant/Zuzalu/zulangue` 下运行（新版构建期间绝不改动旧仓库）：
+以下命令在旧版保护分支 `release/0.8` 上运行：
 
 ```sh
 cd /Users/kant/Zuzalu/zulangue
+git checkout release/0.8
 
-# 1. 核对旧仓库干净且当前处于 0.8.5（构建 65）
+# 1. 核对当前处于 0.8.6（构建 66）且补丁已落盘 / 升版到 0.8.7（构建 67）
 git status --short
 grep '^version = ' Cargo.toml
 
-# 2. 预检并应用 0.8 交接补丁（含 handover.rs、LibraryHandover.swift、channel = "zu"）
+# 2. （若尚未应用）预检并应用 0.8 交接补丁（含 handover.rs、LibraryHandover.swift、channel = "zu"）
 git apply --check /Users/kant/Zuzalu/zutalk/docs/migrate-0.8.patch
 git apply /Users/kant/Zuzalu/zutalk/docs/migrate-0.8.patch
 
-# 3. 升版到 0.8.6（同步 Cargo.toml、MARKETING_VERSION = 0.8.6、CURRENT_PROJECT_VERSION = 66）
-just bump 0.8.6
+# 3. 升版到 0.8.7（同步 Cargo.toml、MARKETING_VERSION = 0.8.7、CURRENT_PROJECT_VERSION = 67）
+just bump 0.8.7
 
 # 4. 检查 FFI 编译、重新生成 UniFFI Swift 绑定并同步 Xcode 工程，随后构建本地 .app（产出 build/app/ZuTalk.app）
 cargo check -p vt-ffi
@@ -121,37 +122,37 @@ ls -la "$TMP_HOME/Library/Application Support/ZuTalk/handover/"
 jq '.recordings | length' "$TMP_HOME/Library/Application Support/ZuTalk/handover/index.json"
 # 核对完后删除临时目录：rm -rf "$TMP_HOME"
 
-# 6. 跑旧仓门禁并发布 v0.8.6（构建 66）；注意必须显式传入与 `git remote get-url github` 一致的 GITHUB_REPOSITORY 及 GITHUB_REF_NAME
+# 6. 跑旧仓门禁并发布 v0.8.7（构建 67）；注意必须显式传入与 `git remote get-url github` 一致的 GITHUB_REPOSITORY 及 GITHUB_REF_NAME
 #    生成的 appcast.xml 位于 build/dmg/appcast.xml，妥善保存供 §4.2 合并
 just ci-check
 GITHUB_REPOSITORY="<与 git remote get-url github 一致，如 4seas-community/ZuTalk 或 zuchiangmai/ZuTalk>" \
-GITHUB_REF_NAME="v0.8.6" \
+GITHUB_REF_NAME="v0.8.7" \
 just release-sparkle-adhoc   # 或带同样环境变量跑 just release-ship 打 tag 并发布到 GitHub
 ```
 
-### 4.2 生成双项签名 `appcast.xml`（让 0.8.6 跳到 v0.9.0）
+### 4.2 生成双项签名 `appcast.xml`（让 0.8.7 跳到 v0.9.0）
 
 Sparkle 装新版，要五件事都成立：
 
 - **同一个应用。** bundle id `xyz.voice.zutalk`，包名 `ZuTalk.app`：配置里的 `identifier` 和 `productName`。系统给的麦克风、录屏授权跟着 bundle id 走，不用重来。
-- **构建号比 66 大。** `bundle.macOS.bundleVersion`，v0.9.0 是 `67`。Sparkle 拿已装那份的构建号和新包里的比，新的不大就当降级攻击，不装。
+- **构建号比 67 大。** `bundle.macOS.bundleVersion`，v0.9.0 是 `68`。Sparkle 拿已装那份的构建号和新包里的比，新的不大就当降级攻击，不装。
 - **整包签名有效。** ad-hoc，`signingIdentity: "-"`。
 - **用旧版的钥匙签。** DMG 用旧版 Sparkle 的 Ed25519 私钥签，appcast 本身也要签（旧版开了 `SURequireSignedFeed`）。那把私钥在这台 Mac 的登录钥匙圈里，账户名是改名前的 `Zulangue`。
-- **在 `zu` 频道上。** 新版那一项带 `<sparkle:channel>zu</sparkle:channel>`。0.8.5 及更早不认这个频道，只会更新到 0.8.6；0.8.6 写好交接才允许这个频道。所以经由自动更新，没有人越过交接。
+- **在 `zu` 频道上。** 新版那一项带 `<sparkle:channel>zu</sparkle:channel>`。0.8.6 及更早不认这个频道，只会更新到 0.8.7；0.8.7 写好交接才允许这个频道。所以经由自动更新，没有人越过交接。
 
-前三件由 `app/tests/updates.rs` 守着。做法：用旧仓库 `zulangue` 的 `justfile` 里 `sparkle-appcast` 下的同一份 Sparkle 2.9.4 工具（下载地址和 SHA-256 照抄那里）：
+前三件由 `app/tests/updates.rs` 守着。做法：用旧仓库 `release/0.8` 的 `justfile` 里 `sparkle-appcast` 下的同一份 Sparkle 2.9.4 工具（下载地址和 SHA-256 照抄那里）：
 
 ```sh
-mkdir hop && cp <0.8.6 那个 Release 的 appcast.xml> hop/appcast.xml
+mkdir hop && cp <0.8.7 那个 Release 的 appcast.xml> hop/appcast.xml
 cp target/universal-apple-darwin/release/bundle/dmg/ZuTalk_0.9.0_universal.dmg hop/
 <Sparkle 工具>/bin/generate_appcast --account Zulangue --channel zu \
   --download-url-prefix "https://github.com/zuchiangmai/ZuTalk/releases/download/v0.9.0/" \
   --maximum-versions 2 -o hop/appcast.xml hop
 ```
 
-`hop` 里只放 `0.8.6` 的 `appcast.xml` 和新版这一个 DMG（放了旧版的 DMG 它会去做增量包）。生成后核对 `hop/appcast.xml`：两项都在，`0.8.6` 那项 `sparkle:version` 是 `66`、不带频道，新版那项 `sparkle:version` 是 `67`、带 `<sparkle:channel>zu</sparkle:channel>`；`sparkle:edSignature=` 和 `<!-- sparkle-signatures:` 都在。然后随 §3 第 6 步一起上传。
+`hop` 里只放 `0.8.7` 的 `appcast.xml` 和新版这一个 DMG（放了旧版的 DMG 它会去做增量包）。生成后核对 `hop/appcast.xml`：两项都在，`0.8.7` 那项 `sparkle:version` 是 `67`、不带频道，新版那项 `sparkle:version` 是 `68`、带 `<sparkle:channel>zu</sparkle:channel>`；`sparkle:edSignature=` 和 `<!-- sparkle-signatures:` 都在。然后随 §3 第 6 步一起上传。
 
-这一跳只做一次，但这份 `appcast.xml` 要一直跟着走：以后每一个标为 Latest 的 Release 都原样再带上它（从第一个新版的 Release 下下来再传）。还没开过的旧版只认「最新那个 Release 里的 `appcast.xml`」，最新的里面没有，它们就再也跳不过来；它指向的 DMG（`0.8.6` 的和 `v0.9.0` 的）也一直不能删。旧版跳过来以后，从 `latest.json` 自己更新到最新。
+这一跳只做一次，但这份 `appcast.xml` 要一直跟着走：以后每一个标为 Latest 的 Release 都原样再带上它（从第一个新版的 Release 下下来再传）。还没开过的旧版只认「最新那个 Release 里的 `appcast.xml`」，最新的里面没有，它们就再也跳不过来；它指向的 DMG（`0.8.7` 的和 `v0.9.0` 的）也一直不能删。旧版跳过来以后，从 `latest.json` 自己更新到最新。
 
 ## 5. 服务器与前端边缘部署配置
 

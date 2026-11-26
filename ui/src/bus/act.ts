@@ -1,6 +1,6 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { Command } from '$proto/Command';
-import { getBus, say } from './channel';
+import { beginCityLoad, failCityLoad, getBus, say } from './channel';
 import { navigate } from './route';
 
 function refusalCode(err: unknown): string {
@@ -13,14 +13,20 @@ function refusalCode(err: unknown): string {
 export async function send(command: Command): Promise<boolean> {
   const bus = getBus();
   if (!bus) {
+    if (command.do === 'City') failCityLoad(command.address, 'starting');
     say('starting');
     return false;
+  }
+  if (command.do === 'City') {
+    beginCityLoad(command.address);
   }
   try {
     await bus.send(command);
     return true;
   } catch (err) {
-    say(refusalCode(err));
+    const code = refusalCode(err);
+    if (command.do === 'City') failCityLoad(command.address, code);
+    say(code);
     return false;
   }
 }

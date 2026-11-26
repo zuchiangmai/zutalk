@@ -4,6 +4,14 @@ import type { CaptionSize } from "./CaptionSize";
 import type { WindowRect } from "./WindowRect";
 
 /**
- * Per-scene visual and window behavior settings (`CaptionScenes.dc.html`, `P5.md` §3.4).
+ * Per-scene visual and window behavior settings (`P5.md` §3.4).
  */
-export type SceneStyle = { lines: number, size: CaptionSize, bg: CaptionBg, light: boolean, sans: boolean, top: boolean, always_on_top: boolean, click_through: boolean, auto_hide: boolean, fullscreen: boolean, geometry: WindowRect | null, };
+export type SceneStyle = { lines: number, size: CaptionSize, 
+/**
+ * Manual font size in px/pt (`16..=160`); `None` follows window dimensions automatically.
+ */
+font_px: number | null, bg: CaptionBg, 
+/**
+ * Continuous canvas backdrop opacity percent (`20..=100`); `None` uses the `bg` preset.
+ */
+opacity: number | null, light: boolean, sans: boolean, top: boolean, always_on_top: boolean, click_through: boolean, auto_hide: boolean, fullscreen: boolean, geometry: WindowRect | null, };

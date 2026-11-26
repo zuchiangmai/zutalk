@@ -42,7 +42,11 @@ export type IconName =
   | 'book'
   | 'file-text'
   | 'arrow-right'
-  | 'sparkles';
+  | 'sparkles'
+  | 'pin'
+  | 'pin-off'
+  | 'minimize'
+  | 'minus';
 
 const PATHS: Record<IconName, ReactNode> = {
   lock: (
@@ -171,6 +175,10 @@ const PATHS: Record<IconName, ReactNode> = {
   sparkles: (
     <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3zM5 17l.8 2.2L8 20l-2.2.8L5 23l-.8-2.2L2 20l2.2-.8L5 17z" />
   ),
+  pin: <path d="M12 17v5M9 4h6l-1 6 3 3v1H7v-1l3-3-1-6Z" />,
+  'pin-off': <path d="M3 3l18 18M12 17v5M9 4h6l-1 6 3 3v1h-5M7 14v-1l2.2-2.2" />,
+  minimize: <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7" />,
+  minus: <path d="M5 12h14" />,
 };
 
 export type IconProps = {

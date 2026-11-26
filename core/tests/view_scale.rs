@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use zu::SecretKey;
-use zutalk_core::app::proto::{
-    CompareRow, DiffOp, LibraryFilter, Query, QueryValue, SearchHitKind, ViewKind,
-};
+use zutalk_core::app::proto::{LibraryFilter, Query, QueryValue, SearchHitKind, ViewKind};
 use zutalk_core::live::lang::profile;
 use zutalk_core::live::lines::Line;
 use zutalk_core::record::shelf::{About, Draft, DraftWriter, LINE, RECORDING, Said, Shelf};
@@ -373,23 +371,6 @@ fn seed_two_take_recording(
     tx.commit().expect("commit two-take recording");
 }
 
-fn verify_diff_roundtrip(row: &CompareRow) {
-    let mut recon_a = String::new();
-    let mut recon_b = String::new();
-    for op in &row.ops {
-        match op {
-            DiffOp::Equal { text } => {
-                recon_a.push_str(text);
-                recon_b.push_str(text);
-            }
-            DiffOp::Delete { text } => recon_a.push_str(text),
-            DiffOp::Insert { text } => recon_b.push_str(text),
-        }
-    }
-    assert_eq!(recon_a, row.text_a, "DiffOp must reconstruct text_a");
-    assert_eq!(recon_b, row.text_b, "DiffOp must reconstruct text_b");
-}
-
 fn said(t0: u32, t1: u32, lang: &str, text: &str) -> Said {
     Said {
         line: Line {
@@ -594,7 +575,6 @@ async fn scale_10_hour_transcript_chunk_and_compare_under_100ms() {
     engine.set_source(Some(shelf), Some(db), true, true);
 
     let mut tr_timings = Vec::new();
-    let mut cmp_timings = Vec::new();
 
     for chunk in [0u32, 50, 99] {
         let t0 = Instant::now();
@@ -616,42 +596,12 @@ async fn scale_10_hour_transcript_chunk_and_compare_under_100ms() {
             "Transcript chunk {chunk} took {tr_ms:.2} ms > {QUERY_BUDGET_MS} ms"
         );
         tr_timings.push(format!("c{chunk}={tr_ms:.2}ms"));
-
-        let t0 = Instant::now();
-        let cmp = match engine
-            .query(Query::Compare { id: "rec-10h".into(), take_a: 0, take_b: 1, chunk })
-            .await
-            .expect("compare chunk")
-            .value
-        {
-            QueryValue::Compare(c) => c,
-            other => panic!("unexpected reply: {other:?}"),
-        };
-        let cmp_ms = t0.elapsed().as_secs_f64() * 1_000.0;
-        assert_eq!(cmp.rows.len(), TRANSCRIPT_CHUNK_LINES);
-        assert_eq!(cmp.total_chunks, 100);
-        let base_seq = chunk * TRANSCRIPT_CHUNK_LINES as u32;
-        for (offset, row) in cmp.rows.iter().enumerate() {
-            let seq = base_seq + offset as u32;
-            let expected_changed = seq.is_multiple_of(10);
-            assert_eq!(row.changed, expected_changed, "chunk {chunk} seq {seq} changed mismatch");
-            verify_diff_roundtrip(row);
-        }
-        assert!(
-            cmp_ms <= QUERY_BUDGET_MS as f64,
-            "Compare chunk {chunk} took {cmp_ms:.2} ms > {QUERY_BUDGET_MS} ms"
-        );
-        cmp_timings.push(format!("c{chunk}={cmp_ms:.2}ms"));
     }
 
     assert_eq!(seen.of("query.slow").len(), 0, "no query.slow events expected");
     assert_eq!(zutalk_log::refused(), refused_before, "zero log fields refused");
 
-    eprintln!(
-        "scale_10h: seed={seed_ms}ms transcript=[{}] compare=[{}]",
-        tr_timings.join(", "),
-        cmp_timings.join(", ")
-    );
+    eprintln!("scale_10h: seed={seed_ms}ms transcript=[{}]", tr_timings.join(", "));
 
     tree.cancel();
     tree.wait().await;
@@ -698,29 +648,7 @@ async fn i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration() {
         .expect("tr 4h last");
     let tr_4h_last_us = t0.elapsed().as_micros();
 
-    let t0 = Instant::now();
-    let cmp_1m = engine
-        .query(Query::Compare { id: "rec-1m".into(), take_a: 0, take_b: 1, chunk: 0 })
-        .await
-        .expect("cmp 1m");
-    let cmp_1m_us = t0.elapsed().as_micros();
-
-    let t0 = Instant::now();
-    let cmp_4h_first = engine
-        .query(Query::Compare { id: "rec-4h".into(), take_a: 0, take_b: 1, chunk: 0 })
-        .await
-        .expect("cmp 4h first");
-    let cmp_4h_first_us = t0.elapsed().as_micros();
-
-    let t0 = Instant::now();
-    let cmp_4h_last = engine
-        .query(Query::Compare { id: "rec-4h".into(), take_a: 0, take_b: 1, chunk: 39 })
-        .await
-        .expect("cmp 4h last");
-    let cmp_4h_last_us = t0.elapsed().as_micros();
-
     let tr_4h_chunk_bytes = serde_json::to_vec(&tr_4h_last).expect("json").len();
-    let cmp_4h_chunk_bytes = serde_json::to_vec(&cmp_4h_last).expect("json").len();
     let estimated_full_4h_bytes = tr_4h_chunk_bytes * 40;
 
     for reply in [&tr_1m, &tr_4h_first, &tr_4h_last] {
@@ -729,25 +657,14 @@ async fn i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration() {
             other => panic!("expected Transcript, got {other:?}"),
         }
     }
-    for reply in [&cmp_1m, &cmp_4h_first, &cmp_4h_last] {
-        match &reply.value {
-            QueryValue::Compare(c) => assert!(c.rows.len() <= TRANSCRIPT_CHUNK_LINES),
-            other => panic!("expected Compare, got {other:?}"),
-        }
-    }
 
     assert!(
         tr_4h_chunk_bytes < estimated_full_4h_bytes / 10,
         "chunk size must stay bounded relative to full 4h transcript"
     );
-    for (name, us) in [
-        ("tr_1m", tr_1m_us),
-        ("tr_4h_first", tr_4h_first_us),
-        ("tr_4h_last", tr_4h_last_us),
-        ("cmp_1m", cmp_1m_us),
-        ("cmp_4h_first", cmp_4h_first_us),
-        ("cmp_4h_last", cmp_4h_last_us),
-    ] {
+    for (name, us) in
+        [("tr_1m", tr_1m_us), ("tr_4h_first", tr_4h_first_us), ("tr_4h_last", tr_4h_last_us)]
+    {
         assert!(
             us <= u128::from(QUERY_BUDGET_MS) * 1_000,
             "{name} took {us}us > {QUERY_BUDGET_MS}ms"
@@ -755,12 +672,9 @@ async fn i8_transcript_and_compare_chunk_cost_does_not_grow_with_duration() {
     }
 
     let tr_ratio = tr_4h_last_us as f64 / tr_1m_us.max(1) as f64;
-    let cmp_ratio = cmp_4h_last_us as f64 / cmp_1m_us.max(1) as f64;
     eprintln!(
         "i8_chunk: tr_1m={tr_1m_us}us tr_4h_c0={tr_4h_first_us}us tr_4h_c39={tr_4h_last_us}us \
-         tr_ratio={tr_ratio:.2} | cmp_1m={cmp_1m_us}us cmp_4h_c0={cmp_4h_first_us}us \
-         cmp_4h_c39={cmp_4h_last_us}us cmp_ratio={cmp_ratio:.2} | \
-         tr_chunk_bytes={tr_4h_chunk_bytes} cmp_chunk_bytes={cmp_4h_chunk_bytes}"
+         tr_ratio={tr_ratio:.2} | tr_chunk_bytes={tr_4h_chunk_bytes}"
     );
 
     tree.cancel();
@@ -971,7 +885,7 @@ async fn i2_concurrent_view_queries_do_not_stall_live_captions() {
     let frames_before = bench.frames();
 
     // Concurrently fire 20 mixed L3 queries across Search, LibraryMonth, LibrarySummary,
-    // Transcript, and Compare while the live recording advances virtual time.
+    // Transcript, and Recording while the live recording advances virtual time.
     let mut ok_count = 0usize;
     let mut cancelled_count = 0usize;
     for round in 0..4u32 {
@@ -992,19 +906,14 @@ async fn i2_concurrent_view_queries_do_not_stall_live_captions() {
             take: None,
             chunk: 0,
         });
-        let q_compare = bench.query(Query::Compare {
-            id: format!("rec-{:04}", round * 100),
-            take_a: 0,
-            take_b: 0,
-            chunk: 0,
-        });
+        let q_recording = bench.query(Query::Recording { id: format!("rec-{:04}", round * 100) });
 
         let (r1, r2, r3, r4, r5, ()) = tokio::join!(
             q_search,
             q_month,
             q_summary,
             q_transcript,
-            q_compare,
+            q_recording,
             tokio::time::sleep(Duration::from_millis(2_000)),
         );
         for res in [r1, r2, r3, r4, r5] {

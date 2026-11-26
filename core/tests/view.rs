@@ -26,10 +26,7 @@ use zutalk_core::view::index::{
 use zutalk_core::view::query::{
     Invalidations, KEEP_INVALIDATIONS_EVENTS, Query, QueryValue, ViewEngine, ViewKind,
 };
-use zutalk_core::view::transcript::{
-    DIFF_LCS_MAX_BYTES, DiffOp, TRANSCRIPT_CHUNK_LINES, compare_lines, diff_text, slice_chunk,
-    total_chunks,
-};
+use zutalk_core::view::transcript::{TRANSCRIPT_CHUNK_LINES, slice_chunk, total_chunks};
 
 const ME: &str = "did:zu:ewvi7nxzyoun6zhxrhs64oiz";
 const OTHER_ME: &str = "did:zu:qq7hq3xbd2lvf5jy6tkmzbxe";
@@ -506,23 +503,7 @@ fn index_search_covers_title_lines_translations_notes_cjk_thai_fullwidth_and_sho
     );
 }
 
-// ---- P2-04: chunking, pure-function compare, invalidations ring, and ViewEngine ----
-
-fn roundtrip_ops(ops: &[DiffOp]) -> (String, String) {
-    let mut a = String::new();
-    let mut b = String::new();
-    for op in ops {
-        match op {
-            DiffOp::Equal { text } => {
-                a.push_str(text);
-                b.push_str(text);
-            }
-            DiffOp::Delete { text } => a.push_str(text),
-            DiffOp::Insert { text } => b.push_str(text),
-        }
-    }
-    (a, b)
-}
+// ---- P2-04: chunking, invalidations ring, and ViewEngine ----
 
 #[test]
 fn transcript_chunking_splits_at_64_lines_and_handles_empty_and_out_of_range() {
@@ -573,69 +554,6 @@ fn transcript_chunking_splits_at_64_lines_and_handles_empty_and_out_of_range() {
     // Out of range chunk returns empty lines with accurate totals.
     let oob = slice_chunk("r", 1, &lines200, 99);
     assert_eq!((oob.total_lines, oob.total_chunks, oob.lines.len()), (200, 4, 0));
-}
-
-#[test]
-fn compare_lines_aligns_merged_sentences_and_roundtrips_diff_ops() {
-    // Take 0 has two short draft lines, one deleted filler line, and one unchanged line.
-    let a = vec![
-        ("r.0.00000".into(), said(1_000, 2_000, "en", "The first one", &[])),
-        ("r.0.00001".into(), said(2_100, 3_500, "en", "ships in Murch.", &[])),
-        ("r.0.00002".into(), said(4_000, 4_500, "en", "um noise", &[])),
-        ("r.0.00003".into(), said(5_000, 6_000, "en", "Agreed.", &[])),
-    ];
-    // Take 1 merges lines 0+1 and fixes typo "Murch" -> "March", drops filler, keeps "Agreed.".
-    let b = vec![
-        ("r.1.00000".into(), said(1_000, 3_600, "en", "The first one ships in March.", &[])),
-        ("r.1.00001".into(), said(5_000, 6_000, "en", "Agreed.", &[])),
-    ];
-
-    let rows = compare_lines(&a, &b);
-    assert_eq!(rows.len(), 3);
-
-    // Row 0: merged & corrected.
-    assert_eq!(rows[0].key_a.as_deref(), Some("r.0.00000"));
-    assert_eq!(rows[0].key_b.as_deref(), Some("r.1.00000"));
-    assert!(rows[0].changed);
-    assert_eq!(rows[0].text_a, "The first one ships in Murch.");
-    assert_eq!(rows[0].text_b, "The first one ships in March.");
-    assert_eq!(roundtrip_ops(&rows[0].ops), (rows[0].text_a.clone(), rows[0].text_b.clone()));
-
-    // Row 1: unmatched deleted line inserted at t0 = 4000.
-    assert_eq!(rows[1].key_a.as_deref(), Some("r.0.00002"));
-    assert_eq!(rows[1].key_b, None);
-    assert!(rows[1].changed);
-    assert_eq!(rows[1].text_a, "um noise");
-    assert_eq!(rows[1].text_b, "");
-    assert_eq!(roundtrip_ops(&rows[1].ops), (rows[1].text_a.clone(), rows[1].text_b.clone()));
-
-    // Row 2: identical line.
-    assert_eq!(rows[2].key_a.as_deref(), Some("r.0.00003"));
-    assert_eq!(rows[2].key_b.as_deref(), Some("r.1.00001"));
-    assert!(!rows[2].changed);
-    assert_eq!(roundtrip_ops(&rows[2].ops), (rows[2].text_a.clone(), rows[2].text_b.clone()));
-
-    // Zero-timestamp positional alignment fallback.
-    let zero_a = vec![
-        ("r.0.00000".into(), said(0, 0, "zh", "三个案例", &[])),
-        ("r.0.00001".into(), said(0, 0, "zh", "多余一句", &[])),
-    ];
-    let zero_b = vec![("r.1.00000".into(), said(0, 0, "zh", "这三个案例。", &[]))];
-    let zrows = compare_lines(&zero_a, &zero_b);
-    assert_eq!(zrows.len(), 2);
-    assert_eq!(zrows[0].key_a.as_deref(), Some("r.0.00000"));
-    assert_eq!(zrows[0].key_b.as_deref(), Some("r.1.00000"));
-    assert_eq!(roundtrip_ops(&zrows[0].ops), ("三个案例".into(), "这三个案例。".into()));
-    assert_eq!(zrows[1].key_b, None);
-    assert_eq!(zrows[1].text_a, "多余一句");
-
-    // Over-cap line (> DIFF_LCS_MAX_BYTES) skips quadratic LCS yet keeps round-trip invariant.
-    let long_a = format!("prefix {} suffix", "a".repeat(DIFF_LCS_MAX_BYTES + 200));
-    let long_b = format!("prefix {} suffix", "b".repeat(DIFF_LCS_MAX_BYTES + 200));
-    let started = std::time::Instant::now();
-    let long_ops = diff_text(&long_a, &long_b);
-    assert!(started.elapsed().as_millis() < 50, "over-cap diff should be O(n)");
-    assert_eq!(roundtrip_ops(&long_ops), (long_a, long_b));
 }
 
 #[test]
@@ -782,14 +700,6 @@ async fn view_engine_executes_all_queries_and_cancels_superseded_search() {
         .await
         .expect("transcript");
     assert!(matches!(r.value, QueryValue::Transcript(ref c) if c.take == 1 && c.lines.len() == 1));
-
-    let r = engine
-        .query(Query::Compare { id: "rec1".into(), take_a: 0, take_b: 1, chunk: 0 })
-        .await
-        .expect("compare");
-    assert!(
-        matches!(r.value, QueryValue::Compare(ref c) if c.rows.len() == 1 && c.rows[0].changed)
-    );
 
     let r = engine.query(Query::Glossary).await.expect("glossary");
     assert!(matches!(r.value, QueryValue::Glossary(ref terms) if terms.len() == 1));
@@ -1048,7 +958,7 @@ async fn core_query_reflects_recording_notes_changes_search_takes_and_invalidate
         QueryValue::Glossary(ref terms) if terms.iter().any(|t| t.said == "Zuzalu")
     ));
 
-    // Query::Transcript + Query::Compare on the 2-take recording.
+    // Query::Transcript on the 2-take recording.
     let tr = app
         .core
         .query(Query::Transcript { id: "rec_cmp".into(), take: Some(1), chunk: 0 })
@@ -1058,15 +968,6 @@ async fn core_query_reflects_recording_notes_changes_search_takes_and_invalidate
         tr.value,
         QueryValue::Transcript(ref c)
             if c.total_lines == 1 && c.lines[0].1.line.text == "refined wording here"
-    ));
-    let cmp = app
-        .core
-        .query(Query::Compare { id: "rec_cmp".into(), take_a: 0, take_b: 1, chunk: 0 })
-        .await
-        .expect("compare");
-    assert!(matches!(
-        cmp.value,
-        QueryValue::Compare(ref c) if c.rows.len() == 1 && c.rows[0].changed
     ));
 
     // Command::DestroyAudio on `imported_id` and `rec_cmp` -> flips `row.audio` to false and

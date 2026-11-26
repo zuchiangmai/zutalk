@@ -668,14 +668,6 @@ async fn scale_175_recordings_migration_with_adoption_topics_queries_idempotency
         assert_eq!(chunk1.lines.len(), 2);
         assert_eq!(chunk1.lines[1].1.via.get("text").map(String::as_str), Some("hand"));
 
-        let cmp = app
-            .core
-            .query(Query::Compare { id: built.f32_id.clone(), take_a: 0, take_b: 1, chunk: 0 })
-            .await
-            .expect("compare query");
-        let QueryValue::Compare(diff) = cmp.value else { panic!("expected Compare") };
-        assert!(!diff.rows.is_empty(), "compare between take 0 and take 1 must return rows");
-
         // 5. Topics & Glossary confirm local legacy `talk/term` migrated into `"always"`.
         let topics_reply = app.core.query(Query::Topics).await.expect("topics query");
         let QueryValue::Topics(topics) = topics_reply.value else { panic!("expected Topics") };
@@ -973,5 +965,134 @@ async fn sign_out_clears_unmoved_and_drops_stale_migration_result() {
             "stale Msg::Moved after SignOut must be dropped, got {} rows",
             final_state.unmoved.len()
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsigned_local_user_sees_migrated_08_recordings_immediately_and_adopts_on_sign_in() {
+    let _store = STORE.lock().await;
+    store(false);
+    keys::set("identity.local", Some(&hub::LOCAL_SEED)).expect("local seed");
+    keys::set("tape", Some(&[9u8; 32])).expect("tape secret");
+    keys::set("soniox", Some(b"sk-own-test-key")).expect("own soniox key");
+
+    let old = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let rec_dir = old.path().join("handover/recordings");
+    fs::create_dir_all(&rec_dir).unwrap();
+    fs::create_dir_all(old.path().join("Secrets")).unwrap();
+
+    let s16_plain: Vec<u8> =
+        (0..16_000usize).flat_map(|n| (((n % 300) as i16 - 150) * 50).to_le_bytes()).collect();
+    let mut keys_map = BTreeMap::new();
+    let mut names = Vec::new();
+    let mut expected_ids = Vec::new();
+    for i in 0..3usize {
+        let uuid = format!("22222222-0000-4000-8000-{i:012}");
+        let key = [(i as u8).wrapping_mul(17).wrapping_add(3); 32];
+        let key_name = format!("zutalk.audio.{uuid}");
+        keys_map.insert(key_name.clone(), hex_key(&key));
+        let dir = old.path().join("audio").join(&uuid);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("chunk.00000.enc"), seal_old_chunk(&key, 1, &s16_plain)).unwrap();
+        let started = MONTH_STARTS_MS[0] + (i as i64) * 60_000;
+        let handed_json = json!({
+            "version": 1,
+            "id": uuid,
+            "about": {
+                "started": started,
+                "length_ms": 1000,
+                "title": format!("Local Migrated Session {i}"),
+                "spoken": ["en"],
+                "shown": ["en"],
+                "source": "mic"
+            },
+            "takes": [[{
+                "t0": 0,
+                "t1": 900,
+                "speaker": "1",
+                "language": "en",
+                "text": format!("Unsigned line number {i}"),
+                "translations": {},
+                "incomplete": false,
+                "via": { "text": "stt-rt-v6" }
+            }]],
+            "speakers": { "1": "Host" },
+            "note": format!("Note for session {i}"),
+            "audio": {
+                "key": key_name,
+                "rate": 16000,
+                "channels": 1,
+                "format": "s16",
+                "chunks": [{ "path": format!("audio/{uuid}/chunk.00000.enc"), "t_ms": 0 }]
+            }
+        });
+        let handed: Handed = serde_json::from_value(handed_json.clone()).unwrap();
+        expected_ids.push(handed.id());
+        fs::write(rec_dir.join(format!("{uuid}.json")), serde_json::to_vec(&handed_json).unwrap())
+            .unwrap();
+        names.push(uuid);
+    }
+    fs::write(
+        old.path().join("Secrets/content-keys.json"),
+        serde_json::to_vec(&json!({ "keys": keys_map })).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        old.path().join("handover/index.json"),
+        serde_json::to_vec(&json!({ "version": 1, "recordings": names })).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Unsigned first launch: all 3 migrated 0.8 recordings appear immediately without sign-in.
+    {
+        let mut app =
+            App::with(Config { old: Some(old.path().to_path_buf()), ..config(data.path()) });
+        let rows = app.wait_library(|r| r.len() == 3).await;
+        app.wait_progress(|p| p.move_old.is_none()).await;
+        let state = app.until(|s| s.me.is_none()).await;
+        assert!(state.me.is_none(), "must stay unsigned (local did:key)");
+        assert!(state.unmoved.is_empty());
+        assert!(rows.iter().all(|r| r.draft && r.audio));
+        // Migrated drafts never trigger automatic whole-session refinement even with own Soniox key.
+        assert!(app.outlet.progress.now().1.refine.is_none());
+
+        let transcript = app.transcript(&expected_ids[0], Some(0), 0).await;
+        assert_eq!(transcript.lines[0].1.line.text, "Unsigned line number 0");
+        assert!(tape::kept(&data.path().join("tape").join(&expected_ids[0])));
+
+        // Delete recording #2 while unsigned; it must not resurrect on reboot or sign-in.
+        app.send(Command::Remove { id: expected_ids[2].clone() });
+        app.wait_library(|r| r.len() == 2).await;
+    }
+
+    // 2. Second unsigned launch: idempotent, deleted recording does not resurrect.
+    {
+        let app = App::with(Config { old: Some(old.path().to_path_buf()), ..config(data.path()) });
+        let rows = app.wait_library(|r| r.len() == 2).await;
+        assert!(!rows.iter().any(|r| r.id == expected_ids[2]));
+    }
+
+    // 3. Later sign-in with did:zu: adopts the 2 remaining migrated recordings seamlessly,
+    //    preserving About.moved == true (no auto-refine), tape/, and never duplicating or
+    //    resurrecting recording #2.
+    {
+        let kept = [&[5u8; 32][..], ME.as_bytes()].concat();
+        keys::set("identity", Some(&kept)).expect("sign in ME");
+        let mut app =
+            App::with(Config { old: Some(old.path().to_path_buf()), ..config(data.path()) });
+        let state = app.until(|s| s.me.as_deref() == Some(ME)).await;
+        assert_eq!(state.local_shelf.recordings, 2);
+        assert!(state.local_shelf.adopted);
+        let rows = app.wait_library(|r| r.len() == 2).await;
+        assert!(!rows.iter().any(|r| r.id == expected_ids[2]));
+        assert!(app.outlet.progress.now().1.refine.is_none());
+
+        let adopted_about =
+            hub::shelf(data.path()).about(&expected_ids[0]).unwrap().expect("adopted recording");
+        assert!(adopted_about.about.moved, "adopted 0.8 recording must keep moved == true");
+        assert!(tape::kept(&data.path().join("tape").join(&expected_ids[0])));
+        let transcript = app.transcript(&expected_ids[0], Some(0), 0).await;
+        assert_eq!(transcript.lines[0].1.line.text, "Unsigned line number 0");
     }
 }

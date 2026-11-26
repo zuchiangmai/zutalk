@@ -262,3 +262,57 @@ pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow
     }
     if ok { CaptionWindow::Ok } else { CaptionWindow::Failed }
 }
+
+/// Prevents the display from sleeping while the standalone captions window is open (matching 0.8's
+/// `SubtitleDisplaySleepActivity`). Owned by a single supervised shell task: zero locks, and on
+/// macOS `caffeinate -d -w <pid>` automatically terminates if the app ever crashes.
+#[derive(Default)]
+pub struct DisplaySleep {
+    #[cfg(target_os = "macos")]
+    child: Option<std::process::Child>,
+}
+
+impl DisplaySleep {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn set_active(&mut self, active: bool) {
+        use std::process::{Command as ProcessCommand, Stdio};
+        if active {
+            if self.child.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_none()) {
+                return;
+            }
+            let pid = std::process::id().to_string();
+            self.child = ProcessCommand::new("/usr/bin/caffeinate")
+                .args(["-d", "-w", &pid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok(); // dropped: caffeinate is best-effort display-sleep guard on macOS
+        } else if let Some(mut child) = self.child.take() {
+            let _ = child.kill(); // dropped: child may already have exited
+            let _ = child.wait(); // dropped: best-effort reap on hide
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn set_active(&mut self, _active: bool) {}
+}
+
+impl Drop for DisplaySleep {
+    fn drop(&mut self) {
+        self.set_active(false);
+    }
+}
+
+/// Watches `state.captions` and toggles display-sleep prevention without holding any lock.
+pub async fn run_display_sleep(mut state: Reading<State>) {
+    let mut guard = DisplaySleep::new();
+    guard.set_active(state.now().1.captions);
+    while let Some((_, next)) = state.next().await {
+        guard.set_active(next.captions);
+    }
+}

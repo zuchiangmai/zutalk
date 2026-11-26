@@ -15,7 +15,7 @@ use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zu::{Pack, SecretKey};
 use zutalk_core::app::hub::Config;
-use zutalk_core::app::proto::{Command, LocalShelf, Query, QueryValue};
+use zutalk_core::app::proto::{Command, LocalShelf, Query, QueryValue, Setup};
 use zutalk_core::capture::clock::wall_ms;
 use zutalk_core::capture::tape::{Pass, kept as tape_kept};
 use zutalk_core::id::keys;
@@ -494,6 +494,12 @@ async fn in_progress_local_recording_adopted_on_seal_refines_into_person_shelf()
         ..config_on(dir.path(), NOWHERE)
     });
     app.until(|_| true).await;
+    // Configure monolingual English setup so refinement exercises Soniox transcription without
+    // requiring a separate OpenRouter translation key (fresh Setup::initial defaults to zh + en).
+    app.send(Command::Setup {
+        setup: Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() },
+    });
+    app.until(|s| s.setup.shown == vec!["en"]).await;
 
     // Start recording while signed out (local did:key, own Soniox key configured).
     app.send(Command::Start);

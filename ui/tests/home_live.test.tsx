@@ -40,7 +40,7 @@ describe('HomeView', () => {
     ...EMPTY,
     setup: {
       ...EMPTY.setup,
-      spoken: ['zh'],
+      spoken: ['zh', 'en'],
       shown: ['zh', 'en'],
       sound: 'Mic',
       device: null,
@@ -62,7 +62,7 @@ describe('HomeView', () => {
     title: null,
   };
 
-  it('starts recording, updates spoken/shown/sound/device setup, imports, and shows 0.8 migration status', () => {
+  it('starts recording, updates unified languages/sound/device setup, imports, and shows 0.8 migration status', () => {
     const onStart = vi.fn();
     const onSetup = vi.fn<(setup: Setup) => void>();
     const onImport = vi.fn();
@@ -86,15 +86,17 @@ describe('HomeView', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start recording' }));
     expect(onStart).toHaveBeenCalledTimes(1);
 
-    // Add a spoken language via picker
-    fireEvent.click(screen.getByRole('button', { name: 'Add to Spoken languages' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'English' }));
-    expect(onSetup).toHaveBeenCalledWith(expect.objectContaining({ spoken: ['zh', 'en'] }));
+    // Add a language via unified picker (syncs both spoken and shown)
+    fireEvent.click(screen.getByRole('button', { name: 'Add to Language' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'ไทย' }));
+    expect(onSetup).toHaveBeenCalledWith(
+      expect.objectContaining({ spoken: ['zh', 'en', 'th'], shown: ['zh', 'en', 'th'] }),
+    );
 
-    // Remove a caption language
+    // Remove a language (syncs both spoken and shown)
     onSetup.mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Remove English' }));
-    expect(onSetup).toHaveBeenCalledWith(expect.objectContaining({ shown: ['zh'] }));
+    expect(onSetup).toHaveBeenCalledWith(expect.objectContaining({ spoken: ['zh'], shown: ['zh'] }));
 
     // Switch sound source
     onSetup.mockClear();

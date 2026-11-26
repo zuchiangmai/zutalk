@@ -22,7 +22,7 @@ pub use crate::view::index::{
 pub use crate::view::query::{
     Invalidate, Invalidations, OutboundRow, Query, QueryReply, QueryValue, RecordingView, ViewKind,
 };
-pub use crate::view::transcript::{CompareChunk, CompareRow, DiffOp, TranscriptChunk};
+pub use crate::view::transcript::TranscriptChunk;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -92,12 +92,20 @@ pub const CAPTION_MIN_WIDTH_PX: u32 = 240;
 pub const CAPTION_MIN_HEIGHT_PX: u32 = 80;
 /// Upper bound guarding against corrupted window geometry (`P5-03`).
 pub const CAPTION_MAX_EXTENT_PX: u32 = 16_384;
-/// Minimum caption lines per language (`CaptionScenes.dc.html`).
+/// Minimum caption lines per language.
 pub const CAPTION_LINES_MIN: u8 = 1;
-/// Maximum caption lines per language (`CaptionScenes.dc.html`).
-pub const CAPTION_LINES_MAX: u8 = 3;
+/// Maximum caption lines per language (matching 0.8's audience row ceiling).
+pub const CAPTION_LINES_MAX: u8 = 8;
+/// Minimum manual caption font size in px/pt (0.8 `SubtitleOverlayFontPolicy`).
+pub const CAPTION_FONT_MIN_PX: u16 = 16;
+/// Maximum manual caption font size in px/pt for projector reading.
+pub const CAPTION_FONT_MAX_PX: u16 = 160;
+/// Minimum continuous caption canvas opacity percentage (20%).
+pub const CAPTION_OPACITY_MIN_PCT: u8 = 20;
+/// Maximum continuous caption canvas opacity percentage (100%).
+pub const CAPTION_OPACITY_MAX_PCT: u8 = 100;
 
-/// Fixed caption window presentation scenes (`P5.md` §3.4, `CaptionScenes.dc.html`).
+/// Fixed caption window presentation scenes (`P5.md` §3.4).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum CaptionScene {
@@ -105,7 +113,6 @@ pub enum CaptionScene {
     SelfView,
     Band,
     Stage,
-    Facing,
 }
 
 impl CaptionScene {
@@ -115,7 +122,6 @@ impl CaptionScene {
             CaptionScene::SelfView => "self",
             CaptionScene::Band => "band",
             CaptionScene::Stage => "stage",
-            CaptionScene::Facing => "facing",
         }
     }
 }
@@ -163,14 +169,20 @@ impl WindowRect {
     }
 }
 
-/// Per-scene visual and window behavior settings (`CaptionScenes.dc.html`, `P5.md` §3.4).
+/// Per-scene visual and window behavior settings (`P5.md` §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(default)]
 pub struct SceneStyle {
     pub lines: u8,
     pub size: CaptionSize,
+    /// Manual font size in px/pt (`16..=160`); `None` follows window dimensions automatically.
+    #[serde(default)]
+    pub font_px: Option<u16>,
     pub bg: CaptionBg,
+    /// Continuous canvas backdrop opacity percent (`20..=100`); `None` uses the `bg` preset.
+    #[serde(default)]
+    pub opacity: Option<u8>,
     pub light: bool,
     pub sans: bool,
     pub top: bool,
@@ -186,7 +198,9 @@ impl SceneStyle {
         Self {
             lines: 2,
             size: CaptionSize::Auto,
+            font_px: None,
             bg: CaptionBg::Half,
+            opacity: None,
             light: false,
             sans: false,
             top: false,
@@ -202,12 +216,14 @@ impl SceneStyle {
         Self {
             lines: 2,
             size: CaptionSize::Auto,
+            font_px: None,
             bg: CaptionBg::Solid,
+            opacity: None,
             light: false,
             sans: false,
-            top: false,
+            top: true,
             always_on_top: true,
-            click_through: true,
+            click_through: false,
             auto_hide: false,
             fullscreen: false,
             geometry: None,
@@ -217,8 +233,10 @@ impl SceneStyle {
     pub fn stage() -> Self {
         Self {
             lines: 3,
-            size: CaptionSize::Large,
+            size: CaptionSize::Auto,
+            font_px: None,
             bg: CaptionBg::Solid,
+            opacity: None,
             light: false,
             sans: false,
             top: false,
@@ -230,25 +248,12 @@ impl SceneStyle {
         }
     }
 
-    pub fn facing() -> Self {
-        Self {
-            lines: 2,
-            size: CaptionSize::Auto,
-            bg: CaptionBg::Solid,
-            light: false,
-            sans: false,
-            top: false,
-            always_on_top: false,
-            click_through: false,
-            auto_hide: false,
-            fullscreen: false,
-            geometry: None,
-        }
-    }
-
-    /// Clamps `lines` to `1..=3` and sanitizes any saved `geometry`.
+    /// Clamps `lines`, `font_px`, `opacity`, and any saved `geometry` to safe bounds.
     pub fn normalized(mut self) -> Self {
         self.lines = self.lines.clamp(CAPTION_LINES_MIN, CAPTION_LINES_MAX);
+        self.font_px = self.font_px.map(|px| px.clamp(CAPTION_FONT_MIN_PX, CAPTION_FONT_MAX_PX));
+        self.opacity =
+            self.opacity.map(|pct| pct.clamp(CAPTION_OPACITY_MIN_PCT, CAPTION_OPACITY_MAX_PCT));
         self.geometry = self.geometry.map(WindowRect::clamp);
         self
     }
@@ -260,7 +265,7 @@ impl Default for SceneStyle {
     }
 }
 
-/// Fixed 4-scene caption style table (bounded struct, zero dynamic map for I8).
+/// Fixed 3-scene caption style table (bounded struct, zero dynamic map for I8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(default)]
@@ -268,7 +273,6 @@ pub struct CaptionScenes {
     pub self_view: SceneStyle,
     pub band: SceneStyle,
     pub stage: SceneStyle,
-    pub facing: SceneStyle,
 }
 
 impl Default for CaptionScenes {
@@ -277,7 +281,6 @@ impl Default for CaptionScenes {
             self_view: SceneStyle::self_view(),
             band: SceneStyle::band(),
             stage: SceneStyle::stage(),
-            facing: SceneStyle::facing(),
         }
     }
 }
@@ -297,7 +300,6 @@ impl CaptionPrefs {
             CaptionScene::SelfView => &self.scenes.self_view,
             CaptionScene::Band => &self.scenes.band,
             CaptionScene::Stage => &self.scenes.stage,
-            CaptionScene::Facing => &self.scenes.facing,
         }
     }
 
@@ -306,7 +308,6 @@ impl CaptionPrefs {
             CaptionScene::SelfView => &mut self.scenes.self_view,
             CaptionScene::Band => &mut self.scenes.band,
             CaptionScene::Stage => &mut self.scenes.stage,
-            CaptionScene::Facing => &mut self.scenes.facing,
         }
     }
 
@@ -318,12 +319,11 @@ impl CaptionPrefs {
         self.style_mut(self.scene)
     }
 
-    /// Normalizes all 4 scenes' line counts and saved window rectangles.
+    /// Normalizes all 3 scenes' line counts, font/opacity bounds, and saved window rectangles.
     pub fn normalized(mut self) -> Self {
         self.scenes.self_view = self.scenes.self_view.normalized();
         self.scenes.band = self.scenes.band.normalized();
         self.scenes.stage = self.scenes.stage.normalized();
-        self.scenes.facing = self.scenes.facing.normalized();
         self
     }
 }
@@ -346,6 +346,14 @@ pub struct Setup {
     pub city: Option<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+}
+
+impl Setup {
+    /// First-run defaults when no `settings.json` exists yet: bilingual Chinese + English.
+    pub fn initial() -> Self {
+        let langs = vec!["zh".into(), "en".into()];
+        Self { spoken: langs.clone(), shown: langs, ..Self::default() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]

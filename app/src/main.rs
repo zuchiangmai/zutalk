@@ -114,6 +114,7 @@ fn main() {
             app.manage(core);
             app.manage(ui_vitals);
             let state_reading = outlet.state.clone();
+            let sleep_reading = outlet.state.clone();
             let handle_pushed = app.handle().clone();
             let handle_captions = app.handle().clone();
             let _kept = pump::start(
@@ -156,6 +157,7 @@ fn main() {
                 );
             }
             let beat_handle = app.handle().clone();
+            shell.spawn("shell.captions_sleep", windows::run_display_sleep(sleep_reading));
             shell.spawn(
                 "shell.beat",
                 beat::run(
