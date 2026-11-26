@@ -86,7 +86,7 @@ fn main() {
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             // Our server, which relays sign-ins, issues keys and keeps rooms. Set when building.
-            let server = option_env!("ZUTALK_SERVER").unwrap_or("https://localhost:8443");
+            let server = option_env!("ZUTALK_SERVER").unwrap_or("https://zutalk.exe.xyz");
             let base = Config::new(data.clone(), server).from_env();
             // The log first, so that all after it is said; without one the app still starts.
             match zutalk_log::install(&base.logs(), "zutalk", base.log, cfg!(debug_assertions)) {

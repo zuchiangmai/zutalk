@@ -46,7 +46,7 @@ rm -P "$K"
    RUSTC_WRAPPER="" scripts/build/check.sh
    ```
 
-3. **在 Mac 上构建、签名（含内置一次性 0.8 交接 helper，支持 0.8.5/0.8.6 一跳直升）。** 在仓库根目录跑。通用二进制，一份给 Apple 芯片和 Intel 两种 Mac。**务必传入生产 `ZUTALK_SERVER`**（未传时 `app/src/main.rs` 编译期默认回落到 `https://localhost:8443`）：
+3. **在 Mac 上构建、签名（含内置一次性 0.8 交接 helper，支持 0.8.5/0.8.6 一跳直升）。** 在仓库根目录跑。通用二进制，一份给 Apple 芯片和 Intel 两种 Mac。`app/src/main.rs` 默认连生产中转服务器 `https://zutalk.exe.xyz`（也可用 `ZUTALK_SERVER` 覆盖）：
 
    ```sh
    rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -55,7 +55,7 @@ rm -P "$K"
 
    TAURI_SIGNING_PRIVATE_KEY="$(security find-generic-password -s zutalk-update -w)" \
    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-   ZUTALK_SERVER="https://<正式服务器域名>" \
+   ZUTALK_SERVER="https://zutalk.exe.xyz" \
    cargo tauri build --target universal-apple-darwin \
      --config '{"bundle":{"macOS":{"files":{"Helpers/zutalk-handover-08":"../build/handover/zutalk-handover-08"}}}}'
    ```
