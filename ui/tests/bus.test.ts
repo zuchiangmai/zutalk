@@ -329,6 +329,115 @@ describe('bus channel and state semantics', () => {
     expect(frameSource.getSnapshot()?.t_audio).toBe(1000);
     stop2();
   });
+
+  it('settles vitals rAF loop to 0 Hz when idle or hidden and wakes on active Session', () => {
+    const raf = installMockRaf();
+    try {
+      let emit: (e: Parameters<typeof take>[0]) => void = () => {};
+      const stop = startBus({
+        send: () => Promise.resolve(),
+        listen(on) {
+          emit = on;
+          return () => {};
+        },
+        drawn: () => {},
+      });
+
+      // Tick through quiet idle frames; rAF must stop self-scheduling once settled.
+      for (let i = 1; i <= 20; i++) {
+        raf.tick(i * 16);
+      }
+      expect(raf.pending.size).toBe(0);
+
+      // Starting a live Session wakes the vitals rAF loop and keeps it running while recording.
+      emit({
+        kind: 'Signal',
+        is: {
+          seq: 1,
+          signal: {
+            of: 'Session',
+            is: {
+              id: 'live-rec',
+              started: 1_000,
+              status: { is: 'Recording' },
+              outbound: false,
+              viewers: 0,
+              event_title: null,
+            },
+          },
+        },
+      });
+      expect(raf.pending.size).toBeGreaterThan(0);
+      for (let i = 21; i <= 40; i++) {
+        raf.tick(i * 16);
+      }
+      expect(raf.pending.size).toBe(1);
+
+      // Stopping the Session lets the rAF loop settle back to 0 Hz.
+      emit({ kind: 'Signal', is: { seq: 2, signal: { of: 'Session', is: null } } });
+      for (let i = 41; i <= 65; i++) {
+        raf.tick(i * 16);
+      }
+      expect(raf.pending.size).toBe(0);
+
+      stop();
+    } finally {
+      raf.restore();
+    }
+  });
+
+  it('flushes pending Signals via timer fallback when document.hidden pauses rAF', async () => {
+    const raf = installMockRaf();
+    const origDoc = globalThis.document;
+    (globalThis as unknown as { document: unknown }).document = {
+      hidden: true,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    try {
+      let emit: (e: Parameters<typeof take>[0]) => void = () => {};
+      const stop = startBus({
+        send: () => Promise.resolve(),
+        listen(on) {
+          emit = on;
+          return () => {};
+        },
+      });
+
+      emit({
+        kind: 'Signal',
+        is: {
+          seq: 1,
+          signal: {
+            of: 'Session',
+            is: {
+              id: 'occluded-rec',
+              started: 1_000,
+              status: { is: 'Recording' },
+              outbound: false,
+              viewers: 0,
+              event_title: null,
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      expect(sessionSource.getSnapshot()?.id).toBe('occluded-rec');
+      expect(routeSource.getSnapshot()).toEqual({ page: 'live' });
+
+      // Never ticking rAF (macOS AppKit pauses rAF on occluded windows): Session(null) still flushes!
+      emit({ kind: 'Signal', is: { seq: 2, signal: { of: 'Session', is: null } } });
+      await new Promise((r) => setTimeout(r, 40));
+      expect(sessionSource.getSnapshot()).toBeNull();
+      expect(routeSource.getSnapshot()).toEqual({ page: 'result', id: 'occluded-rec' });
+
+      stop();
+    } finally {
+      raf.restore();
+      (globalThis as unknown as { document: Document }).document = origDoc;
+    }
+  });
 });
 
 describe('QueryCache', () => {
@@ -588,6 +697,38 @@ describe('QueryCache', () => {
     expect(src.getSnapshot().data).toEqual([{ said: 'Zuzalu', written: {} }]);
 
     unsub();
+  });
+
+  it('retries queries rejected with starting when boot State arrives without needing Invalidate', async () => {
+    let booting = true;
+    let calls = 0;
+    const stop = startBus({
+      send: () => Promise.resolve(),
+      query: async () => {
+        calls++;
+        if (booting) throw 'starting';
+        return { version: 1, value: { view: 'Glossary', data: [{ said: 'Chiang Mai', written: {} }] } };
+      },
+      listen: () => () => {},
+    });
+
+    const src = queryCache.sourceFor({ view: 'Glossary' });
+    const unsub = src.subscribe(() => {});
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    expect(calls).toBe(1);
+    expect(src.getSnapshot().status).toBe('loading');
+
+    // Boot finishes and publishes State (no Invalidate emitted on quiet boot!): query must retry!
+    booting = false;
+    take({ kind: 'State', is: { ...EMPTY, me: 'did:key:booted' } });
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+
+    expect(calls).toBe(2);
+    expect(src.getSnapshot().status).toBe('ready');
+    expect(src.getSnapshot().data).toEqual([{ said: 'Chiang Mai', written: {} }]);
+
+    unsub();
+    stop();
   });
 });
 

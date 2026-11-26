@@ -30,6 +30,12 @@ export const NOTICE_MAX_ITEMS = 8;
 /** Local WebView storage key for UI theme preference without altering core Setup (P3.md §3.4). */
 export const THEME_STORAGE_KEY = 'zutalk.theme';
 
+/** Fallback timer (ms) to commit buffered signals when an occluded window pauses rAF. */
+const HIDDEN_SIGNAL_FLUSH_MS = 16;
+
+/** Consecutive quiet idle frames (~200 ms) before parking the vitals rAF loop at 0 Hz. */
+const IDLE_VITALS_QUIET_FRAMES = 12;
+
 export type NoticeItem = {
   n: number;
   code: string;
@@ -171,7 +177,9 @@ let lastLiveHostEvent: HostEvent | null = null;
 const seenSeq: Partial<Record<Signal['of'], number>> = {};
 const pendingSignals: Partial<Record<Signal['of'], Signal>> = {};
 let flushRaf = 0;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let vitalsRaf = 0;
+let wakeVitals: (() => void) | null = null;
 
 setLeaveHostArmHook(() => {
   const current = stateCell.getSnapshot();
@@ -228,6 +236,10 @@ function applySignal(signal: Signal): void {
 /** Commits all buffered per-kind latest signals once per animation frame. */
 export function flushPendingSignals(): void {
   flushRaf = 0;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   const keys = Object.keys(pendingSignals) as Signal['of'][];
   if (keys.length === 0) return;
   const batch: Signal[] = [];
@@ -242,6 +254,16 @@ export function flushPendingSignals(): void {
 }
 
 function scheduleSignalFlush(): void {
+  const hidden = typeof document !== 'undefined' && Boolean(document.hidden);
+  if (hidden) {
+    if (flushTimer === null) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        flushPendingSignals();
+      }, HIDDEN_SIGNAL_FLUSH_MS);
+    }
+    return;
+  }
   if (flushRaf || vitalsRaf) return;
   if (typeof globalThis.requestAnimationFrame === 'function') {
     flushRaf = globalThis.requestAnimationFrame(() => {
@@ -254,6 +276,10 @@ function scheduleSignalFlush(): void {
 export function take(event: Event): void {
   if (event.kind === 'State') {
     stateCell.set(event.is);
+    queryCache.retryPending();
+    if (event.is.captions) {
+      wakeVitals?.();
+    }
     if (event.is.host.is === 'Live' && event.is.host.event) {
       lastLiveHostEvent = event.is.host.event;
     }
@@ -268,6 +294,9 @@ export function take(event: Event): void {
     const { seq, signal } = event.is;
     if (seq <= (seenSeq[signal.of] ?? 0)) return;
     seenSeq[signal.of] = seq;
+    if (signal.of === 'Session' || signal.of === 'Frame') {
+      wakeVitals?.();
+    }
     if (typeof globalThis.requestAnimationFrame === 'function') {
       pendingSignals[signal.of] = signal;
       scheduleSignalFlush();
@@ -289,7 +318,7 @@ export function take(event: Event): void {
   }
 }
 
-/** Attaches a Bus, connects QueryCache, and starts the rAF signal + vitals loop. */
+/** Attaches a Bus, connects QueryCache, and starts the demand-driven rAF signal + vitals loop. */
 export function startBus(bus: Bus): () => void {
   activeBus = bus;
   // Reset per-signal sequence watermarks and buffered frames so a fresh bus starts cleanly from seq 1.
@@ -297,6 +326,11 @@ export function startBus(bus: Bus): () => void {
     globalThis.cancelAnimationFrame(flushRaf);
   }
   flushRaf = 0;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  wakeVitals = null;
   for (const k of Object.keys(seenSeq) as Signal['of'][]) delete seenSeq[k];
   for (const k of Object.keys(pendingSignals) as Signal['of'][]) delete pendingSignals[k];
   queryCache.clear();
@@ -325,27 +359,65 @@ export function startBus(bus: Bus): () => void {
   if (bus.drawn && typeof globalThis.requestAnimationFrame === 'function') {
     const reportDrawn = bus.drawn;
     let vitals = emptyVitals();
+    let quietFrames = 0;
+
+    const scheduleVitals = () => {
+      if (!alive || vitalsRaf) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      vitalsRaf = globalThis.requestAnimationFrame(step);
+    };
+
+    const step = (now: number) => {
+      vitalsRaf = 0;
+      if (!alive) return;
+      flushPendingSignals();
+      const hidden = typeof document !== 'undefined' && Boolean(document.hidden);
+      vitals = stepVitalsFrame(vitals, now, hidden);
+      const frameSeq = seenSeq.Frame ?? 0;
+      const [next, due] = reportVitals(vitals, frameSeq, now);
+      vitals = next;
+      if (due) reportDrawn(due.seq, due.gap_ms, due.gaps);
+      if (hidden) return;
+      const active =
+        sessionCell.getSnapshot() !== null || frameSeq > vitals.reported || vitals.gaps > 0;
+      if (active) {
+        quietFrames = 0;
+        vitalsRaf = globalThis.requestAnimationFrame(step);
+      } else if (quietFrames < IDLE_VITALS_QUIET_FRAMES) {
+        quietFrames++;
+        vitalsRaf = globalThis.requestAnimationFrame(step);
+      } else {
+        // Parked at 0 Hz while idle: reset `last` so waking later reports no false frame gap.
+        vitals = stepVitalsFrame(vitals, 0, true);
+      }
+    };
+
+    wakeVitals = () => {
+      quietFrames = 0;
+      scheduleVitals();
+    };
+
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       onVisibility = () => {
-        if (document.hidden) vitals = stepVitalsFrame(vitals, 0, true);
+        if (document.hidden) {
+          if (vitalsRaf && typeof globalThis.cancelAnimationFrame === 'function') {
+            globalThis.cancelAnimationFrame(vitalsRaf);
+          }
+          vitalsRaf = 0;
+          vitals = stepVitalsFrame(vitals, 0, true);
+        } else {
+          quietFrames = 0;
+          scheduleVitals();
+        }
       };
       document.addEventListener('visibilitychange', onVisibility);
     }
-    const step = (now: number) => {
-      if (!alive) return;
-      flushPendingSignals();
-      const hidden = typeof document !== 'undefined' && document.hidden;
-      vitals = stepVitalsFrame(vitals, now, hidden);
-      const [next, due] = reportVitals(vitals, seenSeq.Frame ?? 0, now);
-      vitals = next;
-      if (due) reportDrawn(due.seq, due.gap_ms, due.gaps);
-      vitalsRaf = globalThis.requestAnimationFrame(step);
-    };
-    vitalsRaf = globalThis.requestAnimationFrame(step);
+    scheduleVitals();
   }
 
   return () => {
     alive = false;
+    wakeVitals = null;
     if (onVisibility && typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', onVisibility);
     }
@@ -360,6 +432,10 @@ export function startBus(bus: Bus): () => void {
       globalThis.cancelAnimationFrame(flushRaf);
     }
     flushRaf = 0;
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
     for (const k of Object.keys(pendingSignals) as Signal['of'][]) {
       delete pendingSignals[k];
     }
@@ -373,10 +449,15 @@ export function startBus(bus: Bus): () => void {
 
 /** Resets all bus cells, sequence watermarks, cache, and route (for deterministic unit tests). */
 export function resetChannel(): void {
+  wakeVitals = null;
   if (flushRaf && typeof globalThis.cancelAnimationFrame === 'function') {
     globalThis.cancelAnimationFrame(flushRaf);
   }
   flushRaf = 0;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   if (vitalsRaf && typeof globalThis.cancelAnimationFrame === 'function') {
     globalThis.cancelAnimationFrame(vitalsRaf);
   }

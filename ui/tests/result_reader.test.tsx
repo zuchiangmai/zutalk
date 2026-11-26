@@ -12,7 +12,7 @@ import { EMPTY } from '../dev/mock';
 import { type Bus, noticesSource, resetChannel, startBus } from '../src/bus/channel';
 import { ui } from '../src/bus/words';
 import { parseLineIndex, ReaderPage } from '../src/pages/ReaderPage';
-import { REFINE_STEPS, ResultView, refineStepIndex } from '../src/pages/ResultPage';
+import { REFINE_STEPS, ResultPage, ResultView, refineStepIndex } from '../src/pages/ResultPage';
 import { chunksForRange, TRANSCRIPT_CHUNK_LINES } from '../src/pages/TranscriptList';
 import { installDomMocks } from './dom';
 
@@ -451,6 +451,36 @@ describe('ReaderPage virtualization, inline edits, notes, and confirmable action
       const hitRow = container.querySelector('li[data-line-key="rec-1.1.130"]');
       expect(hitRow).toBeTruthy();
       expect(hitRow?.classList.contains('hit')).toBe(true);
+    });
+  });
+
+  it('dispatches CopyTranscript for full 2,560-line recording on ReaderPage and ResultPage instead of truncating to viewport chunks', async () => {
+    const rec = makeRecording({
+      takes: [{ take: 1, lines: 2_560, is_live: false, is_current: true, written_at: 1_760_002_568_000 }],
+    });
+    const harness = createTestBus({ recording: rec, totalLines: 2_560 });
+    stopBus = startBus(harness.bus);
+
+    const reader = render(<ReaderPage id="rec-1" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(harness.sent).toContainEqual({
+      do: 'CopyTranscript',
+      id: 'rec-1',
+      take: 1,
+      languages: ['en', 'zh'],
+    });
+    reader.unmount();
+
+    harness.sent.length = 0;
+    render(<ResultPage id="rec-1" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(harness.sent).toContainEqual({
+      do: 'CopyTranscript',
+      id: 'rec-1',
+      take: 1,
+      languages: ['en', 'zh'],
     });
   });
 });

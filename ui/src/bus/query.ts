@@ -21,6 +21,9 @@ export const QUERY_CACHE_MAX_ENTRIES = 128;
 /** Maximum automatic re-enqueue attempts when an active query unexpectedly receives query.cancelled. */
 export const QUERY_CANCEL_RETRY_LIMIT = 1;
 
+/** Fallback retry interval (ms) while Core's boot job is still opening the local SQLite index. */
+export const STARTING_RETRY_MS = 80;
+
 /** Core cancellation slots matching core/src/view/query.rs::QuerySlot. */
 export type QuerySlot = 'Library' | 'Search' | 'Recording' | 'Transcript' | 'Knowledge' | 'Other';
 
@@ -145,6 +148,7 @@ type CacheEntry = {
   reqSeq: number;
   acceptedReqSeq: number;
   cancelRetries: number;
+  startingTimer: ReturnType<typeof setTimeout> | null;
   epoch: number;
 };
 
@@ -187,9 +191,28 @@ export class QueryCache {
 
   clear(): void {
     this.epoch++;
+    for (const entry of this.entries.values()) {
+      if (entry.startingTimer !== null) {
+        clearTimeout(entry.startingTimer);
+        entry.startingTimer = null;
+      }
+    }
     this.entries.clear();
     this.slotInFlight.clear();
     this.slotQueues.clear();
+  }
+
+  /** Immediately retries any subscribed query that hit Core's pre-boot `starting` window. */
+  retryPending(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.subscribers > 0 && entry.stale && entry.cell.getSnapshot().data === null) {
+        if (entry.startingTimer !== null) {
+          clearTimeout(entry.startingTimer);
+          entry.startingTimer = null;
+        }
+        this.enqueueFetch(entry);
+      }
+    }
   }
 
   /** Returns a Source for `query`; fetches on first active subscribe or when invalidated. */
@@ -212,6 +235,7 @@ export class QueryCache {
         reqSeq: 0,
         acceptedReqSeq: 0,
         cancelRetries: 0,
+        startingTimer: null,
         epoch: this.epoch,
       };
       this.entries.set(key, entry);
@@ -241,6 +265,10 @@ export class QueryCache {
         return () => {
           unsub();
           bound.subscribers = Math.max(0, bound.subscribers - 1);
+          if (bound.subscribers === 0 && bound.startingTimer !== null) {
+            clearTimeout(bound.startingTimer);
+            bound.startingTimer = null;
+          }
           bound.lastUsed = ++this.clock;
           this.evictIfNeeded();
         };
@@ -281,6 +309,10 @@ export class QueryCache {
         if (!victim || entry.lastUsed < victim.lastUsed) victim = entry;
       }
       if (!victim) return;
+      if (victim.startingTimer !== null) {
+        clearTimeout(victim.startingTimer);
+        victim.startingTimer = null;
+      }
       this.entries.delete(victim.key);
     }
   }
@@ -351,6 +383,10 @@ export class QueryCache {
       const reply = await this.executor(entry.query);
       if (this.epoch !== reqEpoch || this.entries.get(entry.key) !== entry) return;
       if (reply.version < entry.version || reqId < entry.acceptedReqSeq) return;
+      if (entry.startingTimer !== null) {
+        clearTimeout(entry.startingTimer);
+        entry.startingTimer = null;
+      }
       entry.version = reply.version;
       entry.acceptedReqSeq = reqId;
       entry.cancelRetries = 0;
@@ -364,7 +400,23 @@ export class QueryCache {
     } catch (err) {
       if (this.epoch !== reqEpoch || this.entries.get(entry.key) !== entry) return;
       const code = errorCode(err);
-      if (code === 'starting') return;
+      if (code === 'starting') {
+        entry.stale = true;
+        if (entry.subscribers > 0 && entry.startingTimer === null) {
+          entry.startingTimer = setTimeout(() => {
+            entry.startingTimer = null;
+            if (
+              this.epoch === reqEpoch &&
+              this.entries.get(entry.key) === entry &&
+              entry.subscribers > 0 &&
+              entry.stale
+            ) {
+              this.enqueueFetch(entry);
+            }
+          }, STARTING_RETRY_MS);
+        }
+        return;
+      }
       if (code === 'query.cancelled') {
         if (entry.subscribers > 0 && reqId === entry.reqSeq) {
           entry.stale = true;

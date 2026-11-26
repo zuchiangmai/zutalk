@@ -15,12 +15,10 @@ import {
   sessionSource,
   setOverlay,
   stateSource,
-  statsSource,
   t,
   toggleOverlay,
   useQuery,
   useSource,
-  waterSource,
 } from '../bus';
 import { activeStyle, updateActiveStyle } from '../captions/style';
 import { Icon } from '../ds/icons';
@@ -37,7 +35,7 @@ import { ReaderPage } from '../pages/ReaderPage';
 import { ResultPage } from '../pages/ResultPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import { CommandPalette } from './CommandPalette';
-import { HealthOverlay } from './HealthOverlay';
+import { HealthOverlayConnected } from './HealthOverlay';
 import { NoticeToast } from './NoticeToast';
 import { LIBRARY_SIDEBAR_RECENT_ROWS, Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
@@ -60,8 +58,6 @@ export function Shell() {
   const route = useSource(routeSource);
   const notices = useSource(noticesSource);
   const theme = useSource(resolvedThemeSource);
-  const water = useSource(waterSource);
-  const stats = useSource(statsSource);
   const overlayOpen = useSource(overlaySource);
   // Subscribe to language changes so every shell text re-renders when UI language switches.
   useSource(langSource);
@@ -209,13 +205,12 @@ export function Shell() {
 
       <IdentitySheet />
 
-      <HealthOverlay
-        open={overlayOpen}
-        water={water}
-        stats={stats}
-        onClose={() => setOverlay(false)}
-        onDiagnose={() => void diagnose()}
-      />
+      {overlayOpen && (
+        <HealthOverlayConnected
+          onClose={() => setOverlay(false)}
+          onDiagnose={() => void diagnose()}
+        />
+      )}
     </div>
   );
 }

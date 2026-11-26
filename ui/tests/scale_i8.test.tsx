@@ -532,4 +532,91 @@ describe('I8 UI scale & fault visibility acceptance', () => {
       globalThis.requestAnimationFrame = origRaf;
     }
   });
+
+  it('water_and_stats_1hz_ticks_cause_zero_shell_renders_while_health_overlay_is_closed', async () => {
+    const origRaf = globalThis.requestAnimationFrame;
+    (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame = undefined;
+
+    try {
+      let emit: (e: Event) => void = () => {};
+      const bus: Bus = {
+        async send() {},
+        async query(q: Query): Promise<QueryReply> {
+          if (q.view === 'LibrarySummary') {
+            return { version: 1, value: { view: 'LibrarySummary', data: { total: 0, months: [] } } };
+          }
+          return { version: 1, value: { view: 'LibraryPage', data: { total: 0, rows: [], has_more: false } } };
+        },
+        listen(on) {
+          emit = on;
+          on({ kind: 'State', is: EMPTY });
+          return () => {};
+        },
+      };
+
+      stopBus = startBus(bus);
+      let shellRenders = 0;
+      render(
+        <Profiler
+          id="shell-idle-telemetry"
+          onRender={() => {
+            shellRenders++;
+          }}
+        >
+          <Shell />
+        </Profiler>,
+      );
+
+      // Settle initial mount + Library queries.
+      await act(async () => {
+        for (let i = 0; i < 8; i++) await Promise.resolve();
+      });
+      shellRenders = 0;
+
+      // 10 seconds of 1 Hz Water and Stats signals while HealthOverlay is closed -> ZERO Shell renders!
+      act(() => {
+        for (let i = 1; i <= 10; i++) {
+          emit({
+            kind: 'Signal',
+            is: {
+              seq: i,
+              signal: {
+                of: 'Water',
+                is: {
+                  now_ms: i * 1_000,
+                  clock_ms: i * 1_000,
+                  paused: false,
+                  marks: [{ stage: 'Frame', at: i * 1_000, moved_ms: i * 1_000, why: '', ended: null }],
+                  health: [['Frame', { is: 'Live' }]],
+                },
+              },
+            },
+          });
+          emit({
+            kind: 'Signal',
+            is: {
+              seq: i,
+              signal: {
+                of: 'Stats',
+                is: {
+                  counts: [{ name: 'frame.made', n: i * 10 }],
+                  peaks: [],
+                  spreads: [],
+                  queues: [],
+                },
+              },
+            },
+          });
+        }
+      });
+      expect(shellRenders).toBe(0);
+
+      // Opening HealthOverlay (Alt+H) immediately reads the latest Water and Stats snapshots.
+      fireEvent.keyDown(window, { key: 'h', altKey: true });
+      const overlay = screen.getByRole('region', { name: 'Runtime health' });
+      expect(overlay.textContent).toContain('100');
+    } finally {
+      globalThis.requestAnimationFrame = origRaf;
+    }
+  });
 });

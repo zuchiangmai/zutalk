@@ -14,12 +14,10 @@ import {
   pick,
   progressSource,
   removeWithUndo,
-  say,
   send,
   sessionSource,
   stateSource,
   t,
-  text as formatPlainText,
   useQuery,
   useSource,
   when,
@@ -92,7 +90,7 @@ export type ReaderViewProps = {
   onRememberTerm?: (topicId: string, said: string, written: Record<string, string>) => void;
   onRefine: () => void;
   onOpenSettings: () => void;
-  onCopy: (langs: string[]) => void;
+  onCopy: (langs: string[], take: number) => void;
   onExport: (exporter: string, languages: string[]) => void;
   onDestroyAudio: () => void;
   onRemove: () => void;
@@ -535,7 +533,7 @@ export function ReaderView({
       {tab === 'transcript' ? (
         <>
           <div className="acts">
-            <Button onClick={() => onCopy(activeLangs)}>
+            <Button onClick={() => onCopy(activeLangs, selectedTake)}>
               <Icon name="copy" size="s" />
               {t('act.copy')}
             </Button>
@@ -723,7 +721,6 @@ export function ReaderPage({ id, tab, take, lineKey }: ReaderPageProps) {
   useSource(langSource);
   const recQuery = useQuery({ view: 'Recording', id });
   const topicsQuery = useQuery({ view: 'Topics' });
-  const loadedLinesRef = useRef<[string, Said][]>([]);
 
   const recording = recQuery.data;
   if (!recording || !recording.row) {
@@ -750,19 +747,8 @@ export function ReaderPage({ id, tab, take, lineKey }: ReaderPageProps) {
     );
   }
 
-  const handleCopy = (langs: string[]) => {
-    const plain = formatPlainText(
-      { lines: loadedLinesRef.current, speakers: recording.speakers },
-      langs,
-    );
-    if (globalThis.navigator?.clipboard?.writeText) {
-      void globalThis.navigator.clipboard.writeText(plain).then(
-        () => say('copied'),
-        () => say('clip'),
-      );
-    } else {
-      say('copied');
-    }
+  const handleCopy = (langs: string[], selectedTake: number) => {
+    void send({ do: 'CopyTranscript', id, take: selectedTake, languages: langs });
   };
 
   const handleExport = (exporter: string, languages: string[]) => {
@@ -812,9 +798,6 @@ export function ReaderPage({ id, tab, take, lineKey }: ReaderPageProps) {
       onExport={handleExport}
       onDestroyAudio={() => void send({ do: 'DestroyAudio', id })}
       onRemove={() => void removeWithUndo(id)}
-      onLoadedLinesChange={(lines) => {
-        loadedLinesRef.current = lines;
-      }}
       archiveSlot={<FileArchiveCard key={recording.row.id} recording={recording} defaultOpen={false} />}
     />
   );

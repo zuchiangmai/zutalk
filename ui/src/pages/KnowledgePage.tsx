@@ -250,7 +250,13 @@ export function KnowledgeView({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <header className="top" style={{ padding: '0 28px' }}>
-        <Pill quiet onClick={onBack}>
+        <Pill
+          quiet
+          onClick={() => {
+            commitDraftText();
+            onBack();
+          }}
+        >
           <Icon name="chevron-left" size="s" />
           {t('nav.settings')}
         </Pill>
@@ -270,7 +276,10 @@ export function KnowledgeView({
                 type="button"
                 className={`month${active ? ' on' : ''}`}
                 aria-current={active ? 'true' : undefined}
-                onClick={() => onSelectTopic(item.id)}
+                onClick={() => {
+                  if (!active) commitDraftText();
+                  onSelectTopic(item.id);
+                }}
               >
                 <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {label}
@@ -288,6 +297,7 @@ export function KnowledgeView({
                 e.preventDefault();
                 const trimmed = newTopicName.trim();
                 if (!trimmed) return;
+                commitDraftText();
                 onCreateTopic(trimmed);
                 setNewTopicName('');
                 setCreating(false);
@@ -328,7 +338,10 @@ export function KnowledgeView({
               type="button"
               className="month"
               style={{ marginTop: 6, color: 'var(--ink3)' }}
-              onClick={() => setCreating(true)}
+              onClick={() => {
+                commitDraftText();
+                setCreating(true);
+              }}
             >
               <Icon name="plus" size="s" />
               {t('knowledge.new_topic')}

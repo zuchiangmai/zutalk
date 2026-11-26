@@ -2,6 +2,7 @@ import type { Health } from '$proto/Health';
 import type { Stage } from '$proto/Stage';
 import type { Tally } from '$proto/Tally';
 import type { Water } from '$proto/Water';
+import { statsSource, useSource, waterSource } from '../bus';
 import { t, word } from '../bus/words';
 import { Icon } from '../ds/icons';
 import { Pill, Tag } from '../ds/primitives';
@@ -172,5 +173,26 @@ export function HealthOverlay({ open, water, stats, onClose, onDiagnose }: Healt
         </div>
       )}
     </section>
+  );
+}
+
+/** Bus-connected HealthOverlay mounted only when open so 1 Hz Water/Stats ticks never wake Shell. */
+export function HealthOverlayConnected({
+  onClose,
+  onDiagnose,
+}: {
+  onClose: () => void;
+  onDiagnose: () => void;
+}) {
+  const water = useSource(waterSource);
+  const stats = useSource(statsSource);
+  return (
+    <HealthOverlay
+      open={true}
+      water={water}
+      stats={stats}
+      onClose={onClose}
+      onDiagnose={onDiagnose}
+    />
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { HostEvent } from '$proto/HostEvent';
 import type { RecordingView } from '$proto/RecordingView';
 import type { Said } from '$proto/Said';
@@ -10,11 +10,9 @@ import {
   langSource,
   pick,
   progressSource,
-  say,
   send,
   stateSource,
   t,
-  text as formatPlainText,
   useQuery,
   useSource,
   when,
@@ -292,7 +290,6 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
   const progress = useSource(progressSource);
   useSource(langSource);
   const recQuery = useQuery({ view: 'Recording', id });
-  const loadedLinesRef = useRef<[string, Said][]>([]);
 
   const recording = recQuery.data;
   if (!recording || !recording.row) {
@@ -320,18 +317,7 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
   }
 
   const handleCopy = () => {
-    const plain = formatPlainText(
-      { lines: loadedLinesRef.current, speakers: recording.speakers },
-      recording.shown,
-    );
-    if (globalThis.navigator?.clipboard?.writeText) {
-      void globalThis.navigator.clipboard.writeText(plain).then(
-        () => say('copied'),
-        () => say('clip'),
-      );
-    } else {
-      say('copied');
-    }
+    void send({ do: 'CopyTranscript', id, take: recording.take, languages: recording.shown });
   };
 
   const handleExport = (exporter: string, languages: string[]) => {
@@ -364,9 +350,6 @@ export function ResultPage({ id, hostEvent }: { id: string; hostEvent?: HostEven
       onAddNote={(at_ms, text, anchor) =>
         void send({ do: 'Note', id, op: { op: 'Add', at_ms, text, anchor } })
       }
-      onLoadedLinesChange={(lines) => {
-        loadedLinesRef.current = lines;
-      }}
       archiveSlot={
         <FileArchiveCard
           key={recording.row.id}

@@ -332,6 +332,68 @@ describe('KnowledgeView', () => {
     expect(onSaveTopic).toHaveBeenCalledTimes(1);
     expect(nameInput.value).toBe(nearLimit.name);
   });
+
+  it('flushes unsaved text draft edits before switching topics, opening new topic, or navigating back without blur', () => {
+    const onSaveTopic = vi.fn<(topic: Topic) => void>();
+    const onSelectTopic = vi.fn<(id: string) => void>();
+    const onBack = vi.fn();
+
+    const { rerender } = render(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId={BOOK_SUMMARY.id}
+        topic={BOOK_TOPIC}
+        languages={['en', 'zh', 'th']}
+        onBack={onBack}
+        onSelectTopic={onSelectTopic}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+
+    // 1. Edit Background WITHOUT firing blur, then click another topic in the left rail.
+    const bgInput = screen.getByRole('textbox', { name: 'Background' });
+    fireEvent.change(bgInput, { target: { value: 'Edited without firing blur' } });
+    fireEvent.click(screen.getByRole('button', { name: /My words/ }));
+
+    expect(onSaveTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: BOOK_SUMMARY.id,
+        background: 'Edited without firing blur',
+      }),
+    );
+    expect(onSelectTopic).toHaveBeenCalledWith('always');
+
+    // 2. Edit Domain WITHOUT firing blur, then click Back to Settings.
+    onSaveTopic.mockClear();
+    rerender(
+      <KnowledgeView
+        topics={[ALWAYS_SUMMARY, BOOK_SUMMARY]}
+        selectedId={BOOK_SUMMARY.id}
+        topic={BOOK_TOPIC}
+        languages={['en', 'zh', 'th']}
+        onBack={onBack}
+        onSelectTopic={onSelectTopic}
+        onCreateTopic={vi.fn()}
+        onSaveTopic={onSaveTopic}
+        onRemoveTopic={vi.fn()}
+        onImportFile={vi.fn()}
+      />,
+    );
+    const domainInput = screen.getByRole('textbox', { name: 'Domain' });
+    fireEvent.change(domainInput, { target: { value: 'Urbanism' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(onSaveTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: BOOK_SUMMARY.id,
+        domain: 'Urbanism',
+      }),
+    );
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('HomeView topic selector', () => {
