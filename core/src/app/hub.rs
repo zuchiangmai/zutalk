@@ -693,6 +693,9 @@ impl Hub {
                 let exporter = EXPORTERS.iter().find(|e| e.id == exporter).ok_or("export.which")?;
                 self.work.export(id, exporter.id, languages, to)?;
             }
+            Command::CopyTranscript { id, take, languages } => {
+                self.work.copy_transcript(id, take, languages)?;
+            }
             Command::HostArm { event, captions } => {
                 if self.recording.is_some() {
                     return Err("recording.under_way");

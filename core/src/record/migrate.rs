@@ -179,6 +179,10 @@ fn write_owner(data: &Path, me: &str) -> Result<(), &'static str> {
 /// Minimum mtime lead (ms) for `zutalk.db` over `handover/index.json` before re-running the
 /// bundled 0.8 helper to capture newly recorded 0.8.8 sessions made after the previous handover.
 const HANDOVER_STALE_LEAD_MS: u64 = 1_000;
+/// Maximum wall-clock wait for `zutalk-handover-08` so a wedged helper cannot hang `local_bg`.
+const HANDOVER_HELPER_WAIT_MS: u64 = 30_000;
+/// Poll interval while waiting on `zutalk-handover-08` completion.
+const HANDOVER_HELPER_POLL_MS: u64 = 50;
 
 /// If `old` contains a 0.8 database without an up-to-date `handover/index.json` (e.g. a direct
 /// one-hop upgrade from 0.8.3 / 0.8.5 / 0.8.6, or a 0.8.8 user who recorded right before updating)
@@ -208,23 +212,45 @@ fn ensure_handover(old: &Path, helper: Option<&Path>) -> Result<(), &'static str
     let Some(bin) = helper.filter(|path| path.is_file()) else {
         return if has_index { Ok(()) } else { Err("migrate.missing") };
     };
-    let status = Command::new(bin)
+    let mut child = match Command::new(bin)
         .arg(old)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            warn!("migrate.helper.done", code = "migrate.missing", exit = -1i32);
+            return if has_index { Ok(()) } else { Err("migrate.missing") };
+        }
+    };
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => break Some(exit),
+            Ok(None) if started.elapsed().as_millis() as u64 >= HANDOVER_HELPER_WAIT_MS => {
+                let _ = child.kill(); // dropped: child may have exited between try_wait and kill
+                let _ = child.wait(); // dropped: best-effort reap after helper timeout
+                break None;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(HANDOVER_HELPER_POLL_MS));
+            }
+            Err(_) => break None,
+        }
+    };
     match status {
-        Ok(exit) if exit.success() && index_path.is_file() => {
+        Some(exit) if exit.success() && index_path.is_file() => {
             info!("migrate.helper.done", code = "ok");
             Ok(())
         }
-        Ok(exit) => {
+        Some(exit) => {
             let code = exit.code().unwrap_or(-1);
             warn!("migrate.helper.done", code = "migrate.missing", exit = code);
             if has_index { Ok(()) } else { Err("migrate.missing") }
         }
-        Err(_) => {
+        None => {
             warn!("migrate.helper.done", code = "migrate.missing", exit = -1i32);
             if has_index { Ok(()) } else { Err("migrate.missing") }
         }

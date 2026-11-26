@@ -616,12 +616,14 @@ struct Port<'a, K> {
 }
 
 impl<'a, K: Keys> Port<'a, K> {
-    async fn open(keys: &'a K, service: Service, base: &'a str) -> Result<Self, End> {
+    async fn open(
+        http: &Client,
+        keys: &'a K,
+        service: Service,
+        base: &'a str,
+    ) -> Result<Self, End> {
         let lease = keys.lease(service).await?;
-        // The app has one TLS provider. An error says only that it is installed already.
-        let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
-        let http = Client::builder().build().map_err(|_| End::Fatal("tls"))?;
-        Ok(Self { http, base, lease, keys, service })
+        Ok(Self { http: http.clone(), base, lease, keys, service })
     }
 
     fn to(&self, method: Method, path: &str) -> RequestBuilder {
@@ -695,6 +697,7 @@ impl<'a, K: Keys> Port<'a, K> {
         length_ms: u32,
         plan: &Plan,
         journal: &mut Journal,
+        max_poll_ms: u64,
     ) -> Result<Vec<Token>, End> {
         let name = format!("zutalk-{}.wav", plan.id);
         journal.name = Some(name.clone());
@@ -705,11 +708,15 @@ impl<'a, K: Keys> Port<'a, K> {
         let asked = transcription(plan, &name, &file);
         let job = self.make((dir, journal), "transcriptions", |r| r.json(&asked)).await?;
         let job = format!("transcriptions/{job}");
-        // Nobody is waiting by the second: it is asked until it is done.
+        let poll_started = tokio::time::Instant::now();
+        // Nobody is waiting by the second: it is asked until it is done or hits the wall budget.
         loop {
             match self.ask(self.to(Method::GET, &job)).await?["status"].as_str() {
                 Some("completed") => break,
                 Some("error") => return Err(End::Retry("transcription-failed")),
+                _ if poll_started.elapsed().as_millis() as u64 >= max_poll_ms => {
+                    return Err(End::Retry("transcription-timeout"));
+                }
                 _ => tokio::time::sleep(Duration::from_millis(POLL_MS)).await,
             }
         }
@@ -749,9 +756,14 @@ impl<'a, K: Keys> Port<'a, K> {
     }
 }
 
-/// Writes the recording's next take. Whatever it returns but `Done`, nothing has changed:
-/// the take before, or the live draft, is still the recording's text.
-pub async fn write(
+/// Maximum wall-clock wait for a single async whole-session transcription job (1 hour).
+pub const MAX_TRANSCRIBE_WAIT_MS: u64 = 3_600_000;
+
+/// Writes the recording's next take using a caller-supplied bounded `Client` and poll budget.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_with(
+    http: &Client,
+    max_poll_ms: u64,
     tree: &Tree,
     shelf: &Shelf,
     tape: (&Path, &[u8; 32]),
@@ -764,12 +776,12 @@ pub async fn write(
         let (dir, shelved) = (tape.0, |_| End::Retry("shelf"));
         // Both keys first when translation is expected: without them nothing is uploaded, and
         // nothing paid for twice.
-        let soniox = Port::open(keys, Service::Soniox, &plan.soniox).await?;
+        let soniox = Port::open(http, keys, Service::Soniox, &plan.soniox).await?;
         let expects_translation = !plan.into.is_empty()
             && (plan.spoken.is_empty()
                 || plan.into.iter().any(|into| plan.spoken.iter().any(|spoken| spoken != into)));
         let mut translator = if expects_translation {
-            Some(Port::open(keys, Service::OpenRouter, &plan.openrouter).await?)
+            Some(Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?)
         } else {
             None
         };
@@ -777,13 +789,11 @@ pub async fn write(
         journal.failed = None;
         soniox.clear(dir, &mut journal).await?;
         let (path, key) = (dir.to_path_buf(), *tape.1);
-        let length = tree
-            .blocking("write.length", move || tape::read(&path, &key, &Pass::Write, |_| {}))
-            .await;
+        let length = tree.blocking("write.length", move || tape::recover(&path, &key)).await;
         let length_ms = length.ok().and_then(Result::ok).filter(|ms| *ms > 0);
         let length_ms = length_ms.ok_or(End::Fatal("tape"))?;
         progress("transcribing", 0, 0);
-        let heard = soniox.transcribe(tree, tape, length_ms, plan, &mut journal).await;
+        let heard = soniox.transcribe(tree, tape, length_ms, plan, &mut journal, max_poll_ms).await;
         // Whatever happened, nothing stays there; and until it is gone, nothing is written.
         let cleared = soniox.clear(dir, &mut journal).await;
         let (heard, ()) = (heard?, cleared?);
@@ -794,7 +804,8 @@ pub async fn write(
         let todo: Vec<usize> = (0..said.len()).filter(|&i| foreign(&said[i])).collect();
         if !todo.is_empty() {
             if translator.is_none() {
-                translator = Some(Port::open(keys, Service::OpenRouter, &plan.openrouter).await?);
+                translator =
+                    Some(Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?);
             }
             if let Some(port) = &translator {
                 for (n, batch) in todo.chunks(BATCH).enumerate() {
@@ -827,9 +838,26 @@ pub async fn write(
     attempt.await.err().unwrap_or(End::Done)
 }
 
-/// At start-up: deletes what attempts left at the transcription service, for each recording
-/// whose audio folder is in `root`.
-pub async fn sweep(root: &Path, soniox: &str, keys: &impl Keys) -> End {
+/// Writes the recording's next take. Whatever it returns but `Done`, nothing has changed:
+/// the take before, or the live draft, is still the recording's text.
+pub async fn write(
+    tree: &Tree,
+    shelf: &Shelf,
+    tape: (&Path, &[u8; 32]),
+    plan: &Plan,
+    keys: &impl Keys,
+    now: impl Fn() -> i64,
+    progress: impl FnMut(&'static str, usize, usize),
+) -> End {
+    let Ok(http) = crate::rt::http::client() else {
+        return End::Fatal("tls");
+    };
+    write_with(&http, MAX_TRANSCRIBE_WAIT_MS, tree, shelf, tape, plan, keys, now, progress).await
+}
+
+/// At start-up: deletes what attempts left at the transcription service using a caller-supplied
+/// bounded `Client`.
+pub async fn sweep_with(http: &Client, root: &Path, soniox: &str, keys: &impl Keys) -> End {
     let attempt = async {
         let folders = fs::read_dir(root).into_iter().flatten().flatten().map(|entry| entry.path());
         let journals =
@@ -837,7 +865,7 @@ pub async fn sweep(root: &Path, soniox: &str, keys: &impl Keys) -> End {
         let mut owing = journals.collect::<Result<Vec<_>, End>>()?;
         owing.retain(|(journal, _)| journal.name.is_some());
         if !owing.is_empty() {
-            let port = Port::open(keys, Service::Soniox, soniox).await?;
+            let port = Port::open(http, keys, Service::Soniox, soniox).await?;
             for (mut journal, dir) in owing {
                 port.clear(&dir, &mut journal).await?;
             }
@@ -845,4 +873,13 @@ pub async fn sweep(root: &Path, soniox: &str, keys: &impl Keys) -> End {
         Ok(())
     };
     attempt.await.err().unwrap_or(End::Done)
+}
+
+/// At start-up: deletes what attempts left at the transcription service, for each recording
+/// whose audio folder is in `root`.
+pub async fn sweep(root: &Path, soniox: &str, keys: &impl Keys) -> End {
+    let Ok(http) = crate::rt::http::client() else {
+        return End::Fatal("tls");
+    };
+    sweep_with(&http, root, soniox, keys).await
 }

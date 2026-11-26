@@ -1163,3 +1163,57 @@ async fn unsaved_rotation_key_is_scoped_to_creating_did_and_never_leaks_across_a
     assert!(!dumped.contains(&did_b), "account B DID leaked in logs");
     assert_eq!(app.seen.refused(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_sign_in_and_finish_survive_transient_503_and_429_relay_blips() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zutalk_core::id::keys::SignIn;
+
+    let _store = STORE.lock().await;
+    store(false);
+
+    let plc = Arc::new(MemoryPlc::default());
+    let directory = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(PlcResponder(plc.clone())).mount(&directory).await;
+
+    let seed = [41u8; 32];
+    let signing_key = SecretKey::from_seed(&seed);
+    let rot = did::Rotation::from_bytes(&[42u8; 32]).unwrap();
+    let (resident_did, op) =
+        did::create_with_aka(&rot, &signing_key.public(), &["zu://resilient.zuzalu.ink".into()])
+            .unwrap();
+    plc.push_op(&resident_did, serde_json::from_str(&op).unwrap());
+
+    struct BlipRelay {
+        calls: AtomicUsize,
+        sealed: Vec<u8>,
+    }
+    impl Respond for BlipRelay {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(503),
+                1 => ResponseTemplate::new(429),
+                2 => ResponseTemplate::new(404),
+                _ => ResponseTemplate::new(200).set_body_bytes(self.sealed.clone()),
+            }
+        }
+    }
+
+    let relay = MockServer::start().await;
+    let sign_in = SignIn::begin(&relay.uri()).expect("begin sign-in");
+    let scanned = login::scan(sign_in.code()).expect("scan code");
+    let sealed = scanned
+        .seal(&login::key(&resident_did, &seed), &[51u8; 32], &[52u8; 12])
+        .expect("seal key");
+    Mock::given(method("GET"))
+        .respond_with(BlipRelay { calls: AtomicUsize::new(0), sealed })
+        .mount(&relay)
+        .await;
+
+    let http = zutalk_core::rt::http::client().expect("bounded http client");
+    let pending = identity::receive_sign_in(&sign_in, &http, &directory.uri())
+        .await
+        .expect("receive_sign_in must retry transient 503/429 relay blips before deadline");
+    assert_eq!(pending.did(), resident_did);
+    assert_eq!(pending.handle(), Some("resilient.zuzalu.ink"));
+}

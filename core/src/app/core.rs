@@ -26,12 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use zutalk_log::{Level, info, warn};
 
-/// Connection timeout for outbound HTTP requests: matches lane `PATIENCE_MS` (`P1-18`).
-const CONNECT_TIMEOUT_MS: u64 = 10_000;
-/// Idle read timeout for outbound HTTP requests: 30 s without a byte means a dead connection,
-/// while long whole-recording uploads keep streaming without a whole-request timeout (`P1-18`).
-const READ_TIMEOUT_MS: u64 = 30_000;
-
 /// Lists the system's audio input devices: real OS query in production, fake in tests.
 pub type Devices = Arc<dyn Fn() -> Vec<Device> + Send + Sync>;
 
@@ -195,12 +189,7 @@ pub struct Core {
 impl Core {
     /// Starts on the current runtime. The key store must be open (`keys::open_store`).
     pub fn start(config: Config) -> Result<(Core, Outlet), End> {
-        let _ = rustls::crypto::ring::default_provider().install_default(); // dropped: installing the same TLS provider again is harmless
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS))
-            .read_timeout(Duration::from_millis(READ_TIMEOUT_MS))
-            .build()
-            .map_err(|_| End::Fatal("tls"))?;
+        let http = crate::rt::http::client()?;
         let stats = Stats::new();
         let (commands, mail) = queue::bounded(&stats, "hub.mail", HUB_MAIL_MSGS, Full::Reject); // the interface: never waits, is told `busy`
         let results = commands.with(Full::Wait); // work that is done: must arrive; whoever did it can wait

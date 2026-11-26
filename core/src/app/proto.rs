@@ -520,6 +520,7 @@ pub enum Command {
     Remove { id: String },
     Restore { id: String },
     Export { id: String, exporter: String, languages: Vec<String>, to: String },
+    CopyTranscript { id: String, take: Option<u32>, languages: Vec<String> },
     HostArm { event: Option<HostEvent>, captions: bool },
     HostCancel,
     StopOutbound,
@@ -577,6 +578,12 @@ impl std::fmt::Debug for Command {
                 .field("exporter", exporter)
                 .field("languages", languages)
                 .field("to", to)
+                .finish(),
+            Command::CopyTranscript { id, take, languages } => f
+                .debug_struct("CopyTranscript")
+                .field("id", id)
+                .field("take", take)
+                .field("languages", languages)
                 .finish(),
             Command::HostArm { event, captions } => {
                 f.debug_struct("HostArm").field("event", event).field("captions", captions).finish()
@@ -665,6 +672,7 @@ impl Command {
             Command::Remove { .. } => "Remove",
             Command::Restore { .. } => "Restore",
             Command::Export { .. } => "Export",
+            Command::CopyTranscript { .. } => "CopyTranscript",
             Command::HostArm { .. } => "HostArm",
             Command::HostCancel => "HostCancel",
             Command::StopOutbound => "StopOutbound",
@@ -717,6 +725,7 @@ impl Command {
             | Command::Remove { .. }
             | Command::Restore { .. }
             | Command::Export { .. }
+            | Command::CopyTranscript { .. }
             | Command::HostCancel
             | Command::StopOutbound
             | Command::SignIn

@@ -624,6 +624,7 @@ export function mockBus(recording = false): Bus {
       }
     },
     Export: () => on({ kind: 'Notice', is: 'copied' }),
+    CopyTranscript: () => on({ kind: 'Notice', is: 'copied' }),
     HostArm: (c) => {
       if (!s.me) {
         on({ kind: 'Notice', is: 'sign_in.first' });

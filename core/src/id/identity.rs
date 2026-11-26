@@ -4,7 +4,9 @@
 //! `State`.
 
 use crate::capture::clock::wall_ms;
-use crate::id::keys::{self, CREATE_WAIT_MS, Me, SIGN_IN_POLL_MS, SIGN_IN_WAIT_MS, SignIn};
+use crate::id::keys::{
+    self, CREATE_WAIT_MS, Me, SIGN_IN_OFFLINE_TRIES_TIMES, SIGN_IN_POLL_MS, SIGN_IN_WAIT_MS, SignIn,
+};
 use crate::rt::supervise::End;
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -185,12 +187,29 @@ pub async fn receive_sign_in(
     directory: &str,
 ) -> Result<PendingSignIn, End> {
     let (deadline, offline) = (wall_ms() + SIGN_IN_WAIT_MS, |_| End::Retry("offline"));
+    let mut offline_tries = 0u32;
     let sealed = loop {
-        let reply = http.get(sign_in.relay_room()).send().await.map_err(offline)?;
-        match reply.status() {
-            StatusCode::OK => break reply.bytes().await.map_err(offline)?,
-            StatusCode::NOT_FOUND if wall_ms() < deadline => {}
-            _ => return Err(End::Fatal("id.expired")),
+        match http.get(sign_in.relay_room()).send().await {
+            Ok(reply) => {
+                offline_tries = 0;
+                let status = reply.status();
+                if status == StatusCode::OK {
+                    break reply.bytes().await.map_err(offline)?;
+                }
+                let transient = status == StatusCode::NOT_FOUND
+                    || status == StatusCode::REQUEST_TIMEOUT
+                    || status == StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error();
+                if !transient || wall_ms() >= deadline {
+                    return Err(End::Fatal("id.expired"));
+                }
+            }
+            Err(err) => {
+                if offline_tries >= SIGN_IN_OFFLINE_TRIES_TIMES || wall_ms() >= deadline {
+                    return Err(offline(err));
+                }
+                offline_tries += 1;
+            }
         }
         tokio::time::sleep(Duration::from_millis(SIGN_IN_POLL_MS)).await;
     };

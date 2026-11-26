@@ -52,6 +52,9 @@ pub const TAPE_QUEUE_BLOCKS: usize = 600;
 /// Live draft lines buffered for the draft writer: 256 lines covers minutes of speech before
 /// collapsing dropped lines into one gap (`P1.md` §3.7, provisional `P1.md` §4 item 3).
 pub const DRAFT_QUEUE_LINES: usize = 256;
+/// Minimum spacing between live-draft `ViewKind::Transcript` invalidations so open readers tail
+/// new speech smoothly without flooding IPC (`K6`).
+const DRAFT_INVALIDATE_MS: u64 = 1_000;
 
 /// Order of closing steps for one recording (`P1-16`).
 ///
@@ -1127,10 +1130,13 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     queue::bounded(&stats, "draft", DRAFT_QUEUE_LINES, Full::Drop);
                 let draft_shelf = start.shelf.clone();
                 let draft_id = start.id.clone();
+                let inv_id = start.id.clone();
+                let draft_sync = start.index_sync.clone();
                 let drafts = start.config.drafts.clone();
                 let draft_lines = stats.counter("draft.lines");
                 let draft_batch_ms = stats.spread("draft.batch_ms");
                 let draft_gauge = gauges.draft.clone();
+                let last_draft_inv_ms = AtomicU64::new(0);
                 draft_done = Some(keep::start(
                     &recording,
                     "draft",
@@ -1147,6 +1153,16 @@ pub(crate) async fn run(mut start: Start) -> Done {
                             draft_gauge.set(u64::from(last_said.line.t1));
                         }
                         draft_lines.add(batch.len() as u64);
+                        if !batch.is_empty() {
+                            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                            let prev_ms = last_draft_inv_ms.load(Ordering::Relaxed);
+                            if prev_ms == 0
+                                || elapsed_ms.saturating_sub(prev_ms) >= DRAFT_INVALIDATE_MS
+                            {
+                                last_draft_inv_ms.store(elapsed_ms.max(1), Ordering::Relaxed);
+                                draft_sync.invalidate_live_draft(&inv_id);
+                            }
+                        }
                         Ok(())
                     },
                     |writer| writer.sync().map_err(shelf_err),
@@ -1296,6 +1312,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
                     if let (Some(audio), Some(lane_tx)) = (&audio_fanout, &lane_tx_hold) {
                         for (n, (stream, setup, kick_rx)) in lane_specs.iter().enumerate() {
                             let (sent_at, _, ended) = gauges.lanes[n].sent.read();
+                            let (heard_at, _, _) = gauges.lanes[n].heard.read();
                             let Some(ended_why) = ended else {
                                 continue;
                             };
@@ -1330,7 +1347,8 @@ pub(crate) async fn run(mut start: Start) -> Done {
                                 kick_rx.clone(),
                                 lane_tx.clone(),
                             );
-                            let origin = lane::Origin { edge: sent_at as u32, why };
+                            let edge = heard_at.min(sent_at) as u32;
+                            let origin = lane::Origin { edge, why };
                             let (done_tx, done_rx) = oneshot::channel();
                             lane_dones[n] = done_rx;
                             recording.spawn(LANE_NAMES[n], async move {

@@ -973,3 +973,175 @@ async fn adopt_never_resurrects_custom_topic_removed_by_person() {
     let adopted_t2 = topic::get(&person_a, &t2.id).unwrap().expect("T2 should be adopted");
     assert_eq!(adopted_t2.name, "Fresh Seminar");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deferred_adopt_runs_independently_of_cloud_write_and_refreshes_live_topics_and_status() {
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = wall_ms() as i64;
+
+    // Seed 10 local recordings (> INLINE_ADOPT_MAX_RECORDINGS = 8) AND a local always-topic term.
+    let local = local_shelf(dir.path());
+    let person = shelf(dir.path());
+    for i in 0..10 {
+        let rec_id = format!("19a00000010aabbcc{:02x}", i);
+        let about = About {
+            started: now + i,
+            length_ms: 1_000,
+            title: format!("Local #{i}"),
+            spoken: vec!["en".into()],
+            take: 1,
+            ..About::default()
+        };
+        local.put(&rec_id, RECORDING, &[(rec_id.clone(), Some(about.clone()))], now + i).unwrap();
+        // Pre-populate person with the same 10 recordings + identical always topic so
+        // `sum.recordings == 0 && sum.terms == 0 && sum.topics == 0`, verifying `Msg::LocalShelf`
+        // STILL fires once `adopted.json` is written!
+        person.put(&rec_id, RECORDING, &[(rec_id.clone(), Some(about))], now + i).unwrap();
+    }
+    let shared_always = Topic {
+        id: ALWAYS_TOPIC_ID.into(),
+        pinned: true,
+        terms: vec![Term {
+            said: "AlreadyThere".into(),
+            written: BTreeMap::from([("zh".into(), "已有词".into())]),
+        }],
+        ..Topic::default()
+    };
+    topic::save(&local, shared_always.clone(), now + 20).unwrap();
+    topic::save(&person, shared_always, now + 20).unwrap();
+
+    // Also add one draft recording with audio ON PERSON so boot survey starts `job.write` against
+    // a slow Soniox server (holding `cloud_bg` for 4 s). `job.adopt` on `local_bg` must NOT wait!
+    let slow_draft = "19a00000099slowdrft";
+    person
+        .put(
+            slow_draft,
+            RECORDING,
+            &[(
+                slow_draft.into(),
+                Some(About {
+                    started: now + 50,
+                    length_ms: 2_000,
+                    spoken: vec!["en".into()],
+                    shown: vec!["en".into()],
+                    take: 0,
+                    ..About::default()
+                }),
+            )],
+            now + 50,
+        )
+        .unwrap();
+    tape(dir.path(), slow_draft, 2);
+
+    let slow_stt = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "files": [],
+            "transcriptions": [],
+            "next_page_cursor": null
+        })))
+        .mount(&slow_stt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(4_000))
+                .set_body_json(json!({ "id": "f1" })),
+        )
+        .mount(&slow_stt)
+        .await;
+
+    let kept = [&[5u8; 32][..], ME.as_bytes()].concat();
+    keys::set("identity", Some(&kept)).unwrap();
+    let mut cfg = config_on(dir.path(), NOWHERE);
+    cfg.soniox = format!("{}/v1", slow_stt.uri());
+
+    let boot_at = tokio::time::Instant::now();
+    let mut app = App::with(cfg);
+    // Even though all 10 recordings were already known (`changed == false`) AND `cloud_bg` is held
+    // for 4 s by `job.write`, `job.adopt` on `local_bg` must finish in < 1.5 s and publish
+    // `local_shelf.adopted == true`!
+    let adopted_state = tokio::time::timeout(
+        Duration::from_millis(1_500),
+        app.until(|s| s.me.as_deref() == Some(ME) && s.local_shelf.adopted),
+    )
+    .await
+    .expect("deferred adopt must run on local_bg and emit LocalShelf(adopted=true) within 1.5 s");
+    assert_eq!(adopted_state.local_shelf, LocalShelf { recordings: 10, adopted: true });
+    assert!(boot_at.elapsed() < Duration::from_millis(1_500));
+    drop(app);
+
+    // Phase 2: Fresh data dir with > 8 local recordings AND a brand-new local topic term; verify
+    // deferred adopt refreshes `env.topics` so starting a live recording carries the adopted term!
+    let dir2 = tempfile::tempdir().expect("tempdir2");
+    hub::nobody();
+    let local2 = local_shelf(dir2.path());
+    for i in 0..9 {
+        let rec_id = format!("19b00000010aabbcc{:02x}", i);
+        local2
+            .put(
+                &rec_id,
+                RECORDING,
+                &[(
+                    rec_id.clone(),
+                    Some(About {
+                        started: now + i,
+                        length_ms: 1_000,
+                        spoken: vec!["en".into()],
+                        take: 1,
+                        ..About::default()
+                    }),
+                )],
+                now + i,
+            )
+            .unwrap();
+    }
+    topic::save(
+        &local2,
+        Topic {
+            id: ALWAYS_TOPIC_ID.into(),
+            pinned: true,
+            terms: vec![Term {
+                said: "DeferredPolis".into(),
+                written: BTreeMap::from([("zh".into(), "延后城邦".into())]),
+            }],
+            ..Topic::default()
+        },
+        now + 30,
+    )
+    .unwrap();
+    keys::set("identity", Some(&kept)).unwrap();
+
+    let mut app2 = App::start(dir2.path());
+    app2.until(|s| s.me.as_deref() == Some(ME) && s.local_shelf.adopted).await;
+    let gloss = app2.wait_glossary(|g| g.iter().any(|t| t.said == "DeferredPolis")).await;
+    assert_eq!(gloss.len(), 1);
+
+    // Start a live recording with captions enabled (`shown = ["en"]`) and verify
+    // `topic.context(where = "live")` carries `terms == 1`!
+    app2.send(Command::Setup {
+        setup: Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() },
+    });
+    app2.until(|s| s.setup.shown == vec!["en".to_string()]).await;
+    app2.send(Command::Start);
+    app2.session(|s| s.is_some()).await;
+    let ctx_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !app2
+        .seen
+        .of("topic.context")
+        .iter()
+        .any(|l| l.text("where") == Some("live") && l.u64("terms") == Some(1))
+    {
+        assert!(
+            tokio::time::Instant::now() < ctx_deadline,
+            "live recording after deferred adopt must include adopted topic terms: {:?}",
+            app2.seen.of("topic.context")
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    app2.send(Command::Stop);
+    app2.session(|s| s.is_none()).await;
+}

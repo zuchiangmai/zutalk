@@ -1169,6 +1169,115 @@ async fn a_corrupted_tape_fails_write_with_tape_code() {
     assert_eq!(end, End::Fatal("tape"));
 }
 
+#[tokio::test]
+async fn write_with_times_out_hung_upload_and_stalled_transcription_poll() {
+    use zutalk_core::ai::write::write_with;
+    use zutalk_core::rt::http::client_with_timeouts;
+
+    // 1. A server that accepts TCP and stalls response headers past read_timeout must return
+    //    End::Retry("offline") promptly instead of hanging forever (K1).
+    let rec1 = recording(2);
+    let hung_stt = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "files": [],
+            "transcriptions": [],
+            "next_page_cursor": null
+        })))
+        .mount(&hung_stt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(5_000))
+                .set_body_json(json!({ "id": "file-1" })),
+        )
+        .mount(&hung_stt)
+        .await;
+    let fast_http = client_with_timeouts(500, 150).expect("bounded client");
+    let plan1 = plan(&hung_stt.uri(), "http://127.0.0.1:9", &[]);
+    let tree1 = test_tree();
+    let timed = tokio::time::timeout(
+        Duration::from_millis(900),
+        write_with(
+            &fast_http,
+            5_000,
+            &tree1,
+            &rec1.shelf,
+            (&rec1.tape, &TAPE_KEY),
+            &plan1,
+            &Keyring::both(),
+            || NOW,
+            |_, _, _| {},
+        ),
+    )
+    .await
+    .expect("write_with must not hang past client read_timeout");
+    assert_eq!(timed, End::Retry("offline"));
+
+    // 2. A transcription job stuck in "queued" past max_poll_ms must return a retryable timeout
+    //    and still clean up its remote resources instead of polling forever (K1).
+    let rec2 = recording(2);
+    let stuck_stt = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "file-1" })))
+        .mount(&stuck_stt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "tr-stuck" })))
+        .mount(&stuck_stt)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/transcriptions/tr-stuck"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "status": "queued" })))
+        .mount(&stuck_stt)
+        .await;
+    for kind in ["files", "transcriptions"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/{kind}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ kind: [], "next_page_cursor": null })),
+            )
+            .mount(&stuck_stt)
+            .await;
+    }
+    Mock::given(method("DELETE"))
+        .and(path_regex("^/v1/"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&stuck_stt)
+        .await;
+
+    let normal_http = client_with_timeouts(1_000, 1_000).expect("client");
+    let plan2 = plan(&stuck_stt.uri(), "http://127.0.0.1:9", &[]);
+    let tree2 = test_tree();
+    let polled = tokio::time::timeout(
+        Duration::from_millis(2_500),
+        write_with(
+            &normal_http,
+            150,
+            &tree2,
+            &rec2.shelf,
+            (&rec2.tape, &TAPE_KEY),
+            &plan2,
+            &Keyring::both(),
+            || NOW,
+            |_, _, _| {},
+        ),
+    )
+    .await
+    .expect("stuck transcription poll must stop at max_poll_ms");
+    assert_eq!(polled, End::Retry("transcription-timeout"));
+    let cleared = Journal::load(&rec2.tape).expect("journal after clear");
+    assert!(
+        cleared.owed.is_empty() && cleared.name.is_none(),
+        "remote files must be cleared on poll timeout: {cleared:?}"
+    );
+}
+
 // ---- 5. the real service ----
 
 /// Speech made on this machine, as 16 kHz mono samples.

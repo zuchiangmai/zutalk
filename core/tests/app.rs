@@ -122,6 +122,14 @@ fn commands_that_need_a_person_are_listed_in_one_table() {
             },
             false,
         ),
+        (
+            Command::CopyTranscript {
+                id: "id".into(),
+                take: Some(1),
+                languages: vec!["zh".into()],
+            },
+            false,
+        ),
         (Command::HostArm { event: None, captions: true }, true),
         (Command::HostCancel, false),
         (Command::StopOutbound, false),
@@ -2943,4 +2951,340 @@ async fn setup_caption_prefs_and_geometry_persist_per_scene_in_settings_json() {
     assert_eq!(reloaded.setup.mode, Mode::Conversation);
     assert_eq!(reloaded.setup.city.as_deref(), Some("zuchiangmai.com"));
     assert_eq!(again.seen.refused(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_transcript_copies_entire_multichunk_take_off_hub() {
+    use zutalk_core::live::lines::Line;
+    use zutalk_core::record::shelf::{About, LINE, RECORDING, SPEAKER, Said, Words};
+
+    let _store = STORE.lock().await;
+    hub::nobody();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = wall_ms() as i64;
+    let local = hub::local_shelf(dir.path());
+    let rec_id = "19c00000001copyfull";
+
+    // Seed 200 lines (> 3 transcript chunks of 64) on take 1 and 1 draft line on take 0.
+    local
+        .put(
+            rec_id,
+            LINE,
+            &[(
+                format!("{rec_id}.0.00000"),
+                Some(Said {
+                    line: Line {
+                        t0: 0,
+                        t1: 500,
+                        speaker: "1".into(),
+                        language: "en".into(),
+                        text: "draft only line".into(),
+                        ..Line::default()
+                    },
+                    via: BTreeMap::new(),
+                }),
+            )],
+            now,
+        )
+        .unwrap();
+    let mut take1 = Vec::with_capacity(200);
+    for i in 0..200u32 {
+        let mut translations = BTreeMap::new();
+        translations.insert("zh".into(), format!("第{i}行译文"));
+        take1.push((
+            format!("{rec_id}.1.{i:05}"),
+            Some(Said {
+                line: Line {
+                    t0: i * 1_000,
+                    t1: i * 1_000 + 800,
+                    speaker: "1".into(),
+                    language: "en".into(),
+                    text: format!("Line number {i}"),
+                    translations,
+                    ..Line::default()
+                },
+                via: BTreeMap::new(),
+            }),
+        ));
+    }
+    local.put(rec_id, LINE, &take1, now + 1).unwrap();
+    local
+        .put(rec_id, SPEAKER, &[(format!("{rec_id}.1"), Some(Words { text: "Alice".into() }))], now)
+        .unwrap();
+    local
+        .put(
+            rec_id,
+            RECORDING,
+            &[(
+                rec_id.into(),
+                Some(About {
+                    started: now,
+                    length_ms: 200_000,
+                    title: "Long Session".into(),
+                    spoken: vec!["en".into()],
+                    shown: vec!["en".into(), "zh".into()],
+                    take: 1,
+                    ..About::default()
+                }),
+            )],
+            now + 2,
+        )
+        .unwrap();
+
+    let copied = Arc::new(std::sync::Mutex::new(String::new()));
+    let copied_out = copied.clone();
+    let mut cfg = hub::config(dir.path());
+    cfg.clip = Arc::new(move |text| {
+        *copied_out.lock().unwrap() = text.to_owned();
+        true
+    });
+
+    let mut app = App::with(cfg);
+    app.until(|_| true).await;
+    app.wait_library(|r| r.len() == 1).await;
+
+    app.send(Command::CopyTranscript {
+        id: rec_id.into(),
+        take: Some(1),
+        languages: vec!["zh".into()],
+    });
+    app.notice("copied").await;
+
+    let got = copied.lock().unwrap().clone();
+    assert!(got.contains("Alice 0:00\nLine number 0\n第0行译文"), "missing head: {got}");
+    assert!(got.contains("Alice 3:19\nLine number 199\n第199行译文"), "missing tail #199: {got}");
+    assert!(!got.contains("draft only line"));
+
+    // Selecting take 0 explicitly copies take 0.
+    app.send(Command::CopyTranscript { id: rec_id.into(), take: Some(0), languages: vec![] });
+    app.notice("copied").await;
+    assert!(copied.lock().unwrap().contains("draft only line"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_recording_while_lane_dial_hangs_seals_immediately_and_preserves_newer_active() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let _store = STORE.lock().await;
+    hub::signed_in();
+    let soniox = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("ws port");
+    let ws_url = format!("ws://{}", soniox.local_addr().expect("ws addr"));
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = soniox.accept().await {
+            let Ok(mut ws) = accept_async(stream).await else { continue };
+            let _ = ws.next().await;
+            let tok = json!({
+                "text": "live rec2 line",
+                "start_ms": 100,
+                "end_ms": 450,
+                "is_final": true,
+                "language": "en",
+                "speaker": "1",
+            });
+            let said = json!({
+                "tokens": [tok, { "text": "<end>", "is_final": true }],
+                "total_audio_proc_ms": 500,
+            });
+            let _ = ws.send(Message::text(said.to_string())).await;
+            tokio::spawn(async move {
+                while let Some(Ok(msg)) = ws.next().await {
+                    if matches!(&msg, Message::Text(t) if t.is_empty()) {
+                        let _ = ws.send(Message::text(r#"{"tokens":[],"finished":true}"#)).await;
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = hub::config(dir.path());
+    cfg.realtime = ws_url;
+    let default_dial = cfg.dial.clone();
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dials_cb = dials.clone();
+    // Recording 1's WebSocket dial stalls for 8 seconds (hung Wi-Fi); Recording 2 connects normally.
+    cfg.dial = Arc::new(move |endpoint| {
+        let n = dials_cb.fetch_add(1, Ordering::AcqRel);
+        let default_dial = default_dial.clone();
+        let endpoint = endpoint.to_owned();
+        Box::pin(async move {
+            if n == 0 {
+                tokio::time::sleep(Duration::from_millis(8_000)).await;
+                Err(zutalk_core::rt::supervise::End::Retry("connect"))
+            } else {
+                (default_dial)(&endpoint).await
+            }
+        })
+    });
+
+    let mut app = App::with(cfg);
+    app.until(|s| s.me.is_some()).await;
+    app.send(Command::Setup {
+        setup: Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() },
+    });
+    app.until(|s| s.setup.shown == vec!["en".to_string()]).await;
+
+    app.send(Command::Start);
+    let rec1 = app.session(|s| s.is_some()).await.expect("rec1").id;
+    let dial_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while dials.load(Ordering::Acquire) == 0 {
+        assert!(tokio::time::Instant::now() < dial_deadline, "rec1 did not enter dial");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    let stop_at = tokio::time::Instant::now();
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+
+    // Immediately start Recording 2 while Recording 1 is sealing.
+    app.send(Command::Start);
+    let rec2 = app.session(|s| s.is_some()).await.expect("rec2").id;
+    assert_ne!(rec1, rec2);
+
+    // Recording 1 must abort the hung lane dial immediately on Stop and seal in < 1.5 s (not 8 s!).
+    let sealed_rows = tokio::time::timeout(
+        Duration::from_millis(1_500),
+        app.wait_library(|rows| rows.iter().any(|r| r.id == rec1 && r.length_ms > 0)),
+    )
+    .await
+    .expect("Stop must cancel in-flight lane dial and seal promptly within 1.5 s");
+    assert!(stop_at.elapsed() < Duration::from_millis(1_500));
+    assert!(sealed_rows.iter().any(|r| r.id == rec1 && r.length_ms > 0));
+
+    // Recording 1 sealing must NOT clobber Recording 2's active live-draft status: Query::Transcript
+    // must stream Recording 2's live draft lines written after Recording 1 sealed.
+    let live_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let rec2_chunk = loop {
+        let chunk = app.transcript(&rec2, Some(0), 0).await;
+        if chunk.total_lines >= 1 {
+            break chunk;
+        }
+        assert!(
+            tokio::time::Instant::now() < live_deadline,
+            "sealing rec1 must not wipe rec2 active live-draft mode"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+    assert_eq!(rec2_chunk.lines[0].1.line.text, "live rec2 line");
+
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_reconnect_uses_heard_watermark_not_sent_for_gap_origin() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _store = STORE.lock().await;
+    hub::signed_in();
+
+    let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("ws port");
+    let ws_addr = ws_listener.local_addr().expect("ws addr");
+    let healthy = Arc::new(AtomicBool::new(false));
+    let healthy_srv = healthy.clone();
+
+    tokio::spawn(async move {
+        let mut conn_num = 0usize;
+        while let Ok((stream, _)) = ws_listener.accept().await {
+            let Ok(mut ws) = accept_async(stream).await else { continue };
+            conn_num += 1;
+            // Read initial config frame.
+            let _ = ws.next().await;
+            if conn_num == 1 {
+                // Read 12 binary blocks (`sent >= 1_200`), acknowledge only 400 ms (`heard = 400`),
+                // then return a fatal key error so lane 0 stops with `ended = Some("key")`.
+                let mut blocks = 0usize;
+                while blocks < 12 {
+                    match ws.next().await {
+                        Some(Ok(Message::Binary(_))) => blocks += 1,
+                        Some(Ok(_)) => {}
+                        _ => break,
+                    }
+                }
+                let _ = ws
+                    .send(Message::Text(
+                        json!({ "tokens": [], "total_audio_proc_ms": 400 }).to_string().into(),
+                    ))
+                    .await;
+                let _ = ws
+                    .send(Message::Text(
+                        json!({ "error_code": 401, "error_type": "invalid_api_key" })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                let _ = ws.close(None).await;
+            } else if !healthy_srv.load(Ordering::Acquire) {
+                let _ = ws
+                    .send(Message::Text(
+                        json!({ "error_code": 401, "error_type": "invalid_api_key" })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                let _ = ws.close(None).await;
+            } else {
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let Message::Binary(_) = msg {
+                        let _ = ws
+                            .send(Message::Text(
+                                json!({ "tokens": [], "total_audio_proc_ms": 2_000 })
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                }
+            }
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = hub::config(dir.path());
+    cfg.realtime = format!("ws://{ws_addr}");
+    let mut app = App::with(cfg);
+    app.until(|s| s.me.is_some()).await;
+    // Use 1 column (`Transcribe`) so there is a single deterministic lane 0.
+    app.send(Command::Setup {
+        setup: Setup { spoken: vec!["en".into()], shown: vec!["en".into()], ..Setup::default() },
+    });
+    app.until(|s| s.setup.shown == vec!["en".to_string()]).await;
+
+    app.send(Command::Start);
+    app.session(|s| s.is_some()).await;
+
+    // Wait until lane 0 stops with `why = "key"` after sending >= 1_200 ms while `heard == 400`.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !app
+        .seen
+        .of("lane.link")
+        .iter()
+        .any(|l| l.text("to") == Some("Stopped") && l.text("why") == Some("key"))
+    {
+        assert!(tokio::time::Instant::now() < deadline, "lane 0 did not stop on key error");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    healthy.store(true, Ordering::Release);
+    app.send(Command::OwnKey { service: "soniox".into(), key: Some("sk-fresh".into()) });
+    app.send(Command::Reconnect);
+
+    // Wait for `lane.gap` on reconnect and verify `t0_ms == 400` (`heard`), NOT `>= 1_200` (`sent`)!
+    let gap_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let gap_t0 = loop {
+        if let Some(gap) = app.seen.of("lane.gap").last()
+            && let Some(t0) = gap.u64("t0_ms")
+        {
+            break t0;
+        }
+        assert!(tokio::time::Instant::now() < gap_deadline, "expected lane.gap after Reconnect");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(gap_t0, 400, "manual Reconnect must start gap at heard_at (400), got {gap_t0}");
+
+    app.send(Command::Stop);
+    app.session(|s| s.is_none()).await;
 }

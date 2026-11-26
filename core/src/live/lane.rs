@@ -459,6 +459,10 @@ fn end_code(end: End) -> &'static str {
 }
 
 async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, End> {
+    let mut stop_mode = lane.mode.clone();
+    if *stop_mode.borrow() == Mode::Stopped {
+        return Err(End::Done);
+    }
     if lane.why == "panic" {
         lane.tell(Event::Tail { stream: lane.stream, tail: Vec::new() }).await;
     }
@@ -468,8 +472,11 @@ async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, En
     }
     let stream = lane.stream;
     let t_keys = Instant::now();
-    let leased =
-        timeout(Duration::from_millis(PATIENCE_MS), lane.keys.lease(Service::Soniox)).await;
+    let leased = tokio::select! {
+        biased;
+        _ = stop_mode.wait_for(|m| *m == Mode::Stopped) => return Err(End::Done),
+        res = timeout(Duration::from_millis(PATIENCE_MS), lane.keys.lease(Service::Soniox)) => res,
+    };
     let keys_ms = t_keys.elapsed().as_millis() as u64;
     lane.keys_ms.note(keys_ms);
     let mut dial_ms = 0u64;
@@ -481,9 +488,11 @@ async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, En
             Err(_) => return Err(End::Retry("keys")),
         };
         let dialed = Instant::now(); // before the socket opens: the service's count starts later
-        let dial =
-            timeout(Duration::from_millis(PATIENCE_MS), (lane.dial)(lane.setup.endpoint.as_str()))
-                .await;
+        let dial = tokio::select! {
+            biased;
+            _ = stop_mode.wait_for(|m| *m == Mode::Stopped) => return Err(End::Done),
+            res = timeout(Duration::from_millis(PATIENCE_MS), (lane.dial)(lane.setup.endpoint.as_str())) => res,
+        };
         dial_ms = dialed.elapsed().as_millis() as u64;
         lane.dial_ms.note(dial_ms);
         let ws = match dial {
@@ -494,7 +503,11 @@ async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, En
         let hello = config(lease.key.expose(), &lane.kind, &lane.setup).to_string();
         let (cap, feed) = (lease.session_cap, Feed::default());
         let mut conn = Conn { lane, ws, feed, dialed, cap, ending: None, wake: dialed };
-        conn.send(Message::text(hello)).await?;
+        tokio::select! {
+            biased;
+            _ = stop_mode.wait_for(|m| *m == Mode::Stopped) => return Err(End::Done),
+            sent = conn.send(Message::text(hello)) => sent?,
+        }
         Ok(conn)
     }
     .await;
@@ -503,6 +516,7 @@ async fn open<K: Keys>(mut lane: OwnedMutexGuard<Lane<K>>) -> Result<Conn<K>, En
         Ok(_) => {
             info!("lane.open", lane = stream, code = "ok", keys_ms = keys_ms, dial_ms = dial_ms,)
         }
+        Err(End::Done) => {}
         Err(end) => warn!(
             "lane.open",
             lane = stream,

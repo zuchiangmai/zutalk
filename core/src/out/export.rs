@@ -36,6 +36,37 @@ fn clock(ms: u32, sep: char) -> String {
     format!("{h:02}:{m:02}:{s:02}{sep}{:03}", ms % 1_000)
 }
 
+fn short_clock(ms: u32) -> String {
+    let s = ms / 1_000;
+    let (h, m, sec) = (s / 3_600, (s / 60) % 60, s % 60);
+    if h > 0 { format!("{h}:{m:02}:{sec:02}") } else { format!("{m}:{sec:02}") }
+}
+
+/// Formats a complete transcript take as plain clipboard text matching `ui/src/bus/words.ts::text`.
+pub fn plain_text(doc: &Doc, langs: &[String]) -> String {
+    let mut blocks = Vec::with_capacity(doc.lines.len());
+    for line in doc.lines {
+        let custom = doc.speakers.get(&line.speaker).map(String::as_str).unwrap_or("");
+        let who = if !custom.is_empty() {
+            format!("{custom} {}", short_clock(line.t0))
+        } else if !line.speaker.is_empty() {
+            format!("Speaker {} {}", line.speaker, short_clock(line.t0))
+        } else {
+            short_clock(line.t0)
+        };
+        let mut out = format!("{who}\n{}", line.text);
+        for lang in langs {
+            if let Some(tr) = line.translations.get(lang)
+                && !tr.is_empty()
+            {
+                let _ = write!(out, "\n{tr}"); // dropped: fmt::Write to a String is infallible
+            }
+        }
+        blocks.push(out);
+    }
+    blocks.join("\n\n")
+}
+
 /// Each line under who said it and when, with the translations asked for quoted below it.
 fn markdown(doc: &Doc, langs: &[String]) -> String {
     let mut out = format!("# {}\n", doc.title);

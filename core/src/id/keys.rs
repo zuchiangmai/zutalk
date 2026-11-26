@@ -470,6 +470,9 @@ pub struct SignIn {
     relay_room: String,
 }
 
+/// Consecutive transport errors tolerated while polling a sign-in relay before declaring offline.
+pub const SIGN_IN_OFFLINE_TRIES_TIMES: u32 = 2;
+
 impl SignIn {
     /// `origin` relays the key: our server. Loopback `http://127.0.0.1:` / `http://localhost:`
     /// origins used by local tests wrap as `https://` inside the `zu::login` code while polling
@@ -509,12 +512,29 @@ impl SignIn {
     /// Waits for the key, checks it is a current key of its DID, and keeps it.
     pub async fn finish(&self, http: &Client) -> Result<Me, End> {
         let (deadline, offline) = (wall_ms() + SIGN_IN_WAIT_MS, |_| End::Retry("offline"));
+        let mut offline_tries = 0u32;
         let sealed = loop {
-            let reply = http.get(&self.relay_room).send().await.map_err(offline)?;
-            match reply.status() {
-                StatusCode::OK => break reply.bytes().await.map_err(offline)?,
-                StatusCode::NOT_FOUND if wall_ms() < deadline => {}
-                _ => return Err(End::Fatal("id.expired")),
+            match http.get(&self.relay_room).send().await {
+                Ok(reply) => {
+                    offline_tries = 0;
+                    let status = reply.status();
+                    if status == StatusCode::OK {
+                        break reply.bytes().await.map_err(offline)?;
+                    }
+                    let transient = status == StatusCode::NOT_FOUND
+                        || status == StatusCode::REQUEST_TIMEOUT
+                        || status == StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error();
+                    if !transient || wall_ms() >= deadline {
+                        return Err(End::Fatal("id.expired"));
+                    }
+                }
+                Err(err) => {
+                    if offline_tries >= SIGN_IN_OFFLINE_TRIES_TIMES || wall_ms() >= deadline {
+                        return Err(offline(err));
+                    }
+                    offline_tries += 1;
+                }
             }
             tokio::time::sleep(Duration::from_millis(SIGN_IN_POLL_MS)).await;
         };

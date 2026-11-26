@@ -1,74 +1,66 @@
 //! Off-hub work: the sequential `desk` queue for local data/settings/key-store IO, plus dedicated
-//! supervised tasks on the `work` subtree for boot devices, search, export file writes, sign-in,
-//! identity creation, invite claiming, city calendar, rooms/slots, whole-recording transcription,
-//! city filing, 0.8 migration, and update installation (`P1.md` §3.6–§3.8, `P1-19`, `P1-20`).
+//! supervised tasks on the `work` subtree with isolated concurrency gates (`local_bg` for local
+//! shelf adoption/migration, `cloud_bg` for whole-recording transcription and city filing, and
+//! `title_bg` for AI title/tag generation) (`P1.md` §3.6–§3.8, `P1-19`, `P1-20`).
 
-use crate::ai::titles::{self, TitleAction, TitleInput};
+mod cloud;
+mod desk;
+mod local;
+
+use self::cloud::{
+    TitleTask, WriteCtx, spawn_claim_net, spawn_create_net, spawn_host_recover, spawn_host_slot,
+    spawn_profile_net, spawn_quota_net, spawn_titles_task,
+};
+use self::desk::{DeskEnv, DeskOut, Job, run_desk_job};
+use self::local::{set_file_progress, set_move_progress, spawn_adopt, spawn_export_write, writing};
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{
-    Change, From, LocalShelf, NoteOp, Progress, Quota, SETUP_DEFAULTS_VERSION, Setup, Sound,
-    Writing,
-};
+use crate::app::proto::{Change, From, LocalShelf, NoteOp, Progress, Quota, Setup, Sound, Writing};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
-use crate::capture::tape;
 use crate::id::identity::{self, PendingSignIn};
-use crate::id::keys::{self, Chain, Me, Ours, SIGN_IN_WAIT_MS, Secret, Service, SignIn, Who};
-use crate::id::quota;
-use crate::knowledge::glossary;
-use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic};
+use crate::id::keys::{self, Chain, Ours, SIGN_IN_WAIT_MS, Secret, Service, SignIn, Who};
+use crate::knowledge::topic::{self, Topic};
 use crate::live::frame::Frame;
-use crate::live::lines::Line;
 use crate::out::city::{self, FileGate, Filer, Filing};
-use crate::out::export::{Doc, EXPORTERS};
-use crate::out::host::{self, HOST_ARM_POLL_MS, HOST_KEEPALIVE_MS, HOST_SLOT_MS, Write};
-use crate::record::notes;
-use crate::record::shelf::{
-    About, ContentTag, FILING, LINE, NOTE, RECORDING, SPEAKER, Shelf, TERM, TOPIC, TitleBy,
-    TitleCandidate, Words,
-};
-use crate::record::takes::{
-    RefineEvent, RefineFailure, RefineStatus, initial_refine_status, refine_step,
-};
-use crate::record::{adopt, migrate, retain};
+use crate::out::host::{self, Write};
+use crate::record::migrate;
+use crate::record::shelf::{About, Shelf, TitleBy};
+use crate::record::takes::{RefineFailure, RefineStatus};
 use crate::rt::queue::{self, Full, Tx};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::Counter;
-use crate::rt::supervise::{End, Tree, again};
+use crate::rt::supervise::{End, Tree};
 use crate::rt::water::Water;
-use crate::view::index::Index;
 use crate::view::query::{ViewEngine, ViewKind};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
-use zutalk_log::{Id, info, warn};
+use zutalk_log::{info, warn};
 
-const WHOLE: &str = "stt-async-v6";
 /// Jobs buffered for the desk worker: a burst of clicks or edits is dozens of jobs; full means
 /// disk is stuck and the person must be told (`P1.md` §3.7).
 pub const DESK_QUEUE_JOBS: usize = 64;
-/// Heavy background jobs (whole-recording transcription, city filing, 0.8 migration) run one at a
-/// time so they neither fight each other nor starve live captioning (`PLAN.md` §4.1, `P1.md` §3.8).
-pub const BACKGROUND_AT_ONCE_JOBS: usize = 1;
+/// Cloud background jobs (whole-recording transcription, city filing) run one at a time on their
+/// own lane so slow uploads/transcriptions never block local migration or adoption (`K1`).
+pub const CLOUD_AT_ONCE_JOBS: usize = 1;
+/// Backward-compatible alias for single-concurrency background lane sizing.
+pub const BACKGROUND_AT_ONCE_JOBS: usize = CLOUD_AT_ONCE_JOBS;
+/// Local disk background jobs (0.8 migration, deferred local-shelf adoption) run one at a time
+/// independently of `cloud_bg` (`K1`).
+pub const LOCAL_AT_ONCE_JOBS: usize = 1;
 /// Independent single-concurrency semaphore for background AI title/tag generation so it never
 /// blocks recording, refining, or city filing (`P6.md` §3.4).
 pub const TITLE_AT_ONCE_JOBS: usize = 1;
 /// Diagnose bundles retained under `<data>/diagnose/`: each copies at most 2 log files (16 MB),
 /// so 3 bundles stay under 50 MB (`P1-22-diagnose.md`).
 pub const DIAGNOSE_KEPT_DIRS: usize = 3;
-/// Local-shelf recording count up to which adoption runs inline during sign-in; larger libraries
-/// run asynchronously on the `work` subtree so `ConfirmSignIn` never blocks `desk`.
-const INLINE_ADOPT_MAX_RECORDINGS: usize = 8;
 /// Most recent rotated `*.jsonl` log files copied into one diagnose bundle (`P1.md` §3.13.6).
 pub const DIAGNOSE_LOG_FILES: usize = 2;
 
@@ -229,11 +221,11 @@ pub(crate) struct OwnKeyOut {
     pub survey: Option<Survey>,
 }
 
-struct Identity {
-    who: Who,
-    shelf: Option<Arc<Shelf>>,
-    ours: Option<Ours>,
-    keys: Arc<Chain>,
+pub(super) struct Identity {
+    pub who: Who,
+    pub shelf: Option<Arc<Shelf>>,
+    pub ours: Option<Ours>,
+    pub keys: Arc<Chain>,
 }
 
 impl Identity {
@@ -246,7 +238,7 @@ impl Identity {
         }
     }
 
-    fn shelf(&self) -> Result<Arc<Shelf>, &'static str> {
+    pub(super) fn shelf(&self) -> Result<Arc<Shelf>, &'static str> {
         match &self.shelf {
             Some(shelf) => Ok(shelf.clone()),
             None => Err(self.who.me().err().unwrap_or("keys.store")),
@@ -255,29 +247,30 @@ impl Identity {
 }
 
 #[derive(Clone)]
-struct Snapshot {
-    shelf: Result<Arc<Shelf>, &'static str>,
-    ours: Option<Ours>,
-    keys: Arc<Chain>,
+pub(super) struct Snapshot {
+    pub shelf: Result<Arc<Shelf>, &'static str>,
+    pub ours: Option<Ours>,
+    pub keys: Arc<Chain>,
 }
 
 /// Updated write target returned by [`IndexSync::recording_sealed`] so post-seal refinement
 /// runs against the active shelf (including a newly adopted person shelf) with fresh keys.
 pub(crate) struct SealTarget {
-    shelf: Arc<Shelf>,
-    keys: Arc<Chain>,
+    pub shelf: Arc<Shelf>,
+    pub keys: Arc<Chain>,
 }
 
-enum SyncKind {
+pub(super) enum SyncKind {
     RecordingOpened { id: String },
     RecordingSealed { id: String, started_by: String },
     Refined { id: String, shelf_by: String },
     RefineFailed { id: String, shelf_by: String, failure: RefineFailure },
     FilingUpdated { id: String, state: String },
     Migrated { by: String },
+    Adopted { by: String },
 }
 
-/// Ordered handle allowing background tasks (recording, refine, file, migrate) to sync the
+/// Ordered handle allowing background tasks (recording, refine, file, migrate, adopt) to sync the
 /// single-writer SQLite index through `desk` and wait until both index and invalidations commit.
 #[derive(Clone)]
 pub(crate) struct IndexSync {
@@ -293,6 +286,10 @@ impl IndexSync {
         }
     }
 
+    pub(crate) fn invalidate_live_draft(&self, id: &str) {
+        self.views.invalidate(ViewKind::Transcript, Some(id.to_owned()));
+    }
+
     pub(crate) async fn recording_opened(&self, id: String) {
         self.views.set_active_recording(Some(id.clone()));
         self.run(SyncKind::RecordingOpened { id }).await;
@@ -303,7 +300,7 @@ impl IndexSync {
         id: String,
         started_by: String,
     ) -> Option<SealTarget> {
-        self.views.set_active_recording(None);
+        let _ = self.views.clear_active_recording_if(&id); // dropped: returns false if a newer recording already took over
         let (tx, rx) = oneshot::channel();
         let kind = SyncKind::RecordingSealed { id, started_by };
         if self.desk.send(Job::IndexSync { kind, done: tx }).await.is_ok() {
@@ -330,233 +327,21 @@ impl IndexSync {
     pub(crate) async fn migrated(&self, by: String) {
         self.run(SyncKind::Migrated { by }).await;
     }
-}
 
-enum Job {
-    Boot,
-    Settings {
-        setup: Setup,
-    },
-    Sign {
-        who: Who,
-        why: &'static str,
-        made: bool,
-        keep: Option<u32>,
-        busy: Vec<String>,
-        initial_handle: Option<Option<String>>,
-    },
-    ConfirmSignIn {
-        auth_gen: u64,
-        keep: Option<u32>,
-        busy: Vec<String>,
-    },
-    SignOut {
-        keep: Option<u32>,
-        busy: Vec<String>,
-    },
-    DiscardLocal,
-    Clip,
-    RotationSaved,
-    Refresh {
-        rev: u64,
-        retain: Option<Option<u32>>,
-    },
-    Change {
-        id: String,
-        change: Change,
-    },
-    Note {
-        id: String,
-        op: NoteOp,
-    },
-    RefinePrepare {
-        id: String,
-    },
-    Remove {
-        id: String,
-    },
-    Restore {
-        id: String,
-    },
-    Term {
-        said: String,
-        written: Option<BTreeMap<String, String>>,
-    },
-    SaveTopic {
-        topic: Topic,
-    },
-    RemoveTopic {
-        id: String,
-    },
-    ImportTopicFile {
-        id: String,
-        path: String,
-    },
-    RememberTerm {
-        topic_id: String,
-        said: String,
-        written: BTreeMap<String, String>,
-    },
-    PickTitle {
-        id: String,
-        title: String,
-        by: TitleBy,
-    },
-    ApplyTitles {
-        id: String,
-        shelf_by: String,
-        titles: Vec<String>,
-        tags: Vec<ContentTag>,
-        candidates: Vec<TitleCandidate>,
-        elapsed_ms: u64,
-        done: oneshot::Sender<()>,
-    },
-    DestroyAudio {
-        id: String,
-        under_way: Option<String>,
-    },
-    Export {
-        id: String,
-        exporter: &'static str,
-        languages: Vec<String>,
-        to: String,
-    },
-    BeginFile {
-        id: String,
-        event: String,
-        audio: bool,
-    },
-    OwnKey {
-        service: Service,
-        key: Option<String>,
-        busy: Vec<String>,
-    },
-    Diagnose {
-        spoken: Vec<String>,
-        shown: Vec<String>,
-        sound: Sound,
-        captions: bool,
-    },
-    IndexSync {
-        kind: SyncKind,
-        done: oneshot::Sender<Option<SealTarget>>,
-    },
-}
-
-impl DeskJob for Job {
-    fn kind(&self) -> &'static str {
-        match self {
-            Job::Boot => "boot",
-            Job::Settings { .. } => "settings",
-            Job::Sign { .. } => "sign",
-            Job::ConfirmSignIn { .. } => "confirm_signin",
-            Job::SignOut { .. } => "signout",
-            Job::DiscardLocal => "discard_local",
-            Job::Clip => "clip",
-            Job::RotationSaved => "rotation_saved",
-            Job::Refresh { .. } => "refresh",
-            Job::Change { .. } => "change",
-            Job::Note { .. } => "note",
-            Job::RefinePrepare { .. } => "refine.prepare",
-            Job::Remove { .. } => "remove",
-            Job::Restore { .. } => "restore",
-            Job::Term { .. } => "term",
-            Job::SaveTopic { .. } => "topic.save",
-            Job::RemoveTopic { .. } => "topic.remove",
-            Job::ImportTopicFile { .. } => "topic.import",
-            Job::RememberTerm { .. } => "topic.remember",
-            Job::PickTitle { .. } => "title.pick",
-            Job::ApplyTitles { .. } => "titles",
-            Job::DestroyAudio { .. } => "destroy",
-            Job::Export { .. } => "export",
-            Job::BeginFile { .. } => "file.begin",
-            Job::OwnKey { .. } => "own_key",
-            Job::Diagnose { .. } => "diagnose",
-            Job::IndexSync { .. } => "index.sync",
-        }
-    }
-}
-
-struct DeferredAdopt {
-    local: Arc<Shelf>,
-    person: Arc<Shelf>,
-    exclude: Vec<String>,
-}
-
-enum DeskOut {
-    Silent,
-    Copied,
-    Diagnosed,
-    RotationSaved,
-    TopicRemembered,
-    TopicRemoved(String),
-    Booted {
-        out: Box<BootOut>,
-        start_create: bool,
-        start_claim: Option<Secret>,
-        recover_host: Option<String>,
-        deferred_adopt: Option<DeferredAdopt>,
-    },
-    Signed {
-        out: SignedOut,
-        start_claim: Option<Secret>,
-        recover_host: Option<String>,
-        deferred_adopt: Option<DeferredAdopt>,
-    },
-    Refreshed(Refreshed),
-    ExportWrite {
-        to: PathBuf,
-        text: String,
-    },
-    FileReady {
-        id: String,
-        filing: Filing,
-    },
-    RefineStart {
-        id: String,
-        from: RefineStatus,
-    },
-    OwnKey(OwnKeyOut),
-    LocalShelf(LocalShelf),
-    LocalDiscarded(LocalShelf),
-}
-
-struct DeskEnv {
-    config: Arc<Config>,
-    http: reqwest::Client,
-    identity: Arc<Mutex<Identity>>,
-    index: Mutex<Option<Index>>,
-    views: Arc<ViewEngine>,
-    topics: Arc<Mutex<Vec<Topic>>>,
-    invite: Arc<Mutex<Option<Secret>>>,
-    signing: Arc<Mutex<Option<CancellationToken>>>,
-    pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
-    confirm_gen: Arc<AtomicU64>,
-    keep_hint: Arc<Mutex<Option<u32>>>,
-    root: Tree,
-    water: Reading<Water>,
-    started_at: std::time::Instant,
-    last_diagnose_ms: AtomicU64,
-}
-
-impl DeskEnv {
-    fn with_index(&self, f: impl FnOnce(&mut Index)) {
-        let mut guard = self.index.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(index) = guard.as_mut() {
-            f(index);
-        }
+    pub(crate) async fn adopted(&self, by: String) {
+        self.run(SyncKind::Adopted { by }).await;
     }
 }
 
 /// In-memory active hosted room session: the 32-byte key lives only here (`Zeroizing`) and is
 /// never written to disk (`PLAN.md` §5.5, `P5.md` §3.3).
-struct ActiveHost {
-    host_gen: u64,
-    room_id: String,
-    ours: Ours,
-    live_flag: Arc<AtomicBool>,
-    live_notify: Arc<Notify>,
-    cancel: CancellationToken,
+pub(super) struct ActiveHost {
+    pub host_gen: u64,
+    pub room_id: String,
+    pub ours: Ours,
+    pub live_flag: Arc<AtomicBool>,
+    pub live_notify: Arc<Notify>,
+    pub cancel: CancellationToken,
 }
 
 /// Everything the hub hands off: sequential `desk` jobs and separate supervised tasks on the
@@ -577,7 +362,8 @@ pub(crate) struct Work {
     pending_signin: Arc<Mutex<Option<PendingSignIn>>>,
     keep_hint: Arc<Mutex<Option<u32>>>,
     desk: Desk<Job>,
-    bg: Arc<Semaphore>,
+    cloud_bg: Arc<Semaphore>,
+    local_bg: Arc<Semaphore>,
     title_bg: Arc<Semaphore>,
     titling: Arc<Mutex<BTreeSet<String>>>,
     next_seq: Arc<AtomicU64>,
@@ -607,7 +393,9 @@ impl Work {
         let jobs_done = stats.counter("jobs.done");
         let jobs_failed = stats.counter("jobs.failed");
         let next_seq = Arc::new(AtomicU64::new(1));
-        let bg = Arc::new(Semaphore::new(BACKGROUND_AT_ONCE_JOBS));
+        let cloud_bg = Arc::new(Semaphore::new(CLOUD_AT_ONCE_JOBS));
+        let local_bg = Arc::new(Semaphore::new(LOCAL_AT_ONCE_JOBS));
+        let local_shelf_lock = Arc::new(Mutex::new(()));
         let title_bg = Arc::new(Semaphore::new(TITLE_AT_ONCE_JOBS));
         let titling: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
         let identity = Arc::new(Mutex::new(Identity::starting()));
@@ -632,6 +420,7 @@ impl Work {
             pending_signin: pending_signin.clone(),
             confirm_gen: confirm_gen.clone(),
             keep_hint: keep_hint.clone(),
+            local_shelf_lock: local_shelf_lock.clone(),
             root: root.clone(),
             water,
             started_at: std::time::Instant::now(),
@@ -651,7 +440,8 @@ impl Work {
         let deliver_signing = signing.clone();
         let deliver_confirm_gen = confirm_gen;
         let deliver_keep = keep_hint.clone();
-        let deliver_bg = bg.clone();
+        let deliver_local_bg = local_bg.clone();
+        let deliver_local_lock = local_shelf_lock.clone();
         let deliver_progress = progress_reg.clone();
         let deliver_views = views.clone();
 
@@ -676,7 +466,8 @@ impl Work {
                 let signing = deliver_signing.clone();
                 let confirm_gen = deliver_confirm_gen.clone();
                 let keep_hint = deliver_keep.clone();
-                let bg = deliver_bg.clone();
+                let local_bg = deliver_local_bg.clone();
+                let local_lock = deliver_local_lock.clone();
                 let progress_reg = deliver_progress.clone();
                 let views = deliver_views.clone();
                 let desk_holder = deliver_desk.clone();
@@ -714,7 +505,8 @@ impl Work {
                                 if let Some(desk) = desk {
                                     spawn_adopt(
                                         &tree,
-                                        bg.clone(),
+                                        local_bg.clone(),
+                                        local_lock.clone(),
                                         &next_seq,
                                         &jobs_done,
                                         &jobs_failed,
@@ -810,7 +602,8 @@ impl Work {
                                 if let Some(desk) = desk {
                                     spawn_adopt(
                                         &tree,
-                                        bg.clone(),
+                                        local_bg.clone(),
+                                        local_lock.clone(),
                                         &next_seq,
                                         &jobs_done,
                                         &jobs_failed,
@@ -942,7 +735,8 @@ impl Work {
             pending_signin,
             keep_hint,
             desk,
-            bg,
+            cloud_bg,
+            local_bg,
             title_bg,
             titling,
             next_seq,
@@ -1198,6 +992,15 @@ impl Work {
 
     pub(crate) fn copy_rotation(&self) -> Result<(), &'static str> {
         self.desk.offer(Job::Clip).map(|_| ())
+    }
+
+    pub(crate) fn copy_transcript(
+        &self,
+        id: String,
+        take: Option<u32>,
+        languages: Vec<String>,
+    ) -> Result<(), &'static str> {
+        self.desk.offer(Job::CopyTranscript { id, take, languages }).map(|_| ())
     }
 
     pub(crate) fn rotation_saved(&self) -> Result<(), &'static str> {
@@ -1644,7 +1447,7 @@ impl Work {
             said: self.said.clone(),
             work_tree: self.tree.clone(),
             root: self.root.clone(),
-            bg: self.bg.clone(),
+            cloud_bg: self.cloud_bg.clone(),
             http: self.http.clone(),
             desk: self.desk.clone(),
             title_bg: self.title_bg.clone(),
@@ -1672,7 +1475,7 @@ impl Work {
         let said = self.said.clone();
         let work_tree = self.tree.clone();
         let root = self.root.clone();
-        let bg = self.bg.clone();
+        let cloud_bg = self.cloud_bg.clone();
         let http = self.http.clone();
         let desk = self.desk.clone();
         let title_bg = self.title_bg.clone();
@@ -1689,7 +1492,7 @@ impl Work {
         self.tree.spawn("job.sweep", async move {
             info!("job.start", kind = "sweep", job = sweep_seq, waited_ms = 0u64);
             let started = std::time::Instant::now();
-            let res = write::sweep(&tapes, &soniox, &*keys).await;
+            let res = write::sweep_with(&http, &tapes, &soniox, &*keys).await;
             let ms = started.elapsed().as_millis() as u64;
             match res {
                 End::Done => {
@@ -1716,7 +1519,7 @@ impl Work {
                     said: said.clone(),
                     work_tree: work_tree.clone(),
                     root: root.clone(),
-                    bg: bg.clone(),
+                    cloud_bg: cloud_bg.clone(),
                     http: http.clone(),
                     desk: desk.clone(),
                     title_bg: title_bg.clone(),
@@ -1757,7 +1560,7 @@ impl Work {
             said: self.said.clone(),
             work_tree: self.tree.clone(),
             root: self.root.clone(),
-            bg: self.bg.clone(),
+            cloud_bg: self.cloud_bg.clone(),
             http: self.http.clone(),
             desk: self.desk.clone(),
             title_bg: self.title_bg.clone(),
@@ -1774,7 +1577,7 @@ impl Work {
         });
     }
 
-    /// Files one recording to a city on the `work` subtree (`job.file`).
+    /// Files one recording to a city on the `work` subtree (`job.file`), gated on `cloud_bg`.
     pub(crate) fn file(&self, id: String, filing: Filing) -> Result<(), &'static str> {
         let snap = snapshot(&self.identity);
         let me = snap.ours.ok_or("sign_in.first")?.me;
@@ -1784,13 +1587,14 @@ impl Work {
         let progress_reg = self.progress_reg.clone();
         let index_sync = self.index_sync();
         let tree = self.tree.clone();
-        let bg = self.bg.clone();
+        let cloud_bg = self.cloud_bg.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
         self.tree.spawn("job.file", async move {
             set_file_progress(&progress_reg, Some(writing(&id, "filing")), None);
-            let gate = FileGate { bg: &bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
+            let gate =
+                FileGate { bg: &cloud_bg, seq, jobs_done: &jobs_done, jobs_failed: &jobs_failed };
             let file_id = id.clone();
             let said = city::file_job(&tree, &filer, &id, filing, gate, |s| {
                 let w = Writing { id: file_id.clone(), step: s.step, done: s.done, of: s.of };
@@ -1804,7 +1608,8 @@ impl Work {
         Ok(())
     }
 
-    /// Moves the 0.8 library into the signed-in person's shelf on the `work` subtree (`job.move`).
+    /// Moves the 0.8 library into the active shelf on the `work` subtree (`job.move`), gated on
+    /// `local_bg` so cloud uploads never block local migration (`K1`).
     pub(crate) fn migrate(&self, me: String) -> bool {
         let Some(old) = self.config.old.clone() else { return false };
         let Ok(shelf) = snapshot(&self.identity).shelf else { return false };
@@ -1817,13 +1622,13 @@ impl Work {
         let progress_reg = self.progress_reg.clone();
         let index_sync = self.index_sync();
         let tree = self.tree.clone();
-        let bg = self.bg.clone();
+        let local_bg = self.local_bg.clone();
         let seq = self.alloc_seq();
         let jobs_done = self.jobs_done.clone();
         let jobs_failed = self.jobs_failed.clone();
         self.tree.spawn("job.move", async move {
             let wait_at = tokio::time::Instant::now();
-            let Ok(_permit) = bg.acquire().await else {
+            let Ok(_permit) = local_bg.acquire().await else {
                 return;
             };
             let waited_ms = wait_at.elapsed().as_millis() as u64;
@@ -1916,7 +1721,7 @@ impl Work {
     }
 }
 
-fn replace_signing(cell: &Mutex<Option<CancellationToken>>) -> CancellationToken {
+pub(super) fn replace_signing(cell: &Mutex<Option<CancellationToken>>) -> CancellationToken {
     let next = CancellationToken::new();
     let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(old) = guard.replace(next.clone()) {
@@ -1925,11 +1730,14 @@ fn replace_signing(cell: &Mutex<Option<CancellationToken>>) -> CancellationToken
     next
 }
 
-fn clear_pending(cell: &Mutex<Option<PendingSignIn>>) {
+pub(super) fn clear_pending(cell: &Mutex<Option<PendingSignIn>>) {
     let _ = cell.lock().unwrap_or_else(PoisonError::into_inner).take(); // dropped: zeroize abandoned pending sign-in
 }
 
-fn cancel_signing(cell: &Mutex<Option<CancellationToken>>, pending: &Mutex<Option<PendingSignIn>>) {
+pub(super) fn cancel_signing(
+    cell: &Mutex<Option<CancellationToken>>,
+    pending: &Mutex<Option<PendingSignIn>>,
+) {
     {
         let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(old) = guard.take() {
@@ -1939,1597 +1747,13 @@ fn cancel_signing(cell: &Mutex<Option<CancellationToken>>, pending: &Mutex<Optio
     clear_pending(pending);
 }
 
-fn snapshot(identity: &Mutex<Identity>) -> Snapshot {
+pub(super) fn snapshot(identity: &Mutex<Identity>) -> Snapshot {
     let id = identity.lock().unwrap_or_else(PoisonError::into_inner);
     Snapshot { shelf: id.shelf(), ours: id.ours.clone(), keys: id.keys.clone() }
 }
 
-fn index_path(data: &Path, shelf_by: &str) -> PathBuf {
+pub(super) fn index_path(data: &Path, shelf_by: &str) -> PathBuf {
     data.join("index").join(format!("{}.sqlite3", shelf_by.replace(':', "-")))
-}
-
-fn set_refine_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
-    reg.change(|cur| {
-        let next = match (&value, only_id) {
-            (Some(w), _) => Some(w.clone()),
-            (None, Some(target)) => {
-                if cur.refine.as_ref().is_some_and(|w| w.id == target) {
-                    None
-                } else {
-                    return None;
-                }
-            }
-            (None, None) => None,
-        };
-        if cur.refine == next {
-            return None;
-        }
-        Some(Progress { refine: next, ..cur.clone() })
-    });
-}
-
-fn set_file_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
-    reg.change(|cur| {
-        let next = match (&value, only_id) {
-            (Some(w), _) => Some(w.clone()),
-            (None, Some(target)) => {
-                if cur.file.as_ref().is_some_and(|w| w.id == target) {
-                    None
-                } else {
-                    return None;
-                }
-            }
-            (None, None) => None,
-        };
-        if cur.file == next {
-            return None;
-        }
-        Some(Progress { file: next, ..cur.clone() })
-    });
-}
-
-fn set_move_progress(reg: &Register<Progress>, value: Option<Writing>) {
-    reg.change(|cur| {
-        if cur.move_old == value {
-            return None;
-        }
-        Some(Progress { move_old: value.clone(), ..cur.clone() })
-    });
-}
-
-fn set_title_progress(reg: &Register<Progress>, value: Option<Writing>, only_id: Option<&str>) {
-    reg.change(|cur| {
-        let next = match (&value, only_id) {
-            (Some(w), _) => Some(w.clone()),
-            (None, Some(target)) => {
-                if cur.title.as_ref().is_some_and(|w| w.id == target) {
-                    None
-                } else {
-                    return None;
-                }
-            }
-            (None, None) => None,
-        };
-        if cur.title == next {
-            return None;
-        }
-        Some(Progress { title: next, ..cur.clone() })
-    });
-}
-
-fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
-    let config = &env.config;
-    let identity = &env.identity;
-    match job {
-        Job::Boot => run_boot(env),
-        Job::Settings { setup } => {
-            *env.keep_hint.lock().unwrap_or_else(PoisonError::into_inner) = setup.keep;
-            let json = serde_json::to_vec(&setup).map_err(|_| "settings")?;
-            fs::create_dir_all(&config.data)
-                .and_then(|()| fs::write(config.data.join("settings.json"), json))
-                .map_err(|_| "settings")?;
-            Ok(DeskOut::Silent)
-        }
-        Job::Sign { who, why, made, keep, busy, initial_handle } => {
-            let has_person = who.person().is_some();
-            let (out, deferred_adopt) = run_sign(env, who, why, made, keep, &busy, initial_handle)?;
-            let start_claim = if has_person {
-                env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone()
-            } else {
-                None
-            };
-            let recover_host = if has_person { host::read_lock(&config.data) } else { None };
-            Ok(DeskOut::Signed { out, start_claim, recover_host, deferred_adopt })
-        }
-        Job::ConfirmSignIn { auth_gen, keep, busy } => {
-            env.confirm_gen.store(auth_gen, Ordering::Release);
-            let pending = env
-                .pending_signin
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
-                .ok_or("id.no_pending")?;
-            let (me, handle) = pending.commit().map_err(code)?;
-            let (out, deferred_adopt) =
-                run_sign(env, Who::Person(me), "sign_in", false, keep, &busy, Some(handle))?;
-            let start_claim = env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            let recover_host = host::read_lock(&config.data);
-            Ok(DeskOut::Signed { out, start_claim, recover_host, deferred_adopt })
-        }
-        Job::SignOut { keep, busy } => {
-            cancel_signing(&env.signing, &env.pending_signin);
-            keys::set("identity", None).map_err(code)?;
-            let local = keys::local().map(|(me, _)| me);
-            let (out, deferred_adopt) =
-                run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
-            Ok(DeskOut::Signed { out, start_claim: None, recover_host: None, deferred_adopt })
-        }
-        Job::DiscardLocal => {
-            let person_did = {
-                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.who.person().map(|me| me.did.clone())
-            }
-            .ok_or("sign_in.first")?;
-            let local_me = keys::local_kept().map_err(code)?;
-            let local_shelf = if let Some(local_me) = local_me {
-                let shelf = Shelf::new(
-                    config.data.join("records").join(local_me.did.replace(':', "-")),
-                    &local_me.did,
-                    local_me.key,
-                );
-                let has_local_data = if shelf.root().is_dir() {
-                    let has_recs = match shelf.list() {
-                        Ok(list) => !list.is_empty(),
-                        Err(_) => {
-                            warn!("identity.discard_local", code = "adopt.failed");
-                            return Err("adopt.failed");
-                        }
-                    };
-                    let has_terms = match shelf.kept::<serde_json::Value>(TERM) {
-                        Ok(terms) => !terms.is_empty(),
-                        Err(_) => {
-                            warn!("identity.discard_local", code = "adopt.failed");
-                            return Err("adopt.failed");
-                        }
-                    };
-                    let has_topics = match shelf.kept::<serde_json::Value>(TOPIC) {
-                        Ok(topics) => !topics.is_empty(),
-                        Err(_) => {
-                            warn!("identity.discard_local", code = "adopt.failed");
-                            return Err("adopt.failed");
-                        }
-                    };
-                    has_recs || has_terms || has_topics
-                } else {
-                    false
-                };
-                let marker = match adopt::read_marker(&config.data) {
-                    Ok(marker) => marker,
-                    Err(c) => {
-                        warn!("identity.discard_local", code = c);
-                        return Err(c);
-                    }
-                };
-                if !adopt::can_discard(marker.as_ref(), &local_me.did, &person_did, has_local_data)
-                {
-                    warn!("identity.discard_local", code = "adopt.failed");
-                    return Err("adopt.failed");
-                }
-                if let Err(c) = adopt::discard_local(&config.data, &local_me.did) {
-                    warn!("identity.discard_local", code = c);
-                    return Err(c);
-                }
-                info!("identity.discard_local", code = "ok");
-                adopt::status(&config.data, Some(&shelf), Some(&person_did))
-            } else {
-                info!("identity.discard_local", code = "ok");
-                LocalShelf::default()
-            };
-            Ok(DeskOut::LocalDiscarded(local_shelf))
-        }
-        Job::Clip => {
-            let person_did = {
-                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.who.person().map(|me| me.did.clone())
-            }
-            .ok_or("rotation.none")?;
-            let key = keys::rotation_for(&person_did).map_err(code)?.ok_or("rotation.none")?;
-            if !(config.clip)(&key) {
-                return Err("clip");
-            }
-            Ok(DeskOut::Copied)
-        }
-        Job::RotationSaved => {
-            let person_did = {
-                let guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.who.person().map(|me| me.did.clone())
-            };
-            if let Some(did) = person_did {
-                keys::saved_for(&did).map_err(code)?;
-            }
-            Ok(DeskOut::RotationSaved)
-        }
-        Job::Refresh { rev, retain } => {
-            let snap = snapshot(identity);
-            run_refresh(env, &snap, rev, retain).map(DeskOut::Refreshed)
-        }
-        Job::Change { id, change } => {
-            let shelf = snapshot(identity).shelf?;
-            let is_title = matches!(change, Change::Title { .. });
-            let is_line = matches!(change, Change::Line { .. });
-            let is_note = matches!(change, Change::Note { .. });
-            apply(&shelf, &id, change)?;
-            let tapes = config.tapes();
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-            if is_title {
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Search, None);
-            } else if is_line {
-                env.views.invalidate(ViewKind::Transcript, Some(id));
-                env.views.invalidate(ViewKind::Search, None);
-                env.views.invalidate(ViewKind::Library, None);
-            } else if is_note {
-                env.views.invalidate(ViewKind::Search, None);
-            }
-            Ok(DeskOut::Silent)
-        }
-        Job::Note { id, op } => {
-            let shelf = snapshot(identity).shelf?;
-            if shelf.about(&id).map_err(fail)?.is_none() {
-                return Err("recording.gone");
-            }
-            match op {
-                NoteOp::Add { at_ms, text, anchor } => {
-                    let rand = getrandom::u32().map_err(|_| "random")?;
-                    notes::add(&shelf, &id, at_ms, text, anchor, rand, now()).map_err(fail)?;
-                }
-                NoteOp::Edit { key, text } => {
-                    notes::edit(&shelf, &id, &key, text, now())?;
-                }
-                NoteOp::Remove { key } => {
-                    notes::remove(&shelf, &id, &key, now())?;
-                }
-            }
-            let tapes = config.tapes();
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            env.views.invalidate(ViewKind::Search, None);
-            Ok(DeskOut::Silent)
-        }
-        Job::RefinePrepare { id } => {
-            let snap = snapshot(identity);
-            let shelf = snap.shelf?;
-            let rec = shelf.about(&id).map_err(fail)?.ok_or("recording.gone")?;
-            let tape_dir = config.tapes().join(&id);
-            let audio = tape::kept(&tape_dir);
-            if !audio {
-                return Err("tape.none");
-            }
-            let has_key = snap.keys.from(Service::Soniox) != From::Nowhere;
-            if !has_key {
-                return Err("keys.none");
-            }
-            let journal = write::Journal::load(&tape_dir).unwrap_or_default();
-            let from =
-                initial_refine_status(rec.about.take, audio, has_key, journal.failed.as_ref());
-            let _ = write::clear_failure(&tape_dir); // dropped: write_job also clears failure before signing
-            env.with_index(|idx| {
-                let _ = idx.update_refine_error(&id, None); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-            Ok(DeskOut::RefineStart { id, from })
-        }
-        Job::Remove { id } => {
-            let shelf = snapshot(identity).shelf?;
-            shelf.put::<About>(&id, RECORDING, &[(id.clone(), None)], now()).map_err(fail)?;
-            env.with_index(|idx| {
-                let _ = idx.remove_recording(&id); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Silent)
-        }
-        Job::Restore { id } => {
-            let shelf = snapshot(identity).shelf?;
-            shelf.restore(&id, now()).map_err(fail)?;
-            let tapes = config.tapes();
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Silent)
-        }
-        Job::Term { said, written } => {
-            let shelf = snapshot(identity).shelf?;
-            topic::put_always_term(&shelf, &said, written.clone(), now())?;
-            glossary::put(&shelf, &said, written, now())?;
-            refresh_topic_caches(env, &shelf);
-            env.views.invalidate(ViewKind::Glossary, None);
-            env.views.invalidate(ViewKind::Knowledge, None);
-            Ok(DeskOut::Silent)
-        }
-        Job::SaveTopic { topic } => {
-            let shelf = snapshot(identity).shelf?;
-            let is_pinned = topic.id.trim() == ALWAYS_TOPIC_ID;
-            match topic::save(&shelf, topic, now()) {
-                Ok(saved) => {
-                    refresh_topic_caches(env, &shelf);
-                    env.views.invalidate(ViewKind::Knowledge, None);
-                    if saved.pinned {
-                        env.views.invalidate(ViewKind::Glossary, None);
-                    }
-                    info!(
-                        "topic.saved",
-                        op = "save",
-                        pinned = saved.pinned,
-                        terms = saved.terms.len(),
-                        code = "ok"
-                    );
-                    Ok(DeskOut::Silent)
-                }
-                Err(c) => {
-                    warn!("topic.saved", op = "save", pinned = is_pinned, terms = 0usize, code = c);
-                    Err(c)
-                }
-            }
-        }
-        Job::RemoveTopic { id } => {
-            let shelf = snapshot(identity).shelf?;
-            let is_pinned = id == ALWAYS_TOPIC_ID;
-            match topic::remove(&shelf, &id, now()) {
-                Ok(()) => {
-                    refresh_topic_caches(env, &shelf);
-                    env.views.invalidate(ViewKind::Knowledge, None);
-                    info!(
-                        "topic.saved",
-                        op = "remove",
-                        pinned = false,
-                        terms = 0usize,
-                        code = "ok"
-                    );
-                    Ok(DeskOut::TopicRemoved(id))
-                }
-                Err(c) => {
-                    warn!(
-                        "topic.saved",
-                        op = "remove",
-                        pinned = is_pinned,
-                        terms = 0usize,
-                        code = c
-                    );
-                    Err(c)
-                }
-            }
-        }
-        Job::ImportTopicFile { id, path } => {
-            let shelf = snapshot(identity).shelf?;
-            let is_pinned = id.trim().is_empty() || id.trim() == ALWAYS_TOPIC_ID;
-            match topic::import_file(&shelf, &id, Path::new(&path), now()) {
-                Ok(saved) => {
-                    refresh_topic_caches(env, &shelf);
-                    env.views.invalidate(ViewKind::Knowledge, None);
-                    if saved.pinned {
-                        env.views.invalidate(ViewKind::Glossary, None);
-                    }
-                    info!(
-                        "topic.saved",
-                        op = "import",
-                        pinned = saved.pinned,
-                        terms = saved.terms.len(),
-                        code = "ok"
-                    );
-                    Ok(DeskOut::Silent)
-                }
-                Err(c) => {
-                    warn!(
-                        "topic.saved",
-                        op = "import",
-                        pinned = is_pinned,
-                        terms = 0usize,
-                        code = c
-                    );
-                    Err(c)
-                }
-            }
-        }
-        Job::RememberTerm { topic_id, said, written } => {
-            let shelf = snapshot(identity).shelf?;
-            let is_pinned = topic_id.trim().is_empty() || topic_id.trim() == ALWAYS_TOPIC_ID;
-            match topic::remember_term(&shelf, &topic_id, &said, written, now()) {
-                Ok(saved) => {
-                    refresh_topic_caches(env, &shelf);
-                    env.views.invalidate(ViewKind::Knowledge, None);
-                    if saved.pinned {
-                        env.views.invalidate(ViewKind::Glossary, None);
-                    }
-                    info!(
-                        "topic.saved",
-                        op = "remember",
-                        pinned = saved.pinned,
-                        terms = saved.terms.len(),
-                        code = "ok"
-                    );
-                    Ok(DeskOut::TopicRemembered)
-                }
-                Err(c) => {
-                    warn!(
-                        "topic.saved",
-                        op = "remember",
-                        pinned = is_pinned,
-                        terms = 0usize,
-                        code = c
-                    );
-                    Err(c)
-                }
-            }
-        }
-        Job::PickTitle { id, title, by } => {
-            let shelf = snapshot(identity).shelf?;
-            let about = shelf.about(&id).map_err(fail)?.ok_or("recording.gone")?.about;
-            let trimmed = title.trim().to_owned();
-            let title_by = if trimmed.is_empty() { TitleBy::None } else { by };
-            shelf
-                .put(
-                    &id,
-                    RECORDING,
-                    &[(id.clone(), Some(About { title: trimmed, title_by, ..about }))],
-                    now(),
-                )
-                .map_err(fail)?;
-            let tapes = config.tapes();
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Search, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Silent)
-        }
-        Job::ApplyTitles { id, shelf_by, titles, tags, candidates, elapsed_ms, done } => {
-            let commit_res = (|| -> Result<(), &'static str> {
-                let snap = snapshot(identity);
-                let Ok(shelf) = snap.shelf else {
-                    info!(
-                        "titles.done",
-                        rec = Id(&id),
-                        code = "gone",
-                        applied = false,
-                        tags = 0usize,
-                        ms = elapsed_ms
-                    );
-                    return Ok(());
-                };
-                if shelf.by() != shelf_by {
-                    info!(
-                        "titles.done",
-                        rec = Id(&id),
-                        code = "gone",
-                        applied = false,
-                        tags = 0usize,
-                        ms = elapsed_ms
-                    );
-                    return Ok(());
-                }
-                let Some(rec) = shelf.about(&id).map_err(fail)? else {
-                    info!(
-                        "titles.done",
-                        rec = Id(&id),
-                        code = "gone",
-                        applied = false,
-                        tags = 0usize,
-                        ms = elapsed_ms
-                    );
-                    return Ok(());
-                };
-                let mut next = rec.about;
-                let hand_protected = next.title_by == TitleBy::Hand
-                    || (matches!(next.title_by, TitleBy::File | TitleBy::Event)
-                        && !next.title.trim().is_empty());
-                let mut applied = false;
-                if !hand_protected && let Some(first) = titles.first() {
-                    next.title = first.clone();
-                    next.title_by = TitleBy::Ai;
-                    applied = true;
-                }
-                if !tags.is_empty() {
-                    next.tags = tags.clone();
-                }
-                if !candidates.is_empty() {
-                    next.title_candidates = candidates;
-                }
-                shelf.put(&id, RECORDING, &[(id.clone(), Some(next))], now()).map_err(fail)?;
-                let tapes = config.tapes();
-                env.with_index(|idx| {
-                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error; next boot reconciles
-                });
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Search, None);
-                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-                info!(
-                    "titles.done",
-                    rec = Id(&id),
-                    code = "ok",
-                    applied = applied,
-                    tags = tags.len(),
-                    ms = elapsed_ms
-                );
-                Ok(())
-            })();
-            let _ = done.send(()); // dropped: background titling caller was cancelled
-            commit_res?;
-            Ok(DeskOut::Silent)
-        }
-        Job::DestroyAudio { id, under_way } => {
-            let shelf = snapshot(identity).shelf?;
-            let tapes = config.tapes();
-            let entries: Vec<retain::Entry> = shelf
-                .list()
-                .map_err(fail)?
-                .iter()
-                .map(|r| retain::Entry {
-                    id: r.id.clone(),
-                    started: r.about.started,
-                    draft: r.about.take == 0,
-                    audio: tape::kept(&tapes.join(&r.id)),
-                })
-                .collect();
-            retain::destroy(&tapes, &entries, under_way.as_deref(), &id)?;
-            env.with_index(|idx| {
-                let _ = idx.update_audio(&id, false); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            Ok(DeskOut::Silent)
-        }
-        Job::Export { id, exporter, languages, to } => {
-            let shelf = snapshot(identity).shelf?;
-            let recording = shelf.read(&id).map_err(fail)?.ok_or("recording.gone")?;
-            let exporter = EXPORTERS.iter().find(|e| e.id == exporter).ok_or("export.which")?;
-            let lines: Vec<Line> = recording.lines.into_iter().map(|(_, s)| s.line).collect();
-            let (title, speakers) = (&recording.about.title, &recording.speakers);
-            let text = (exporter.render)(&Doc { title, lines: &lines, speakers }, &languages);
-            let mut to = PathBuf::from(to);
-            if to.extension().is_none() {
-                to.set_extension(exporter.ext);
-            }
-            Ok(DeskOut::ExportWrite { to, text })
-        }
-        Job::BeginFile { id, event, audio } => {
-            let calendar = env.views.calendar().ok_or("city.none")?;
-            let shelf = snapshot(identity).shelf?;
-            let filing = city::begin(&shelf, &id, &calendar, &event, audio)?;
-            env.with_index(|idx| {
-                let _ = idx.update_filing(&id, ""); // dropped: index.sync logged error; next boot reconciles
-            });
-            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-            env.views.invalidate(ViewKind::Outbound, None);
-            Ok(DeskOut::FileReady { id, filing })
-        }
-        Job::OwnKey { service, key, busy } => {
-            let snap = snapshot(identity);
-            let had_own = key.is_some();
-            snap.keys.own(service, key.as_deref()).map_err(code)?;
-            let keys_from: Vec<(String, From)> =
-                Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
-            let left = snap.keys.left();
-            let has_soniox = snap.keys.from(Service::Soniox) != From::Nowhere;
-            env.views.set_has_soniox_key(has_soniox);
-            let mut cleared_any = false;
-            if service == Service::Soniox
-                && had_own
-                && let Ok(shelf) = &snap.shelf
-            {
-                let tapes = config.tapes();
-                if let Ok(recs) = shelf.list() {
-                    for rec in recs {
-                        if rec.about.take != 0 {
-                            continue;
-                        }
-                        let dir = tapes.join(&rec.id);
-                        if let Ok(journal) = write::Journal::load(&dir)
-                            && journal.failed.as_ref().is_some_and(|f| {
-                                f.code == "keys.async_refused" || f.code == "keys.none"
-                            })
-                        {
-                            let _ = write::clear_failure(&dir); // dropped: best-effort retry unlock after entering own key
-                            env.with_index(|idx| {
-                                let _ = idx.update_refine_error(&rec.id, None); // dropped: index.sync logged error
-                            });
-                            cleared_any = true;
-                        }
-                    }
-                }
-            }
-            env.views.invalidate(ViewKind::Recording, None);
-            if cleared_any {
-                env.views.invalidate(ViewKind::Library, None);
-            }
-            let survey = if service == Service::Soniox && has_soniox {
-                Some(run_survey(config, &snap, &busy, false)?)
-            } else {
-                None
-            };
-            Ok(DeskOut::OwnKey(OwnKeyOut { keys: keys_from, left, survey }))
-        }
-        Job::Diagnose { spoken, shown, sound, captions } => {
-            run_diagnose(env, spoken, shown, sound, captions)
-        }
-        Job::IndexSync { kind, done } => {
-            let (local_shelf, target) = run_index_sync(env, kind);
-            let _ = done.send(target); // dropped: background caller was cancelled
-            Ok(local_shelf.map_or(DeskOut::Silent, DeskOut::LocalShelf))
-        }
-    }
-}
-
-fn run_index_sync(env: &DeskEnv, kind: SyncKind) -> (Option<LocalShelf>, Option<SealTarget>) {
-    let snap = snapshot(&env.identity);
-    let Ok(shelf) = snap.shelf else { return (None, None) };
-    let tapes = env.config.tapes();
-    match kind {
-        SyncKind::RecordingOpened { id } => {
-            env.with_index(|idx| {
-                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            (None, None)
-        }
-        SyncKind::RecordingSealed { id, started_by } => {
-            let person_did = {
-                let guard = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.who.person().map(|me| me.did.clone())
-            };
-            if started_by.starts_with("did:key:")
-                && let Some(person_did) = person_did
-            {
-                if let Ok(Some(local_me)) = keys::local_kept()
-                    && local_me.did == started_by
-                {
-                    let local_shelf = Shelf::new(
-                        env.config.data.join("records").join(local_me.did.replace(':', "-")),
-                        &local_me.did,
-                        local_me.key,
-                    );
-                    match adopt::run_one(&env.config.data, &local_shelf, &shelf, &id, now()) {
-                        Ok(sum) if sum.recordings > 0 => {
-                            info!(
-                                "identity.adopt",
-                                recordings = sum.recordings,
-                                terms = sum.terms,
-                                code = "ok"
-                            );
-                            env.with_index(|idx| {
-                                let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-                            });
-                            env.views.invalidate(ViewKind::Library, None);
-                            env.views.invalidate(ViewKind::Search, None);
-                            env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-                            env.views.invalidate(ViewKind::Transcript, Some(id));
-                            let local_status = adopt::status(
-                                &env.config.data,
-                                Some(&local_shelf),
-                                Some(&person_did),
-                            );
-                            let target = SealTarget { shelf, keys: snap.keys };
-                            return (Some(local_status), Some(target));
-                        }
-                        Ok(_) => {
-                            let local_status = adopt::status(
-                                &env.config.data,
-                                Some(&local_shelf),
-                                Some(&person_did),
-                            );
-                            return (Some(local_status), None);
-                        }
-                        Err(c) => {
-                            warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
-                        }
-                    }
-                }
-                return (None, None);
-            }
-            if shelf.by() == started_by {
-                env.with_index(|idx| {
-                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-                });
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Search, None);
-                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-                env.views.invalidate(ViewKind::Transcript, Some(id));
-                return (None, Some(SealTarget { shelf, keys: snap.keys }));
-            }
-            (None, None)
-        }
-        SyncKind::Refined { id, shelf_by } => {
-            if shelf.by() == shelf_by {
-                env.with_index(|idx| {
-                    let _ = idx.upsert_recording(&shelf, &tapes, &id); // dropped: index.sync logged error
-                });
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Search, None);
-                env.views.invalidate(ViewKind::Recording, Some(id.clone()));
-                env.views.invalidate(ViewKind::Transcript, Some(id));
-            }
-            (None, None)
-        }
-        SyncKind::RefineFailed { id, shelf_by, failure } => {
-            if shelf.by() == shelf_by {
-                env.with_index(|idx| {
-                    let _ = idx.update_refine_error(&id, Some(&failure)); // dropped: index.sync logged error
-                });
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Recording, Some(id));
-            }
-            (None, None)
-        }
-        SyncKind::FilingUpdated { id, state } => {
-            env.with_index(|idx| {
-                let _ = idx.update_filing(&id, &state); // dropped: index.sync logged error
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Recording, Some(id));
-            env.views.invalidate(ViewKind::Outbound, None);
-            (None, None)
-        }
-        SyncKind::Migrated { by } => {
-            if shelf.by() == by {
-                env.with_index(|idx| {
-                    let _ = idx.reconcile(&shelf, &tapes); // dropped: next boot reconciles if sqlite failed
-                });
-                env.views.invalidate(ViewKind::Library, None);
-                env.views.invalidate(ViewKind::Search, None);
-                env.views.invalidate(ViewKind::Recording, None);
-                env.views.invalidate(ViewKind::Transcript, None);
-            }
-            (None, None)
-        }
-    }
-}
-
-fn plain_code(text: &str) -> String {
-    if zutalk_log::is_plain(text) { text.to_owned() } else { "!".to_owned() }
-}
-
-fn sound_code(sound: Sound) -> &'static str {
-    match sound {
-        Sound::Mic => "mic",
-        Sound::System => "system",
-        Sound::Both => "both",
-    }
-}
-
-fn run_diagnose(
-    env: &DeskEnv,
-    spoken: Vec<String>,
-    shown: Vec<String>,
-    sound: Sound,
-    captions: bool,
-) -> Result<DeskOut, &'static str> {
-    let (who, keys) = {
-        let id = env.identity.lock().unwrap_or_else(PoisonError::into_inner);
-        let keys: BTreeMap<&'static str, From> =
-            Service::ALL.iter().map(|s| (s.name(), id.keys.from(*s))).collect();
-        (id.who.code(), keys)
-    };
-    let facts = Facts {
-        version: env!("CARGO_PKG_VERSION"),
-        os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
-        level: env.config.log.code(),
-        up_ms: env.started_at.elapsed().as_millis() as u64,
-        who,
-        spoken: spoken.iter().map(|s| plain_code(s)).collect(),
-        shown: shown.iter().map(|s| plain_code(s)).collect(),
-        sound: sound_code(sound),
-        captions,
-        keys,
-    };
-    let water = env.water.now().1;
-    let stats = env.root.stats().tally();
-    let tasks = env.root.running();
-
-    let _ = zutalk_log::flush(zutalk_log::LOG_FLUSH_WAIT_MS); // dropped: tests without an installed process log have no writer to flush
-
-    let base = env.config.data.join("diagnose");
-    fs::create_dir_all(&base).map_err(|_| "diagnose")?;
-    let prev = env.last_diagnose_ms.load(Ordering::Relaxed);
-    let stamp = wall_ms().max(prev.saturating_add(1));
-    env.last_diagnose_ms.store(stamp, Ordering::Relaxed);
-
-    let tmp = base.join(format!("{stamp}.tmp"));
-    let dest = base.join(format!("{stamp}"));
-    if tmp.exists() {
-        let _ = fs::remove_dir_all(&tmp); // dropped: stale temp dir from an interrupted diagnose
-    }
-    fs::create_dir(&tmp).map_err(|_| "diagnose")?;
-
-    let write_res: Result<(usize, u64), &'static str> = (|| {
-        let mut files = 0usize;
-        let mut bytes = 0u64;
-        let mut put = |name: &str, data: Vec<u8>| -> Result<(), &'static str> {
-            fs::write(tmp.join(name), &data).map_err(|_| "diagnose")?;
-            files += 1;
-            bytes += data.len() as u64;
-            Ok(())
-        };
-        put("about.json", serde_json::to_vec_pretty(&facts).map_err(|_| "diagnose")?)?;
-        put("water.json", serde_json::to_vec_pretty(&*water).map_err(|_| "diagnose")?)?;
-        put("stats.json", serde_json::to_vec_pretty(&stats).map_err(|_| "diagnose")?)?;
-        put("tasks.json", serde_json::to_vec_pretty(&tasks).map_err(|_| "diagnose")?)?;
-
-        let logs_src = env.config.logs();
-        if logs_src.is_dir() {
-            let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-            if let Ok(entries) = fs::read_dir(&logs_src) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                    {
-                        let mtime = entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                        found.push((mtime, path));
-                    }
-                }
-            }
-            found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            found.truncate(DIAGNOSE_LOG_FILES);
-            if !found.is_empty() {
-                let logs_dst = tmp.join("logs");
-                fs::create_dir(&logs_dst).map_err(|_| "diagnose")?;
-                for (_, src) in found {
-                    let Some(name) = src.file_name() else { continue };
-                    let copied = fs::copy(&src, logs_dst.join(name)).map_err(|_| "diagnose")?;
-                    files += 1;
-                    bytes += copied;
-                }
-            }
-        }
-        Ok((files, bytes))
-    })();
-
-    let (files, bytes) = match write_res {
-        Ok(counts) => counts,
-        Err(code) => {
-            let _ = fs::remove_dir_all(&tmp); // dropped: best-effort cleanup of half-written bundle
-            return Err(code);
-        }
-    };
-
-    if fs::rename(&tmp, &dest).is_err() {
-        let _ = fs::remove_dir_all(&tmp); // dropped: best-effort cleanup when atomic rename fails
-        return Err("diagnose");
-    }
-
-    prune_diagnose_dirs(&base);
-    info!("diagnose.wrote", files = files, bytes = bytes);
-    Ok(DeskOut::Diagnosed)
-}
-
-fn prune_diagnose_dirs(base: &Path) {
-    let Ok(entries) = fs::read_dir(base) else { return };
-    let mut dirs: Vec<(u64, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_dir() {
-                return None;
-            }
-            let stamp = entry.file_name().to_str()?.parse::<u64>().ok()?;
-            Some((stamp, path))
-        })
-        .collect();
-    dirs.sort_by_key(|(stamp, _)| *stamp);
-    let excess = dirs.len().saturating_sub(DIAGNOSE_KEPT_DIRS);
-    for (_, old) in dirs.into_iter().take(excess) {
-        let _ = fs::remove_dir_all(&old); // dropped: old bundle will be pruned on the next diagnose
-    }
-}
-
-fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
-    let mut boot_say = Vec::new();
-
-    // Step 1: settings.json
-    let t = std::time::Instant::now();
-    let setup = match fs::read(env.config.data.join("settings.json")) {
-        Ok(json) => match serde_json::from_slice::<Setup>(&json) {
-            Ok(mut setup) => {
-                if setup.defaults_v < SETUP_DEFAULTS_VERSION {
-                    if setup.defaults_v < 1 {
-                        // Pre-0.9.1 defaults left `self_view.always_on_top` false; upgrade once so
-                        // floating captions stay on top by default without overriding future toggles.
-                        setup.caption.scenes.self_view.always_on_top = true;
-                    }
-                    // Pre-0.9.2 could leave `click_through: true` trapped on a scene, making the
-                    // captions window completely unclickable and appearing frozen.
-                    setup.caption.scenes.self_view.click_through = false;
-                    setup.caption.scenes.band.click_through = false;
-                    setup.caption.scenes.stage.click_through = false;
-                    setup.defaults_v = SETUP_DEFAULTS_VERSION;
-                }
-                setup.caption = setup.caption.normalized();
-                setup.topics = topic::normalize_selected_topics(setup.topics);
-                let ms = t.elapsed().as_millis() as u64;
-                info!("boot.step", step = "settings", code = "ok", ms = ms);
-                setup
-            }
-            Err(_) => {
-                let ms = t.elapsed().as_millis() as u64;
-                warn!("boot.step", step = "settings", code = "settings", ms = ms);
-                boot_say.push("settings");
-                Setup::initial()
-            }
-        },
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            let ms = t.elapsed().as_millis() as u64;
-            info!("boot.step", step = "settings", code = "ok", ms = ms);
-            Setup::initial()
-        }
-        Err(_) => {
-            let ms = t.elapsed().as_millis() as u64;
-            warn!("boot.step", step = "settings", code = "settings", ms = ms);
-            boot_say.push("settings");
-            Setup::initial()
-        }
-    };
-    *env.keep_hint.lock().unwrap_or_else(PoisonError::into_inner) = setup.keep;
-
-    // Step 2: identity (kept person + local device identity + Who::of + shelf/refresh/survey)
-    let t = std::time::Instant::now();
-    let kept = keys::kept();
-    let kept_is_none = matches!(kept, Ok(None));
-    let kept = kept.unwrap_or_else(|end| {
-        boot_say.push(code(end));
-        None
-    });
-    let (local, made) = match keys::local() {
-        Ok((me, made)) => (Ok(me), made),
-        Err(end) => (Err(end), false),
-    };
-    let who = Who::of(kept, local);
-    let who_err = match &who {
-        Who::Nobody(c) => Some(*c),
-        Who::Local(_) | Who::Person(_) => None,
-    };
-    let has_person = who.person().is_some();
-    let (mut signed, deferred_adopt) = run_sign(env, who, "boot", made, setup.keep, &[], None)?;
-    let id_ms = t.elapsed().as_millis() as u64;
-    if let Some(c) = who_err {
-        warn!("boot.step", step = "identity", code = c, ms = id_ms);
-    } else {
-        info!("boot.step", step = "identity", code = "ok", ms = id_ms);
-    }
-
-    // Step 3: 0.8 community invite (never blocks boot; network work spawns on work subtree)
-    let t = std::time::Instant::now();
-    let invite_path = env.config.old.as_ref().map(|old| old.join("Secrets/community-invite.json"));
-    let invite_res = invite_path.as_deref().map(keys::invite).transpose().map_err(code);
-    let (start_create, start_claim) = match invite_res {
-        Ok(opt) => {
-            let invite = opt.flatten();
-            let ms = t.elapsed().as_millis() as u64;
-            info!("boot.step", step = "invites", code = "ok", ms = ms);
-            *env.invite.lock().unwrap_or_else(PoisonError::into_inner) = invite.clone();
-            match invite {
-                Some(_) if kept_is_none => (true, None),
-                Some(token) if has_person => (false, Some(token)),
-                _ => (false, None),
-            }
-        }
-        Err(c) => {
-            let ms = t.elapsed().as_millis() as u64;
-            warn!("boot.step", step = "invites", code = c, ms = ms);
-            boot_say.push(c);
-            (false, None)
-        }
-    };
-
-    boot_say.extend(signed.say);
-    signed.say = boot_say;
-
-    let recover_host = if has_person { host::read_lock(&env.config.data) } else { None };
-    Ok(DeskOut::Booted {
-        out: Box::new(BootOut { setup, signed }),
-        start_create,
-        start_claim,
-        recover_host,
-        deferred_adopt,
-    })
-}
-
-fn run_sign(
-    env: &DeskEnv,
-    who: Who,
-    why: &'static str,
-    made: bool,
-    keep: Option<u32>,
-    busy: &[String],
-    initial_handle: Option<Option<String>>,
-) -> Result<(SignedOut, Option<DeferredAdopt>), &'static str> {
-    let config = &env.config;
-    let http = &env.http;
-    let identity = &env.identity;
-    let mut say = Vec::new();
-    let records = config.data.join("records");
-    let make_shelf = |me: &Me| {
-        Arc::new(Shelf::new(records.join(me.did.replace(':', "-")), &me.did, me.key.clone()))
-    };
-    let shelf = who.me().ok().map(make_shelf);
-    let ours = who.person().cloned().map(|me| Ours {
-        server: config.server.clone(),
-        me,
-        http: http.clone(),
-    });
-    let keys = Arc::new(Chain::new(ours.clone()));
-    let me = who.person().map(|me| me.did.clone());
-    let rotation_unsaved = me.as_deref().is_some_and(keys::unsaved_for);
-    if let (Some(h), Some(s)) = (initial_handle.as_ref(), shelf.as_deref()) {
-        let _ = identity::write_cached_handle(s.root(), h.as_deref()); // dropped: offline handle cache is best-effort
-    }
-    let handle = if me.is_some() {
-        initial_handle
-            .flatten()
-            .or_else(|| shelf.as_deref().and_then(|s| identity::read_cached_handle(s.root())))
-    } else {
-        None
-    };
-
-    // Adopt any existing device-local (`did:key`) records and terms into the first signed-in
-    // person's shelf (`P4.md` §3.4). Small libraries run inline; large libraries (e.g. migrated
-    // 0.8 shelves) run asynchronously on the `work` subtree so sign-in never freezes `desk`.
-    let mut deferred_adopt = None;
-    let local_shelf = match (&who, shelf.as_ref()) {
-        (Who::Person(person), Some(person_shelf)) => {
-            let _ = topic::ensure_migrated(person_shelf, now()); // dropped: best-effort legacy talk/term migration before adopt
-            if let Ok(Some(local_me)) = keys::local_kept() {
-                let local = make_shelf(&local_me);
-                if local.root().is_dir() {
-                    let mut exclude: Vec<String> = busy.to_vec();
-                    if let Some(active) = env.views.active_recording()
-                        && !exclude.contains(&active)
-                    {
-                        exclude.push(active);
-                    }
-                    if adopt::pending_recordings_count(&local) > INLINE_ADOPT_MAX_RECORDINGS {
-                        deferred_adopt = Some(DeferredAdopt {
-                            local: local.clone(),
-                            person: person_shelf.clone(),
-                            exclude,
-                        });
-                    } else {
-                        match adopt::run(&config.data, &local, person_shelf, &exclude, now()) {
-                            Ok(sum) => {
-                                if sum.plan == adopt::AdoptPlan::Adopt
-                                    && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0)
-                                {
-                                    info!(
-                                        "identity.adopt",
-                                        recordings = sum.recordings,
-                                        terms = sum.terms,
-                                        code = "ok"
-                                    );
-                                }
-                            }
-                            Err(c) => {
-                                warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
-                                say.push(c);
-                            }
-                        }
-                    }
-                }
-                adopt::status(&config.data, Some(&local), Some(&person.did))
-            } else {
-                LocalShelf::default()
-            }
-        }
-        (Who::Local(_), Some(local)) => adopt::status(&config.data, Some(local), None),
-        _ => LocalShelf::default(),
-    };
-
-    {
-        let mut guard = identity.lock().unwrap_or_else(PoisonError::into_inner);
-        let (from, to) = (guard.who.code(), who.code());
-        if let Who::Nobody(code) = &who {
-            warn!("identity.who", from = from, to = to, why = why, made = made);
-            say.push(*code);
-        } else {
-            info!("identity.who", from = from, to = to, why = why, made = made);
-        }
-        guard.who = who;
-        guard.shelf = shelf;
-        guard.ours = ours;
-        guard.keys = keys;
-    }
-
-    // Drop any previous identity's index handle before sweeping/reopening.
-    *env.index.lock().unwrap_or_else(PoisonError::into_inner) = None;
-
-    let snap = snapshot(identity);
-    if let Ok(shelf) = &snap.shelf {
-        let _ = topic::ensure_migrated(shelf, now()); // dropped: best-effort legacy talk/term migration on sign-in
-        refresh_topic_caches(env, shelf);
-    } else {
-        *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = Vec::new();
-    }
-
-    let refreshed = match run_refresh(env, &snap, 0, Some(keep)) {
-        Ok(refreshed) => refreshed,
-        Err(c) => {
-            say.push(c);
-            Refreshed {
-                rev: 0,
-                keys: Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect(),
-                left: snap.keys.left(),
-                quota: snap.keys.quota(),
-            }
-        }
-    };
-
-    let has_soniox = snap.keys.from(Service::Soniox) != From::Nowhere;
-    if let Ok(shelf) = &snap.shelf {
-        let path = index_path(&config.data, shelf.by());
-        let tapes = config.tapes();
-        let opened_path = match Index::open(&path, shelf, &tapes, env.root.stats()) {
-            Ok(idx) => {
-                *env.index.lock().unwrap_or_else(PoisonError::into_inner) = Some(idx);
-                Some(path)
-            }
-            Err(c) => {
-                say.push(c);
-                None
-            }
-        };
-        env.views.set_source(Some(shelf.clone()), opened_path, has_soniox, true);
-    } else {
-        env.views.set_source(None, None, false, true);
-    }
-    env.views.invalidate_all();
-
-    let survey = match run_survey(config, &snap, busy, true) {
-        Ok(survey) => survey,
-        Err(c) => {
-            say.push(c);
-            Survey { writes: Vec::new(), sweep: false, filings: Vec::new() }
-        }
-    };
-
-    let shelf_by = snap.shelf.as_ref().ok().map(|s| s.by().to_owned());
-    Ok((
-        SignedOut { me, shelf_by, handle, rotation_unsaved, local_shelf, refreshed, survey, say },
-        deferred_adopt,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_adopt(
-    tree: &Tree,
-    bg: Arc<Semaphore>,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    data: PathBuf,
-    task: DeferredAdopt,
-    progress_reg: Register<Progress>,
-    index_sync: IndexSync,
-    results: Tx<Msg>,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let tree_run = tree.clone();
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("job.adopt", async move {
-        let wait_at = tokio::time::Instant::now();
-        let Ok(_permit) = bg.acquire().await else {
-            return;
-        };
-        let waited_ms = wait_at.elapsed().as_millis() as u64;
-        info!("job.start", kind = "adopt", job = seq, waited_ms = waited_ms);
-        let started = std::time::Instant::now();
-        let reg_cb = progress_reg.clone();
-        let data_run = data.clone();
-        let local_run = task.local.clone();
-        let person_run = task.person.clone();
-        let exclude = task.exclude;
-        let outcome = tree_run
-            .blocking("job.adopt", move || {
-                let res = adopt::run_with_progress(
-                    &data_run,
-                    &local_run,
-                    &person_run,
-                    &exclude,
-                    now(),
-                    |done, of, id| {
-                        let writing =
-                            Writing { id: id.to_owned(), step: "moving".into(), done, of };
-                        set_move_progress(&reg_cb, Some(writing));
-                    },
-                );
-                let status = adopt::status(&data_run, Some(&local_run), Some(person_run.by()));
-                (res, status)
-            })
-            .await;
-        set_move_progress(&progress_reg, None);
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok((Ok(sum), status)) => {
-                info!("job.done", kind = "adopt", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-                let changed = sum.plan == adopt::AdoptPlan::Adopt
-                    && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0);
-                if changed {
-                    info!(
-                        "identity.adopt",
-                        recordings = sum.recordings,
-                        terms = sum.terms,
-                        code = "ok"
-                    );
-                    index_sync.migrated(task.person.by().to_owned()).await;
-                    let _ = results.send(Msg::LocalShelf(status)).await; // dropped: the hub has ended
-                }
-            }
-            Ok((Err(c), _)) => {
-                warn!("job.done", kind = "adopt", job = seq, code = c, ms = ms);
-                warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
-                jobs_failed.add(1);
-            }
-            Err(_) => {
-                if tree_run.is_cancelled() {
-                    return;
-                }
-                warn!("job.done", kind = "adopt", job = seq, code = "panic", ms = ms);
-                jobs_failed.add(1);
-            }
-        }
-    });
-}
-
-fn refresh_topic_caches(env: &DeskEnv, shelf: &Shelf) {
-    if let Ok(list) = topic::list(shelf) {
-        *env.topics.lock().unwrap_or_else(PoisonError::into_inner) = list;
-    }
-}
-
-fn run_refresh(
-    env: &DeskEnv,
-    snap: &Snapshot,
-    rev: u64,
-    retain: Option<Option<u32>>,
-) -> Result<Refreshed, &'static str> {
-    let config = &env.config;
-    let keys: Vec<(String, From)> =
-        Service::ALL.iter().map(|s| (s.name().into(), snap.keys.from(*s))).collect();
-    let left = snap.keys.left();
-    let quota = snap.keys.quota();
-    let Ok(shelf) = &snap.shelf else {
-        return Ok(Refreshed { rev, keys, left, quota });
-    };
-    if let Some(keep) = retain {
-        let tapes = config.tapes();
-        let mut entries: Vec<retain::Entry> = shelf
-            .list()
-            .map_err(fail)?
-            .iter()
-            .map(|r| retain::Entry {
-                id: r.id.clone(),
-                started: r.about.started,
-                draft: r.about.take == 0,
-                audio: tape::kept(&tapes.join(&r.id)),
-            })
-            .collect();
-        let destroyed = retain::sweep(&tapes, keep, &mut entries, now())?;
-        if !destroyed.is_empty() {
-            env.with_index(|idx| {
-                for id in &destroyed {
-                    let _ = idx.update_audio(id, false); // dropped: index.sync logged error
-                }
-            });
-            env.views.invalidate(ViewKind::Library, None);
-            env.views.invalidate(ViewKind::Recording, None);
-        }
-    }
-    Ok(Refreshed { rev, keys, left, quota })
-}
-
-fn run_survey(
-    config: &Config,
-    snap: &Snapshot,
-    busy: &[String],
-    include_filings: bool,
-) -> Result<Survey, &'static str> {
-    let Ok(shelf) = &snap.shelf else {
-        return Ok(Survey { writes: Vec::new(), sweep: false, filings: Vec::new() });
-    };
-    let tapes = config.tapes();
-    let has_key = snap.keys.from(Service::Soniox) != From::Nowhere;
-    let recordings = shelf.list().map_err(fail)?;
-    let (mut writes, mut skipped, mut why) = (Vec::new(), 0usize, "");
-    for r in &recordings {
-        if busy.iter().any(|id| id == &r.id) {
-            continue;
-        }
-        let draft = r.about.take == 0;
-        let audio = tape::kept(&tapes.join(&r.id));
-        // Skip drafts that stopped with a persistent fatal refinement error until the user
-        // supplies a new key or retries manually (`P2.md` §3.3.2).
-        if draft
-            && audio
-            && write::Journal::load(&tapes.join(&r.id)).is_ok_and(|j| j.failed.is_some())
-        {
-            continue;
-        }
-        // Nothing is written again without its audio, nor for one moved from 0.8: it keeps the
-        // transcript it had there, or the lack of one, and its sound is not sent anywhere.
-        match write::owed(draft, audio, r.about.moved, has_key) {
-            write::Owed::Yes => writes.push(r.id.clone()),
-            write::Owed::Waits(reason) => {
-                skipped += 1;
-                why = reason;
-            }
-            write::Owed::No => {}
-        }
-    }
-    if skipped > 0 {
-        info!("write.skipped", n = skipped, why = why);
-    }
-    let filings = if include_filings && snap.ours.is_some() {
-        shelf
-            .kept::<Filing>(FILING)
-            .map_err(fail)?
-            .into_iter()
-            .filter(|(_, f)| f.state.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    Ok(Survey { writes, sweep: has_key, filings })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_create_net(
-    tree: &Tree,
-    signing: &Mutex<Option<CancellationToken>>,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    http: reqwest::Client,
-    directory: String,
-    desk: Desk<Job>,
-    keep_hint: Arc<Mutex<Option<u32>>>,
-    results: Tx<Msg>,
-) {
-    let cancel = replace_signing(signing);
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.create", async move {
-        info!("job.start", kind = "create", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = tokio::select! {
-            () = cancel.cancelled() => None,
-            res = again(|| keys::create(&http, &directory), |why, wait_ms, n| {
-                warn!("job.again", kind = "create", why = why, wait_ms = wait_ms, n = n);
-            }) => Some(res),
-        };
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            None => {
-                info!("job.done", kind = "create", job = seq, code = "cancelled", ms = ms);
-            }
-            Some(Ok(me)) => {
-                info!("job.done", kind = "create", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-                let keep = *keep_hint.lock().unwrap_or_else(PoisonError::into_inner);
-                let job = Job::Sign {
-                    who: Who::Person(me),
-                    why: "sign_in",
-                    made: false,
-                    keep,
-                    busy: Vec::new(),
-                    initial_handle: None,
-                };
-                let _ = desk.send(job).await; // dropped: desk ended on shutdown
-            }
-            Some(Err(end)) => {
-                let c = code(end);
-                warn!("job.done", kind = "create", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-                let _ = results.send(Msg::SignInFailed { auth_gen: 0, code: c }).await; // dropped: the hub has ended
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_quota_net(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    ours: Ours,
-    chain: Arc<Chain>,
-    results: Tx<Msg>,
-    notify: bool,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.quota", async move {
-        info!("job.start", kind = "quota", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = quota::fetch(&ours).await;
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok((left, quota_info)) => {
-                chain.set_quota(left, quota_info.clone());
-                let now_ms = now();
-                let soniox_left =
-                    quota::remaining_for(&quota_info, Service::Soniox, now_ms).unwrap_or(0);
-                let openrouter_left =
-                    quota::remaining_for(&quota_info, Service::OpenRouter, now_ms).unwrap_or(0);
-                info!(
-                    "quota.updated",
-                    soniox_left = soniox_left,
-                    openrouter_left = openrouter_left,
-                    code = "ok"
-                );
-                info!("job.done", kind = "quota", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-                let _ = results.send(Msg::QuotaUpdated { left, quota: quota_info, notify }).await; // dropped: the hub has ended
-            }
-            Err(end) => {
-                let c = code(end);
-                warn!("quota.updated", soniox_left = 0u32, openrouter_left = 0u32, code = c);
-                warn!("job.done", kind = "quota", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-                if notify {
-                    let _ = results.send(Msg::QuotaFailed(c)).await; // dropped: the hub has ended
-                }
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_profile_net(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    http: reqwest::Client,
-    directory: String,
-    did: String,
-    shelf_root: PathBuf,
-    results: Tx<Msg>,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let run_tree = tree.clone();
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.profile", async move {
-        info!("job.start", kind = "profile", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = identity::fetch_handle(&http, &directory, &did).await;
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok(handle) => {
-                let to_cache = handle.clone();
-                let write_res = run_tree
-                    .blocking("profile.write", move || {
-                        identity::write_cached_handle(&shelf_root, to_cache.as_deref())
-                    })
-                    .await;
-                let _ = write_res; // dropped: best-effort offline handle cache
-                info!("job.done", kind = "profile", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-                let _ = results.send(Msg::HandleResolved(handle)).await; // dropped: the hub has ended
-            }
-            Err(end) => {
-                let c = code(end);
-                warn!("job.done", kind = "profile", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_claim_net(
-    tree: &Tree,
-    signing: &Mutex<Option<CancellationToken>>,
-    invite: &Arc<Mutex<Option<Secret>>>,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    chain: Arc<Chain>,
-    token: Secret,
-    results: Tx<Msg>,
-) {
-    let cancel = replace_signing(signing);
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let invite = invite.clone();
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.claim", async move {
-        info!("job.start", kind = "claim", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = tokio::select! {
-            () = cancel.cancelled() => None,
-            res = again(|| chain.claim(&token), |why, wait_ms, n| {
-                warn!("job.again", kind = "claim", why = why, wait_ms = wait_ms, n = n);
-            }) => Some(res),
-        };
-        let ms = started.elapsed().as_millis() as u64;
-        let Some(claimed) = outcome else {
-            info!("job.done", kind = "claim", job = seq, code = "cancelled", ms = ms);
-            return;
-        };
-        // Gone over, or refused for good: either way it is not sent again.
-        let done = keys::carried(&token).and(claimed).map_err(code);
-        *invite.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        match done {
-            Ok(()) => {
-                info!("job.done", kind = "claim", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Err(c) => {
-                warn!("job.done", kind = "claim", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-            }
-        }
-        let _ = results.send(Msg::Claimed(done)).await; // dropped: the hub has ended
-    });
-}
-
-fn spawn_export_write(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    results: Tx<Msg>,
-    to: PathBuf,
-    text: String,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let run_tree = tree.clone();
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("export.write", async move {
-        info!("job.start", kind = "export.write", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = run_tree
-            .blocking("export.write", move || fs::write(to, text).map_err(|_| "export.write"))
-            .await;
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok(Ok(())) => {
-                info!("job.done", kind = "export.write", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Ok(Err(c)) => {
-                warn!("job.done", kind = "export.write", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-                let _ = results.send(Msg::DeskFailed(c)).await; // dropped: the hub has ended
-            }
-            Err(_) => {
-                if run_tree.is_cancelled() {
-                    return;
-                }
-                warn!("job.done", kind = "export.write", job = seq, code = "panic", ms = ms);
-                jobs_failed.add(1);
-                let _ = results.send(Msg::DeskFailed("panic")).await; // dropped: the hub has ended
-            }
-        }
-    });
 }
 
 fn clear_active_if_gen(host_live: &Mutex<Option<ActiveHost>>, host_gen: u64) {
@@ -3551,750 +1775,14 @@ fn finish_host_op(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_host_recover(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    jobs_failed: &Counter,
-    data: PathBuf,
-    ours: Ours,
-    room_id: String,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let run_tree = tree.clone();
-    let jobs_done = jobs_done.clone();
-    let jobs_failed = jobs_failed.clone();
-    tree.spawn("net.host_recover", async move {
-        info!("job.start", kind = "host.recover", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        let outcome = host::write(&ours, &room_id, None, Write::Gone).await;
-        let ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok(_) => {
-                let clear_data = data.clone();
-                let clear_id = room_id.clone();
-                let res = run_tree
-                    .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
-                    .await;
-                let _ = res; // dropped: lock cleared after crash recovery
-                info!("host.recover", code = "ok");
-                info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Err(End::Fatal("room.gone")) => {
-                let clear_data = data.clone();
-                let clear_id = room_id.clone();
-                let res = run_tree
-                    .blocking("host.lock", move || host::clear_lock_if(&clear_data, &clear_id))
-                    .await;
-                let _ = res; // dropped: room already gone on server
-                info!("host.recover", code = "gone");
-                info!("job.done", kind = "host.recover", job = seq, code = "ok", ms = ms);
-                jobs_done.add(1);
-            }
-            Err(end) => {
-                let c = code(end);
-                warn!("host.recover", code = c);
-                warn!("job.done", kind = "host.recover", job = seq, code = c, ms = ms);
-                jobs_failed.add(1);
-            }
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_host_slot(
-    tree: &Tree,
-    next_seq: &Arc<AtomicU64>,
-    jobs_done: &Counter,
-    host_gen: u64,
-    ours: Ours,
-    room_id: String,
-    key: Zeroizing<[u8; 32]>,
-    live_flag: Arc<AtomicBool>,
-    live_notify: Arc<Notify>,
-    cancel: CancellationToken,
-    frame: Reading<Frame>,
-    voice: Voice,
-    results: Tx<Msg>,
-) {
-    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-    let jobs_done = jobs_done.clone();
-    tree.spawn("host.slot", async move {
-        info!("job.start", kind = "host.slot", job = seq, waited_ms = 0u64);
-        let started = std::time::Instant::now();
-        host_slot_loop(
-            host_gen,
-            ours,
-            room_id,
-            key,
-            live_flag,
-            live_notify,
-            cancel,
-            frame,
-            voice,
-            results,
-        )
-        .await;
-        let ms = started.elapsed().as_millis() as u64;
-        info!("job.done", kind = "host.slot", job = seq, code = "ok", ms = ms);
-        jobs_done.add(1);
-    });
-}
-
-/// Publishes the live room slot: polls waiting viewers every `HOST_ARM_POLL_MS` while armed,
-/// then pushes sealed `Frame.columns` at most every `HOST_SLOT_MS` while recording with
-/// `HOST_KEEPALIVE_MS` keepalives during silence or pause (`P5.md` §3.3).
-#[allow(clippy::too_many_arguments)]
-async fn host_slot_loop(
-    host_gen: u64,
-    ours: Ours,
-    room_id: String,
-    key: Zeroizing<[u8; 32]>,
-    live_flag: Arc<AtomicBool>,
-    live_notify: Arc<Notify>,
-    cancel: CancellationToken,
-    mut live: Reading<Frame>,
-    voice: Voice,
-    results: Tx<Msg>,
-) {
-    let mut said: Option<End> = None;
-
-    // Phase 1: Armed — poll viewer count & keep room alive under the 120 s server TTL until
-    // recording begins or the room is cancelled.
-    while !live_flag.load(Ordering::Acquire) {
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = live_notify.notified() => break,
-            () = tokio::time::sleep(Duration::from_millis(HOST_ARM_POLL_MS)) => {
-                match host::write(&ours, &room_id, Some(&key), Write::Slot(None)).await {
-                    Ok(viewers) => {
-                        said = None;
-                        let _ = results.send(Msg::HostViewers { host_gen, viewers }).await; // dropped: the hub has ended
-                    }
-                    Err(end) => {
-                        if said != Some(end) {
-                            voice.say(code(end));
-                            said = Some(end);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase 2: Live — push sealed caption columns at most every HOST_SLOT_MS, keeping the room
-    // alive during silence/pause every HOST_KEEPALIVE_MS.
-    let (_, mut current) = live.now();
-    loop {
-        if cancel.is_cancelled() {
-            return;
-        }
-        let bytes =
-            serde_json::to_vec(&current.columns).ok().filter(|_| !current.columns.is_empty());
-        match host::write(&ours, &room_id, Some(&key), Write::Slot(bytes.as_deref())).await {
-            Ok(viewers) => {
-                said = None;
-                let _ = results.send(Msg::HostViewers { host_gen, viewers }).await; // dropped: the hub has ended
-            }
-            Err(end) => {
-                if said != Some(end) {
-                    voice.say(code(end));
-                    said = Some(end);
-                }
-            }
-        }
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(HOST_SLOT_MS)) => {}
-        }
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            next = live.next() => {
-                let Some((_, next_frame)) = next else { return };
-                current = next_frame;
-            }
-            () = tokio::time::sleep(Duration::from_millis(HOST_KEEPALIVE_MS)) => {}
-        }
-    }
-}
-
-struct TitleTask {
-    id: String,
-    manual: bool,
-    shelf: Arc<Shelf>,
-    keys: Arc<Chain>,
-    http: reqwest::Client,
-    openrouter: String,
-    work_tree: Tree,
-    desk: Desk<Job>,
-    progress_reg: Register<Progress>,
-    said: Voice,
-    title_bg: Arc<Semaphore>,
-    titling: Arc<Mutex<BTreeSet<String>>>,
-    next_seq: Arc<AtomicU64>,
-    jobs_done: Counter,
-    jobs_failed: Counter,
-}
-
-struct TitlingGuard {
-    id: String,
-    titling: Arc<Mutex<BTreeSet<String>>>,
-    progress_reg: Register<Progress>,
-}
-
-impl Drop for TitlingGuard {
-    fn drop(&mut self) {
-        self.titling.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
-        set_title_progress(&self.progress_reg, None, Some(&self.id));
-    }
-}
-
-fn spawn_titles_task(task: TitleTask) {
-    {
-        let mut set = task.titling.lock().unwrap_or_else(PoisonError::into_inner);
-        if !set.insert(task.id.clone()) {
-            return; // already titling this recording
-        }
-    }
-    let work_tree = task.work_tree.clone();
-    work_tree.spawn("job.titles", async move {
-        let _guard = TitlingGuard {
-            id: task.id.clone(),
-            titling: task.titling.clone(),
-            progress_reg: task.progress_reg.clone(),
-        };
-        let wait_at = tokio::time::Instant::now();
-        let Ok(_permit) = task.title_bg.clone().acquire_owned().await else {
-            return;
-        };
-        let waited_ms = wait_at.elapsed().as_millis() as u64;
-        let read_shelf = task.shelf.clone();
-        let read_id = task.id.clone();
-        let loaded = task
-            .work_tree
-            .blocking("titles.read", move || {
-                let rec = read_shelf.read(&read_id).map_err(|_| "shelf")?;
-                let topics = topic::list(&read_shelf).unwrap_or_default();
-                Ok::<_, &'static str>((rec, topics))
-            })
-            .await;
-        let (rec, all_topics) = match loaded {
-            Ok(Ok((Some(rec), topics))) => (rec, topics),
-            Ok(Ok((None, _))) => {
-                info!(
-                    "titles.done",
-                    rec = Id(&task.id),
-                    code = "gone",
-                    applied = false,
-                    tags = 0usize,
-                    ms = 0u64
-                );
-                return;
-            }
-            _ => return,
-        };
-
-        let has_lines = rec.lines.iter().any(|(_, s)| !s.line.text.trim().is_empty());
-        let has_key = task.keys.from(Service::OpenRouter) != From::Nowhere;
-        let title_empty = rec.about.title.trim().is_empty();
-        let tags_empty = rec.about.tags.is_empty();
-        match titles::title_plan(
-            has_lines,
-            has_key,
-            rec.about.title_by,
-            title_empty,
-            tags_empty,
-            task.manual,
-        ) {
-            TitleAction::Skip(why) => {
-                info!(
-                    "titles.done",
-                    rec = Id(&task.id),
-                    code = "skipped",
-                    applied = false,
-                    tags = 0usize,
-                    ms = 0u64
-                );
-                if task.manual {
-                    task.said.say(why);
-                }
-                return;
-            }
-            TitleAction::Generate { .. } => {}
-        }
-
-        let seq = task.next_seq.fetch_add(1, Ordering::Relaxed);
-        info!("job.start", kind = "titles", job = seq, waited_ms = waited_ms);
-        set_title_progress(
-            &task.progress_reg,
-            Some(Writing { id: task.id.clone(), step: "titling".into(), done: 0, of: 1 }),
-            None,
-        );
-
-        let line_refs: Vec<&Line> = rec.lines.iter().map(|(_, s)| &s.line).collect();
-        let excerpt = titles::sample_transcript(&line_refs);
-        let max_t_ms = line_refs.iter().map(|l| l.t1).max().unwrap_or(rec.about.length_ms);
-        let first_line =
-            line_refs.iter().map(|l| l.text.trim()).find(|t| !t.is_empty()).map(str::to_owned);
-        let file_or_event: Option<(TitleBy, String)> =
-            if matches!(rec.about.title_by, TitleBy::File | TitleBy::Event)
-                && !rec.about.title.trim().is_empty()
-            {
-                Some((rec.about.title_by, rec.about.title.clone()))
-            } else {
-                rec.about
-                    .title_candidates
-                    .iter()
-                    .find(|c| {
-                        matches!(c.by, TitleBy::Event | TitleBy::File) && !c.text.trim().is_empty()
-                    })
-                    .map(|c| (c.by, c.text.clone()))
-            };
-
-        let ctx = topic::assemble_context(&all_topics, &rec.about.topics, "");
-        let topic_hint = ctx
-            .general
-            .iter()
-            .filter(|(k, _)| k == "domain")
-            .map(|(_, v)| v.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let input = TitleInput { spoken: rec.about.spoken.clone(), topic_hint, excerpt, max_t_ms };
-        let started = std::time::Instant::now();
-        let generated = titles::generate(&task.http, &task.openrouter, &*task.keys, &input).await;
-        let ms = started.elapsed().as_millis() as u64;
-
-        match generated {
-            Ok(meta) => {
-                let fe_ref = file_or_event.as_ref().map(|(by, text)| (*by, text.as_str()));
-                let candidates =
-                    titles::build_candidates(&meta.titles, first_line.as_deref(), fe_ref);
-                let (done_tx, done_rx) = oneshot::channel();
-                let apply_job = Job::ApplyTitles {
-                    id: task.id.clone(),
-                    shelf_by: task.shelf.by().to_owned(),
-                    titles: meta.titles,
-                    tags: meta.tags,
-                    candidates,
-                    elapsed_ms: ms,
-                    done: done_tx,
-                };
-                if task.desk.send(apply_job).await.is_ok() {
-                    let _ = done_rx.await; // dropped: desk ended on shutdown
-                }
-                info!("job.done", kind = "titles", job = seq, code = "ok", ms = ms);
-                task.jobs_done.add(1);
-            }
-            Err(end) => {
-                let c = code(end);
-                warn!(
-                    "titles.done",
-                    rec = Id(&task.id),
-                    code = c,
-                    applied = false,
-                    tags = 0usize,
-                    ms = ms
-                );
-                warn!("job.done", kind = "titles", job = seq, code = c, ms = ms);
-                task.jobs_failed.add(1);
-                if task.manual {
-                    task.said.say(c);
-                }
-            }
-        }
-    });
-}
-
-struct WriteCtx {
-    id: String,
-    started_by: String,
-    shelf: Arc<Shelf>,
-    keys: Arc<Chain>,
-    config: Arc<Config>,
-    results: Tx<Msg>,
-    progress_reg: Register<Progress>,
-    views: Arc<ViewEngine>,
-    index_sync: IndexSync,
-    said: Voice,
-    work_tree: Tree,
-    root: Tree,
-    bg: Arc<Semaphore>,
-    http: reqwest::Client,
-    desk: Desk<Job>,
-    title_bg: Arc<Semaphore>,
-    titling: Arc<Mutex<BTreeSet<String>>>,
-    next_seq: Arc<AtomicU64>,
-    jobs_done: Counter,
-    jobs_failed: Counter,
-    manual: bool,
-    from_state: RefineStatus,
-}
-
-impl WriteCtx {
-    fn spawn_auto_titles(&self) {
-        if self.keys.from(Service::OpenRouter) == From::Nowhere {
-            return;
-        }
-        spawn_titles_task(TitleTask {
-            id: self.id.clone(),
-            manual: false,
-            shelf: self.shelf.clone(),
-            keys: self.keys.clone(),
-            http: self.http.clone(),
-            openrouter: self.config.openrouter.clone(),
-            work_tree: self.work_tree.clone(),
-            desk: self.desk.clone(),
-            progress_reg: self.progress_reg.clone(),
-            said: self.said.clone(),
-            title_bg: self.title_bg.clone(),
-            titling: self.titling.clone(),
-            next_seq: self.next_seq.clone(),
-            jobs_done: self.jobs_done.clone(),
-            jobs_failed: self.jobs_failed.clone(),
-        });
-    }
-    fn tape(&self) -> PathBuf {
-        self.config.tapes().join(&self.id)
-    }
-
-    async fn finish_recovered(self) {
-        let started = std::time::Instant::now();
-        let sealed = recording::seal(&self.root, self.shelf.clone(), self.tape(), &self.id).await;
-        if let Err(c) = sealed {
-            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-            let ms = started.elapsed().as_millis() as u64;
-            info!("job.start", kind = "write", job = seq, waited_ms = 0u64);
-            warn!("job.done", kind = "write", job = seq, code = c, ms = ms);
-            self.jobs_failed.add(1);
-            self.said.say(c);
-        }
-        self.after_seal_inner(sealed, true).await;
-    }
-
-    async fn after_seal(self, sealed: Result<Option<About>, &'static str>) {
-        self.after_seal_inner(sealed, false).await;
-    }
-
-    async fn after_seal_inner(
-        mut self,
-        sealed: Result<Option<About>, &'static str>,
-        on_write_task: bool,
-    ) {
-        match sealed {
-            Ok(Some(about)) if about.length_ms == 0 => {
-                let tape_dir = self.tape();
-                let destroyed =
-                    self.work_tree.blocking("tape.destroy", move || tape::destroy(&tape_dir)).await;
-                if matches!(destroyed, Ok(Err(_))) {
-                    self.said.say("tape.destroy");
-                }
-                let target = self
-                    .index_sync
-                    .recording_sealed(self.id.clone(), self.started_by.clone())
-                    .await;
-                let _ = target; // dropped: zero-length recording is not refined
-            }
-            Ok(Some(about)) => {
-                let tape_dir = self.tape();
-                let audio = self
-                    .work_tree
-                    .blocking("tape.kept", move || tape::kept(&tape_dir))
-                    .await
-                    .unwrap_or(false);
-                let sealed_target = self
-                    .index_sync
-                    .recording_sealed(self.id.clone(), self.started_by.clone())
-                    .await;
-                if let Some(target) = sealed_target {
-                    self.started_by = target.shelf.by().to_owned();
-                    self.shelf = target.shelf;
-                    self.keys = target.keys;
-                }
-                let key = self.keys.from(Service::Soniox) != From::Nowhere;
-                match write::owed(about.take == 0, audio, about.moved, key) {
-                    write::Owed::Yes => {
-                        if on_write_task {
-                            self.write_job().await;
-                        } else {
-                            let work_tree = self.work_tree.clone();
-                            work_tree.spawn("job.write", async move {
-                                self.write_job().await;
-                                let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
-                            });
-                            return;
-                        }
-                    }
-                    write::Owed::Waits(why) => {
-                        info!("write.skipped", n = 1usize, why = why);
-                        self.spawn_auto_titles();
-                    }
-                    write::Owed::No => {
-                        self.spawn_auto_titles();
-                    }
-                }
-            }
-            Ok(None) => {
-                let target = self
-                    .index_sync
-                    .recording_sealed(self.id.clone(), self.started_by.clone())
-                    .await;
-                let _ = target; // dropped: recording removed before seal
-            } // removed meanwhile: the tape stays for a restore
-            Err(_) => {
-                let target = self
-                    .index_sync
-                    .recording_sealed(self.id.clone(), self.started_by.clone())
-                    .await;
-                let _ = target; // dropped: seal failed, no refinement will run
-            }
-        }
-        let _ = self.results.send(Msg::Wrote(self.id.clone())).await; // dropped: the hub has ended
-    }
-
-    async fn write_job(&self) {
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let slot: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
-        let slot_ref = &slot;
-        let state: Mutex<RefineStatus> = Mutex::new(self.from_state.clone());
-        let state_ref = &state;
-        let entered = AtomicBool::new(false);
-        let entered_ref = &entered;
-        let written = again(
-            || async {
-                let wait_at = tokio::time::Instant::now();
-                let Ok(permit) = self.bg.clone().acquire_owned().await else {
-                    return Err(End::Done);
-                };
-                let waited_ms = wait_at.elapsed().as_millis() as u64;
-                info!("job.start", kind = "write", job = seq, waited_ms = waited_ms);
-                let started = std::time::Instant::now();
-                let outcome = async {
-                    // Removed meanwhile, already written (for auto jobs), or audio destroyed: skip.
-                    let about = match self.shelf.about(&self.id) {
-                        Ok(Some(read))
-                            if (self.manual || read.about.take == 0)
-                                && tape::kept(&self.tape()) =>
-                        {
-                            read.about
-                        }
-                        _ => return Ok(()),
-                    };
-                    if !entered_ref.swap(true, Ordering::AcqRel) {
-                        let mut cur = state_ref.lock().unwrap_or_else(PoisonError::into_inner);
-                        let from = cur.code();
-                        let next = refine_step(&cur, RefineEvent::Start, now());
-                        info!(
-                            "refine.state",
-                            rec = Id(&self.id),
-                            from = from,
-                            to = next.code(),
-                            why = "",
-                            take = about.take
-                        );
-                        *cur = next;
-                        let init = writing(&self.id, "closing");
-                        set_refine_progress(&self.progress_reg, Some(init), None);
-                        self.views
-                            .set_active_refine(self.id.clone(), Some(("closing".into(), 0, 0)));
-                    }
-                    let all_topics = topic::list(&self.shelf).unwrap_or_default();
-                    let ctx = topic::assemble_context(&all_topics, &about.topics, &about.title);
-                    info!(
-                        "topic.context",
-                        rec = Id(&self.id),
-                        where = "refine",
-                        topics = ctx.topic_count,
-                        terms = ctx.terms.len(),
-                        pairs = ctx.translation_pairs.len(),
-                        text_chars = ctx.text.chars().count(),
-                    );
-                    let key = keys::derive("tape", &self.id)?;
-                    let (soniox, openrouter) =
-                        (self.config.soniox.clone(), self.config.openrouter.clone());
-                    let terms: Vec<_> =
-                        ctx.terms.into_iter().map(|t| (t.said, t.written)).collect();
-                    let translation_pairs: Vec<_> =
-                        ctx.translation_pairs.into_iter().map(|p| (p.source, p.target)).collect();
-                    let plan = write::Plan {
-                        id: self.id.clone(),
-                        spoken: about.spoken,
-                        into: about.shown,
-                        terms,
-                        topic: about.title,
-                        general: ctx.general,
-                        background: ctx.text,
-                        translation_pairs,
-                        model: WHOLE.into(),
-                        soniox,
-                        openrouter,
-                    };
-                    let progress = |step: &str, done: usize, of: usize| {
-                        let (done, of) = (done as u32, of as u32);
-                        let w = Writing { done, of, ..writing(&self.id, step) };
-                        set_refine_progress(&self.progress_reg, Some(w.clone()), None);
-                        self.views.set_active_refine(self.id.clone(), Some((w.step, done, of)));
-                    };
-                    let tape = (self.tape(), key);
-                    match write::write(
-                        &self.work_tree,
-                        &self.shelf,
-                        (&tape.0, &tape.1),
-                        &plan,
-                        &*self.keys,
-                        now,
-                        progress,
-                    )
-                    .await
-                    {
-                        End::Done => Ok(()),
-                        End::Retry(c) => {
-                            let w = writing(&self.id, c);
-                            set_refine_progress(&self.progress_reg, Some(w), None);
-                            self.views.set_active_refine(self.id.clone(), Some((c.into(), 0, 0)));
-                            Err(End::Retry(c))
-                        }
-                        end => Err(end),
-                    }
-                }
-                .await;
-                let ms = started.elapsed().as_millis() as u64;
-                match &outcome {
-                    Ok(()) => {
-                        info!("job.done", kind = "write", job = seq, code = "ok", ms = ms);
-                        self.jobs_done.add(1);
-                    }
-                    Err(end) => {
-                        let c = code(*end);
-                        warn!("job.done", kind = "write", job = seq, code = c, ms = ms);
-                        self.jobs_failed.add(1);
-                    }
-                }
-                if matches!(outcome, Err(End::Retry(_))) {
-                    *slot_ref.lock().unwrap_or_else(PoisonError::into_inner) = Some(permit);
-                }
-                outcome
-            },
-            |why, wait_ms, n| {
-                warn!("job.again", kind = "write", why = why, wait_ms = wait_ms, n = n);
-                let _ = slot_ref.lock().unwrap_or_else(PoisonError::into_inner).take(); // dropped: release gate before sleeping
-            },
-        )
-        .await;
-        match written {
-            Ok(()) if entered.load(Ordering::Acquire) => {
-                let new_take =
-                    self.shelf.about(&self.id).ok().flatten().map(|r| r.about.take).unwrap_or(0);
-                {
-                    let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
-                    let from = cur.code();
-                    let next = refine_step(&cur, RefineEvent::Succeeded { take: new_take }, now());
-                    info!(
-                        "refine.state",
-                        rec = Id(&self.id),
-                        from = from,
-                        to = next.code(),
-                        why = "",
-                        take = new_take
-                    );
-                    *cur = next;
-                }
-                self.index_sync.refined(self.id.clone(), self.shelf.by().to_owned()).await;
-                self.spawn_auto_titles();
-            }
-            Ok(()) => {
-                self.views.set_active_refine(self.id.clone(), None);
-            }
-            Err(end) => {
-                let raw = code(end);
-                let failed_at = now();
-                let mapped = if matches!(end, End::Fatal(_)) {
-                    let mapped = write::refine_error_code(raw, self.keys.from(Service::Soniox));
-                    let _ = write::record_failure(&self.tape(), mapped, failed_at); // dropped: best-effort failure persistence beside audio
-                    mapped
-                } else {
-                    raw
-                };
-                if entered.load(Ordering::Acquire) {
-                    let mut cur = state.lock().unwrap_or_else(PoisonError::into_inner);
-                    let from = cur.code();
-                    let next = refine_step(&cur, RefineEvent::Failed { code: mapped }, failed_at);
-                    warn!(
-                        "refine.state",
-                        rec = Id(&self.id),
-                        from = from,
-                        to = next.code(),
-                        why = mapped,
-                        take = 0u32
-                    );
-                    *cur = next;
-                }
-                if matches!(end, End::Fatal(_)) {
-                    self.index_sync
-                        .refine_failed(
-                            self.id.clone(),
-                            self.shelf.by().to_owned(),
-                            RefineFailure { code: mapped.into(), at: failed_at },
-                        )
-                        .await;
-                    self.spawn_auto_titles();
-                } else {
-                    self.views.set_active_refine(self.id.clone(), None);
-                }
-                self.said.say(mapped);
-            }
-        }
-        set_refine_progress(&self.progress_reg, None, Some(&self.id));
-    }
-}
-
-fn code(end: End) -> &'static str {
+pub(super) fn code(end: End) -> &'static str {
     if let End::Retry(code) | End::Fatal(code) = end { code } else { "done" }
 }
 
-fn fail(_: zu::Error) -> &'static str {
+pub(super) fn fail(_: zu::Error) -> &'static str {
     "shelf"
 }
 
-fn now() -> i64 {
+pub(super) fn now() -> i64 {
     wall_ms() as i64
-}
-
-fn writing(id: &str, step: &str) -> Writing {
-    Writing { id: id.into(), step: step.into(), done: 0, of: 0 }
-}
-
-/// One change a person makes: one more record at the path it changes.
-fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<(), &'static str> {
-    let done = match change {
-        Change::Title { text } => {
-            let about = shelf.about(id).map_err(fail)?.ok_or("recording.gone")?.about;
-            let title_by = if text.trim().is_empty() { TitleBy::None } else { TitleBy::Hand };
-            shelf.put(
-                id,
-                RECORDING,
-                &[(id.into(), Some(About { title: text, title_by, ..about }))],
-                now(),
-            )
-        }
-        Change::Line { key, language, text } => {
-            let lines = shelf.read(id).map_err(fail)?.ok_or("recording.gone")?.lines;
-            let (key, mut said) = lines.into_iter().find(|(k, _)| *k == key).ok_or("line.gone")?;
-            let piece =
-                if language == said.line.language { "text".into() } else { language.clone() };
-            match piece.as_str() {
-                "text" => said.line.text = text,
-                _ => _ = said.line.translations.insert(language, text),
-            }
-            said.via.insert(piece, "hand".into());
-            shelf.put(id, LINE, &[(key, Some(said))], now())
-        }
-        Change::Speaker { label, name } => {
-            shelf.put(id, SPEAKER, &[(format!("{id}.{label}"), Some(Words { text: name }))], now())
-        }
-        Change::Note { text } => shelf.put(id, NOTE, &[(id.into(), Some(Words { text }))], now()),
-    };
-    done.map_err(fail)
 }
