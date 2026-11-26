@@ -9,11 +9,58 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::watch;
 use zutalk_core::app::proto::{CaptionScene, Command, State, WindowRect};
 use zutalk_core::rt::signal::Reading;
+use zutalk_core::rt::supervise::Tree;
 
 /// Wait after the last OS move/resize event before persisting caption window geometry (`P5-03`).
 pub const CAPTION_GEO_DEBOUNCE_MS: u64 = 400;
 /// Maximum physical-pixel delta treated as OS/Retina clamping jitter rather than a user move/resize.
 const GEOMETRY_JITTER_PX: u32 = 2;
+/// Default floating `SelfView` width in logical/Cocoa points (`tauri.conf.json`).
+pub const DEFAULT_SELF_VIEW_WIDTH_PT: f64 = 900.0;
+/// Default floating `SelfView` height in logical/Cocoa points (`tauri.conf.json`).
+pub const DEFAULT_SELF_VIEW_HEIGHT_PT: f64 = 220.0;
+/// Bottom margin above Dock / visible frame edge for default `SelfView` placement in points.
+const DEFAULT_SELF_VIEW_BOTTOM_MARGIN_PT: f64 = 48.0;
+/// Minimum height of the `Band` banner strip in points.
+const MIN_BAND_HEIGHT_PT: f64 = 120.0;
+
+/// Usable screen rectangle in macOS Cocoa points (bottom-left origin) or logical points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenPoints {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Pure Cocoa-point frame layout for unplaced scenes (`geometry == None`), handling negative-origin
+/// secondary monitors and mixed-DPI setups without WebView `devicePixelRatio` coordinate drift.
+pub fn default_scene_frame_cocoa(
+    visible: ScreenPoints,
+    scene: CaptionScene,
+    top: bool,
+) -> ScreenPoints {
+    match scene {
+        CaptionScene::Stage => visible,
+        CaptionScene::SelfView => {
+            let width = DEFAULT_SELF_VIEW_WIDTH_PT.min(visible.width).max(320.0);
+            let height = DEFAULT_SELF_VIEW_HEIGHT_PT.min(visible.height).max(96.0);
+            let x = visible.x + (visible.width - width) * 0.5;
+            let margin = DEFAULT_SELF_VIEW_BOTTOM_MARGIN_PT.min((visible.height - height).max(0.0));
+            let y = visible.y + margin;
+            ScreenPoints { x, y, width, height }
+        }
+        CaptionScene::Band => {
+            let width = visible.width.max(320.0);
+            let min_h = MIN_BAND_HEIGHT_PT.min(visible.height);
+            let max_h = (visible.height * 0.5).max(min_h);
+            let height = (visible.height * 0.25).clamp(min_h, max_h);
+            let x = visible.x;
+            let y = if top { visible.y + visible.height - height } else { visible.y };
+            ScreenPoints { x, y, width, height }
+        }
+    }
+}
 
 fn rect_close(a: WindowRect, b: WindowRect) -> bool {
     a.x.abs_diff(b.x) <= GEOMETRY_JITTER_PX
@@ -46,6 +93,7 @@ impl CaptionWindow {
 pub struct CaptionWindowSpec {
     pub shown: bool,
     pub scene: CaptionScene,
+    pub top: bool,
     pub always_on_top: bool,
     pub click_through: bool,
     pub fullscreen: bool,
@@ -59,6 +107,7 @@ impl CaptionWindowSpec {
         Self {
             shown: state.captions,
             scene,
+            top: style.top,
             always_on_top: style.always_on_top,
             click_through: style.click_through,
             fullscreen: style.fullscreen,
@@ -71,6 +120,7 @@ impl CaptionWindowSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptionWindowOp {
     SetFullscreen(bool),
+    PlaceDefault { scene: CaptionScene, top: bool },
     SetSize { width: u32, height: u32 },
     SetPosition { x: i32, y: i32 },
     SetAlwaysOnTop(bool),
@@ -132,6 +182,8 @@ impl CaptionWindowTracker {
                 if let Some(rect) = next.geometry {
                     ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
                     ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
+                } else {
+                    ops.push(CaptionWindowOp::PlaceDefault { scene: next.scene, top: next.top });
                 }
                 // Re-apply always-on-top after leaving macOS fullscreen so the window level and
                 // Spaces collection behavior are restored even when `always_on_top` stayed true.
@@ -141,21 +193,27 @@ impl CaptionWindowTracker {
                 }
             }
             (false, false) => {
-                if next.geometry != prev.geometry
-                    && let Some(rect) = next.geometry
-                    && !prev.geometry.is_some_and(|g| rect_close(g, rect))
+                if let Some(rect) = next.geometry {
+                    if next.geometry != prev.geometry
+                        && !prev.geometry.is_some_and(|g| rect_close(g, rect))
+                    {
+                        let prev_size = prev.geometry.map(|g| (g.width, g.height));
+                        let prev_pos = prev.geometry.map(|g| (g.x, g.y));
+                        if prev_size != Some((rect.width, rect.height)) {
+                            ops.push(CaptionWindowOp::SetSize {
+                                width: rect.width,
+                                height: rect.height,
+                            });
+                        }
+                        if prev_pos != Some((rect.x, rect.y)) {
+                            ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
+                        }
+                    }
+                } else if prev.geometry.is_some()
+                    || next.scene != prev.scene
+                    || (next.scene == CaptionScene::Band && next.top != prev.top)
                 {
-                    let prev_size = prev.geometry.map(|g| (g.width, g.height));
-                    let prev_pos = prev.geometry.map(|g| (g.x, g.y));
-                    if prev_size != Some((rect.width, rect.height)) {
-                        ops.push(CaptionWindowOp::SetSize {
-                            width: rect.width,
-                            height: rect.height,
-                        });
-                    }
-                    if prev_pos != Some((rect.x, rect.y)) {
-                        ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
-                    }
+                    ops.push(CaptionWindowOp::PlaceDefault { scene: next.scene, top: next.top });
                 }
             }
             (true, true) => {
@@ -176,11 +234,13 @@ impl CaptionWindowTracker {
 }
 
 fn push_show_ops(ops: &mut Vec<CaptionWindowOp>, next: &CaptionWindowSpec) {
-    if !next.fullscreen
-        && let Some(rect) = next.geometry
-    {
-        ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
-        ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
+    if !next.fullscreen {
+        if let Some(rect) = next.geometry {
+            ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
+            ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
+        } else {
+            ops.push(CaptionWindowOp::PlaceDefault { scene: next.scene, top: next.top });
+        }
     }
     ops.push(CaptionWindowOp::SetIgnoreCursorEvents(next.click_through));
     ops.push(CaptionWindowOp::Show);
@@ -327,6 +387,45 @@ fn apply_macos_caption_policy_on_main(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn apply_macos_default_frame_on_main(
+    window: &tauri::WebviewWindow,
+    scene: CaptionScene,
+    top: bool,
+) {
+    use objc2_app_kit::{NSScreen, NSWindow};
+
+    let Ok(raw) = window.ns_window() else {
+        return;
+    };
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: `tauri::WebviewWindow::ns_window` returns a valid `NSWindow` pointer owned by
+    // Tauri for the lifetime of the app, and this helper runs strictly on the macOS main thread.
+    let ns_win = unsafe { &*(raw as *const NSWindow) };
+    let Some(screen) = ns_win.screen().or_else(|| {
+        // SAFETY: called strictly on the macOS main thread.
+        let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+        NSScreen::mainScreen(mtm)
+    }) else {
+        return;
+    };
+    let mut frame = screen.visibleFrame();
+    let vis = ScreenPoints {
+        x: frame.origin.x,
+        y: frame.origin.y,
+        width: frame.size.width,
+        height: frame.size.height,
+    };
+    let target = default_scene_frame_cocoa(vis, scene, top);
+    frame.origin.x = target.x;
+    frame.origin.y = target.y;
+    frame.size.width = target.width;
+    frame.size.height = target.height;
+    ns_win.setFrame_display_animate(frame, true, false);
+}
+
 /// Applies ordered [`CaptionWindowOp`]s to the `captions` window asynchronously on the OS main
 /// thread so the Tokio pump task never blocks on WindowServer or AppKit animations.
 pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow {
@@ -349,6 +448,25 @@ pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow
                     #[cfg(not(target_os = "macos"))]
                     {
                         win.set_fullscreen(full)
+                    }
+                }
+                CaptionWindowOp::PlaceDefault { scene, top } => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        apply_macos_default_frame_on_main(&win, scene, top);
+                        Ok(())
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = top; // dropped: non-macOS default fallback uses window-manager placement
+                        if scene == CaptionScene::SelfView {
+                            win.set_size(tauri::LogicalSize::new(
+                                DEFAULT_SELF_VIEW_WIDTH_PT,
+                                DEFAULT_SELF_VIEW_HEIGHT_PT,
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
                 }
                 CaptionWindowOp::SetSize { width, height } => {
@@ -421,11 +539,44 @@ impl Drop for DisplaySleep {
     }
 }
 
-/// Watches `state.captions` and toggles display-sleep prevention without holding any lock.
-pub async fn run_display_sleep(mut state: Reading<State>) {
-    let mut guard = DisplaySleep::new();
-    guard.set_active(state.now().1.captions);
+/// Watches `state.captions` and toggles display-sleep prevention on the blocking pool without
+/// holding any lock or stalling Tokio async workers on process spawn/wait syscalls.
+pub async fn run_display_sleep(tree: Tree, mut state: Reading<State>) {
+    let mut guard = Some(DisplaySleep::new());
+    let mut active = false;
+
+    let initial = state.now().1.captions;
+    if initial {
+        active = true;
+        if let Some(mut current) = guard.take()
+            && let Ok(returned) = tree
+                .blocking("shell.sleep", move || {
+                    current.set_active(true);
+                    current
+                })
+                .await
+        {
+            guard = Some(returned);
+        }
+    }
     while let Some((_, next)) = state.next().await {
-        guard.set_active(next.captions);
+        let want = next.captions;
+        if want == active {
+            continue;
+        }
+        active = want;
+        if let Some(mut current) = guard.take()
+            && let Ok(returned) = tree
+                .blocking("shell.sleep", move || {
+                    current.set_active(want);
+                    current
+                })
+                .await
+        {
+            guard = Some(returned);
+        }
+    }
+    if active && let Some(mut current) = guard.take() {
+        let _ = tree.blocking("shell.sleep", move || current.set_active(false)).await; // dropped: best-effort reap on shutdown
     }
 }

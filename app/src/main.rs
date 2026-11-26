@@ -107,7 +107,15 @@ fn main() {
             let old = cfg!(target_os = "macos").then_some(app.path().data_dir()?.join("ZuTalk"));
             let handover_helper = find_handover_helper();
             let clipboard = app.handle().clone();
-            let clip: Clip = Arc::new(move |text| clipboard.clipboard().write_text(text).is_ok());
+            let clip: Clip = Arc::new(move |text| {
+                let app_clip = clipboard.clone();
+                let owned = text.to_owned();
+                clipboard
+                    .run_on_main_thread(move || {
+                        let _ = app_clip.clipboard().write_text(owned); // dropped: best-effort main-thread pasteboard write
+                    })
+                    .is_ok()
+            });
 
             // Enter Tauri's Tokio runtime synchronously: Core::start and Tree only spawn tasks.
             let runtime = tauri::async_runtime::handle();
@@ -178,7 +186,10 @@ fn main() {
                 );
             }
             let beat_handle = app.handle().clone();
-            shell.spawn("shell.captions_sleep", windows::run_display_sleep(sleep_reading));
+            shell.spawn(
+                "shell.captions_sleep",
+                windows::run_display_sleep(shell.clone(), sleep_reading),
+            );
             shell.spawn(
                 "shell.beat",
                 beat::run(

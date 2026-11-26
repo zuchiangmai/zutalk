@@ -403,7 +403,8 @@ describe('Caption scenes, 0.8-parity CaptionsWindow, and mobile ViewerPage', () 
           scene: 'Band',
           scenes: expect.objectContaining({
             band: expect.objectContaining({
-              geometry: expect.objectContaining({ width: expect.any(Number) }),
+              click_through: false,
+              geometry: null,
             }),
           }),
         }),

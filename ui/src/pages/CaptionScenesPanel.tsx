@@ -20,7 +20,6 @@ import {
   CAPTION_FONT_STEP_PX,
   CAPTION_OPACITY_MAX_PCT,
   CAPTION_OPACITY_MIN_PCT,
-  computeBannerRect,
   effectiveBgAlpha,
   opacityPercent,
   sceneClassName,
@@ -356,27 +355,7 @@ export function CaptionScenesView({
                 ariaLabel={t('captions.position')}
                 onChange={(v) => {
                   const topEdge = v === 'top';
-                  const scr = typeof window !== 'undefined' ? window.screen : undefined;
-                  const avail = {
-                    left:
-                      typeof (scr as { availLeft?: number } | undefined)?.availLeft === 'number'
-                        ? (scr as unknown as { availLeft: number }).availLeft
-                        : 0,
-                    top:
-                      typeof (scr as { availTop?: number } | undefined)?.availTop === 'number'
-                        ? (scr as unknown as { availTop: number }).availTop
-                        : 0,
-                    width: scr?.availWidth || 1440,
-                    height: scr?.availHeight || 900,
-                  };
-                  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-                  const rect = computeBannerRect(
-                    avail,
-                    dpr,
-                    topEdge,
-                    prefs.scenes.band.geometry?.height ?? null,
-                  );
-                  patchStyle({ top: topEdge, geometry: rect });
+                  patchStyle({ top: topEdge, geometry: null });
                 }}
               />
             </div>

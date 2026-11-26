@@ -6,13 +6,16 @@ use std::time::Duration;
 use tokio::sync::watch;
 use zutalk::windows::{
     CAPTION_GEO_DEBOUNCE_MS, CaptionWindowOp, CaptionWindowSpec, CaptionWindowTracker,
-    DisplaySleep, GeometrySample, run_display_sleep, run_geometry_saver,
+    DEFAULT_SELF_VIEW_HEIGHT_PT, DEFAULT_SELF_VIEW_WIDTH_PT, DisplaySleep, GeometrySample,
+    ScreenPoints, default_scene_frame_cocoa, run_display_sleep, run_geometry_saver,
 };
 use zutalk_core::app::proto::{
     CAPTION_MAX_EXTENT_PX, CAPTION_MIN_HEIGHT_PX, CAPTION_MIN_WIDTH_PX, CaptionPrefs, CaptionScene,
     Command, State, WindowRect,
 };
 use zutalk_core::rt::signal::Register;
+use zutalk_core::rt::stats::Stats;
+use zutalk_core::rt::supervise::Tree;
 
 #[test]
 fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
@@ -22,6 +25,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     let hidden = CaptionWindowSpec {
         shown: false,
         scene: CaptionScene::SelfView,
+        top: false,
         always_on_top: false,
         click_through: false,
         fullscreen: false,
@@ -35,6 +39,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     let shown_self = CaptionWindowSpec {
         shown: true,
         scene: CaptionScene::SelfView,
+        top: false,
         always_on_top: false,
         click_through: false,
         fullscreen: false,
@@ -58,6 +63,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     let stage_spec = CaptionWindowSpec {
         shown: true,
         scene: CaptionScene::Stage,
+        top: false,
         always_on_top: false,
         click_through: false,
         fullscreen: true,
@@ -78,6 +84,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     let band_spec = CaptionWindowSpec {
         shown: true,
         scene: CaptionScene::Band,
+        top: true,
         always_on_top: true,
         click_through: true,
         fullscreen: false,
@@ -102,6 +109,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     let show_stage = CaptionWindowSpec {
         shown: true,
         scene: CaptionScene::Stage,
+        top: false,
         always_on_top: false,
         click_through: false,
         fullscreen: true,
@@ -119,6 +127,105 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
         tracker.diff(CaptionWindowSpec { shown: false, ..show_stage }),
         vec![CaptionWindowOp::SetFullscreen(false), CaptionWindowOp::Hide]
     );
+}
+
+#[test]
+fn tracker_restores_default_frame_when_leaving_fullscreen_or_switching_unplaced_scenes() {
+    let mut tracker = CaptionWindowTracker::new();
+
+    // 1. First show into Stage fullscreen (`geometry: None`), then switch to SelfView (`geometry: None`):
+    //    MUST emit `PlaceDefault { scene: SelfView, top: false }` so macOS shrinks back from maximized!
+    let stage = CaptionWindowSpec {
+        shown: true,
+        scene: CaptionScene::Stage,
+        top: false,
+        always_on_top: false,
+        click_through: false,
+        fullscreen: true,
+        geometry: None,
+    };
+    assert_eq!(
+        tracker.diff(stage),
+        vec![
+            CaptionWindowOp::SetIgnoreCursorEvents(false),
+            CaptionWindowOp::Show,
+            CaptionWindowOp::SetFullscreen(true),
+        ]
+    );
+
+    let unplaced_self = CaptionWindowSpec {
+        shown: true,
+        scene: CaptionScene::SelfView,
+        top: false,
+        always_on_top: true,
+        click_through: false,
+        fullscreen: false,
+        geometry: None,
+    };
+    assert_eq!(
+        tracker.diff(unplaced_self.clone()),
+        vec![
+            CaptionWindowOp::SetFullscreen(false),
+            CaptionWindowOp::PlaceDefault { scene: CaptionScene::SelfView, top: false },
+            CaptionWindowOp::SetAlwaysOnTop(true),
+        ]
+    );
+
+    // 2. Switching from unplaced SelfView to unplaced Band (top: true) places the top banner natively.
+    let unplaced_band_top = CaptionWindowSpec {
+        shown: true,
+        scene: CaptionScene::Band,
+        top: true,
+        always_on_top: true,
+        click_through: false,
+        fullscreen: false,
+        geometry: None,
+    };
+    assert_eq!(
+        tracker.diff(unplaced_band_top.clone()),
+        vec![CaptionWindowOp::PlaceDefault { scene: CaptionScene::Band, top: true }]
+    );
+
+    // 3. Flipping Band edge from top -> bottom with `geometry: None` re-places the banner at bottom.
+    let unplaced_band_bottom = CaptionWindowSpec { top: false, ..unplaced_band_top };
+    assert_eq!(
+        tracker.diff(unplaced_band_bottom.clone()),
+        vec![CaptionWindowOp::PlaceDefault { scene: CaptionScene::Band, top: false }]
+    );
+
+    // 4. Resetting custom geometry back to `None` while visible re-applies default placement.
+    let manual_band = CaptionWindowSpec {
+        geometry: Some(WindowRect { x: 40, y: 80, width: 1200, height: 180 }),
+        ..unplaced_band_bottom.clone()
+    };
+    let _ = tracker.diff(manual_band);
+    assert_eq!(
+        tracker.diff(unplaced_band_bottom),
+        vec![CaptionWindowOp::PlaceDefault { scene: CaptionScene::Band, top: false }]
+    );
+}
+
+#[test]
+fn default_scene_frame_cocoa_handles_negative_origin_secondary_monitors_accurately() {
+    // Secondary monitor arranged to the left and below primary in Cocoa points (bottom-left origin).
+    let secondary = ScreenPoints { x: -1920.0, y: -240.0, width: 1920.0, height: 1055.0 };
+
+    let self_frame = default_scene_frame_cocoa(secondary, CaptionScene::SelfView, false);
+    assert_eq!(self_frame.width, DEFAULT_SELF_VIEW_WIDTH_PT);
+    assert_eq!(self_frame.height, DEFAULT_SELF_VIEW_HEIGHT_PT);
+    assert_eq!(self_frame.x, -1920.0 + (1920.0 - 900.0) * 0.5);
+    assert_eq!(self_frame.y, -240.0 + 48.0);
+
+    let band_top = default_scene_frame_cocoa(secondary, CaptionScene::Band, true);
+    assert_eq!(band_top.x, -1920.0);
+    assert_eq!(band_top.width, 1920.0);
+    assert!((band_top.y + band_top.height - (-240.0 + 1055.0)).abs() < 1e-6);
+
+    let band_bottom = default_scene_frame_cocoa(secondary, CaptionScene::Band, false);
+    assert_eq!(band_bottom.x, -1920.0);
+    assert_eq!(band_bottom.y, -240.0);
+    assert_eq!(band_bottom.width, 1920.0);
+    assert_eq!(band_bottom.height, band_top.height);
 }
 
 #[tokio::test(start_paused = true)]
@@ -229,10 +336,16 @@ async fn display_sleep_watcher_tracks_caption_visibility_and_releases_on_drop() 
     guard.set_active(false);
     drop(guard);
 
+    let stats = Stats::new();
+    let tree = Tree::root("shell_sleep_test", stats);
     let state_reg = Register::new(State { captions: false, ..State::default() });
-    let handle = tokio::spawn(run_display_sleep(state_reg.read()));
+    let handle = tokio::spawn(run_display_sleep(tree.clone(), state_reg.read()));
     tokio::task::yield_now().await;
+    state_reg.change(|cur| Some(State { captions: false, ..cur.clone() }));
+    state_reg.change(|cur| Some(State { captions: true, ..cur.clone() }));
+    tokio::time::sleep(Duration::from_millis(20)).await;
     state_reg.change(|cur| Some(State { captions: false, ..cur.clone() }));
     drop(state_reg);
     handle.await.expect("display sleep watcher exits cleanly");
+    tree.cancel();
 }

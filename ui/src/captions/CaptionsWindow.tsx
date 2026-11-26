@@ -41,7 +41,6 @@ import {
   clampFontPx,
   computeAdaptiveColumns,
   computeAdaptiveRows,
-  computeBannerRect,
   effectiveBgAlpha,
   effectiveFontPx,
   isCaptionQuiet,
@@ -82,17 +81,6 @@ function trimColumnLines(col: Column, maxLines: number): Column {
   const historyBudget = Math.max(0, maxLines - (col.tail ? 1 : 0));
   if (col.lines.length <= historyBudget) return col;
   return { ...col, lines: col.lines.slice(-historyBudget) };
-}
-
-function readDisplayAvail(): { left: number; top: number; width: number; height: number; dpr: number } {
-  const scr = typeof window !== 'undefined' ? (window.screen as Screen & { availLeft?: number; availTop?: number }) : null;
-  return {
-    left: typeof scr?.availLeft === 'number' ? scr.availLeft : 0,
-    top: typeof scr?.availTop === 'number' ? scr.availTop : 0,
-    width: scr?.availWidth && scr.availWidth > 0 ? scr.availWidth : 1440,
-    height: scr?.availHeight && scr.availHeight > 0 ? scr.availHeight : 900,
-    dpr: typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1,
-  };
 }
 
 export type CaptionsWindowViewProps = {
@@ -236,11 +224,8 @@ export function CaptionsWindowView({
       onSelectScene('SelfView');
       return;
     }
-    const avail = readDisplayAvail();
-    const remembered = prefs?.scenes.band.geometry?.height ?? null;
-    const rect = computeBannerRect(avail, avail.dpr, prefs?.scenes.band.top ?? true, remembered);
-    onSelectScene('Band', rect);
-  }, [onSelectScene, prefs, scene]);
+    onSelectScene('Band');
+  }, [onSelectScene, scene]);
 
   const toggleFilled = useCallback(() => {
     setMenuOpen(false);
