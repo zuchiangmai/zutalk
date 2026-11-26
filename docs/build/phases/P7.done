@@ -1,0 +1,6 @@
+阶段：P7（0.8 大规模迁移验证、发布审计与项目收官）
+状态：通过
+基线：93e49975d2fc53abbcb9054a89401d5b6dfb2e94
+收尾提交：a5cc771a9850dfe14befc66e99c820df38098e55
+审查记录：docs/build/reviews/P7-r1.md、docs/build/reviews/P7-r2.md（结论：通过）
+全量门禁：RUSTC_WRAPPER="" scripts/build/check.sh — check: all green（10/10 规则全绿零欠账且 pending.sh 封禁全部 P[0-9]，Rust 791 passed / 0 failed / 6 ignored，UI 16 files / 124 passed，84 个事件双向匹配，38/40 计数零新增，Tally <= 8192 B，I8 State 比值 1.00，零新增外部依赖）
