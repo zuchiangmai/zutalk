@@ -264,6 +264,17 @@ final class SoftwareUpdateController: NSObject, ObservableObject {
 }
 
 extension SoftwareUpdateController: SPUUpdaterDelegate {
+    /// The new ZuTalk is on a channel of its own, offered only once this library has been
+    /// handed over to it: nobody updates past their recordings.
+    nonisolated func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+        LibraryHandover.isWritten ? [LibraryHandover.channel] : []
+    }
+
+    /// The last handover, so that it holds whatever changed since launch.
+    nonisolated func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        MainActor.assumeIsolated { LibraryHandover.writeNow() }
+    }
+
     nonisolated func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         let nsError = error as NSError
         Task { @MainActor in

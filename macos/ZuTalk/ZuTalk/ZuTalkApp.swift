@@ -135,6 +135,8 @@ final class ZuTalkAppDelegate: NSObject, NSApplicationDelegate {
         // silently stop working after a restart.
         LanguageModelAssistanceStore.shared.pushToCore()
         CaptureCommandCenter.shared.endRecordingWhenTheMacSleeps()
+        // The library is handed over to the new ZuTalk before it is offered.
+        LibraryHandover.writeInBackground()
 
         // Provider credentials now use the app-private local file. Test hosts
         // must never inspect the signed-in user's real credential profile.

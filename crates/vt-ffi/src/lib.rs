@@ -9,6 +9,7 @@ pub mod block_document_api;
 pub(crate) mod capture_erasure;
 pub mod city_api;
 pub mod editor_api;
+pub mod handover;
 pub mod lane_credential_api;
 pub mod library_sync;
 pub mod link_share;

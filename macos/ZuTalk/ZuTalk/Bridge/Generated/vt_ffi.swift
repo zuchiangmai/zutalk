@@ -1085,6 +1085,15 @@ public protocol ZuTalkCoreProtocol: AnyObject, Sendable {
     func unregisterEditorCallback(notebookId: String, tabId: String) throws
 
     /**
+     * Hands over every recording the library shows, the trash excepted, and returns how
+     * many. Each call writes the whole handover again from what the library holds now.
+     *
+     * A recording that cannot be read is still listed in the index, without a file of its
+     * own: the new app says it could not move it, rather than not knowing it existed.
+     */
+    func writeHandover() throws  -> UInt32
+
+    /**
      * 这场录音是在哪台 Mac 上录的;本机录的为空。
      */
     func sessionRecordedOn(sessionId: String)  -> String?
@@ -2757,6 +2766,21 @@ open func unregisterEditorCallback(notebookId: String, tabId: String)throws   {t
         FfiConverterString.lower(tabId),$0
     )
 }
+}
+
+    /**
+     * Hands over every recording the library shows, the trash excepted, and returns how
+     * many. Each call writes the whole handover again from what the library holds now.
+     *
+     * A recording that cannot be read is still listed in the index, without a file of its
+     * own: the new app says it could not move it, rather than not knowing it existed.
+     */
+open func writeHandover()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+    uniffi_vt_ffi_fn_method_zutalkcore_write_handover(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
 
     /**
@@ -13989,6 +14013,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vt_ffi_checksum_method_zutalkcore_unregister_editor_callback() != 10320) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vt_ffi_checksum_method_zutalkcore_write_handover() != 61452) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vt_ffi_checksum_method_zutalkcore_session_recorded_on() != 10981) {
