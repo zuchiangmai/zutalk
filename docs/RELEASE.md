@@ -107,22 +107,26 @@ git apply /Users/kant/Zuzalu/zutalk/docs/migrate-0.8.patch
 # 3. 升版到 0.8.6（同步 Cargo.toml、MARKETING_VERSION = 0.8.6、CURRENT_PROJECT_VERSION = 66）
 just bump 0.8.6
 
-# 4. 检查 FFI 编译并重新生成 UniFFI Swift 绑定、将 LibraryHandover.swift 同步进 ZuTalk.xcodeproj
+# 4. 检查 FFI 编译、重新生成 UniFFI Swift 绑定并同步 Xcode 工程，随后构建本地 .app（产出 build/app/ZuTalk.app）
 cargo check -p vt-ffi
-just dev
+just dev                   # 只编 Rust FFI、生成 UniFFI Swift 绑定并同步 ZuTalk.xcodeproj
+just build-local-app       # 调用 xcodebuild 产出 build/app/ZuTalk.app
 
 # 5. 用真实 175 条录音目录副本在隔离 HOME 下启动一次，核对 handover/ 完整且原库未改
 TMP_HOME="$(mktemp -d)"
 mkdir -p "$TMP_HOME/Library/Application Support"
 cp -R "$HOME/Library/Application Support/ZuTalk" "$TMP_HOME/Library/Application Support/ZuTalk"
-CFFIXED_USER_HOME="$TMP_HOME" open -W macos/ZuTalk/build/Debug/ZuTalk.app
+CFFIXED_USER_HOME="$TMP_HOME" open -W build/app/ZuTalk.app
 ls -la "$TMP_HOME/Library/Application Support/ZuTalk/handover/"
 jq '.recordings | length' "$TMP_HOME/Library/Application Support/ZuTalk/handover/index.json"
 # 核对完后删除临时目录：rm -rf "$TMP_HOME"
 
-# 6. 跑旧仓门禁并发布 v0.8.6（构建 66）；妥善保存这次生成的 appcast.xml 供 §4.2 合并
+# 6. 跑旧仓门禁并发布 v0.8.6（构建 66）；注意必须显式传入与 `git remote get-url github` 一致的 GITHUB_REPOSITORY 及 GITHUB_REF_NAME
+#    生成的 appcast.xml 位于 build/dmg/appcast.xml，妥善保存供 §4.2 合并
 just ci-check
-just release-sparkle-adhoc   # 或 just release-ship 直接打 tag 并发布到 GitHub
+GITHUB_REPOSITORY="<与 git remote get-url github 一致，如 4seas-community/ZuTalk 或 zuchiangmai/ZuTalk>" \
+GITHUB_REF_NAME="v0.8.6" \
+just release-sparkle-adhoc   # 或带同样环境变量跑 just release-ship 打 tag 并发布到 GitHub
 ```
 
 ### 4.2 生成双项签名 `appcast.xml`（让 0.8.6 跳到 v0.9.0）
@@ -179,7 +183,14 @@ cp target/universal-apple-darwin/release/bundle/dmg/ZuTalk_0.9.0_universal.dmg h
 - **观众页 `/r/*` 静态托管与同源反代**：
   - 将 `ui/dist/`（包含 `viewer.html` 与 `assets/*`）静态托管在 `ZUTALK_ORIGIN` 同一源下；
   - 将所有 `GET /r/*` 路径重写（内部 rewrite，保留浏览器 URL 里的 `#<key>` 片段，片段永不发往服务器）到 `viewer.html`；
-  - 将 `/rooms/*`（特别是 `GET /rooms/{id}/events` 的 SSE 长连接，关闭反代响应缓冲 `proxy_buffering off`）、`/keys/*`、`/quota`、`/invites/*`、`/signin/*` 等 API 路径反代到 `ZUTALK_LISTEN`。
+  - 将 `zutalk-server` 的全部 8 条真实路由（与 `server/src/lib.rs::ROUTES` 一一对应）反代到 `ZUTALK_LISTEN`：
+    - `GET /healthz`（健康检查）
+    - `POST /grants`（协调人授额）
+    - `POST /quota`（余额与按服务日额度查询）
+    - `POST /lease`（租借 Soniox / OpenRouter 短期临时钥匙）
+    - `POST /claim`（认领 0.8 旧邀请）
+    - `POST /rooms`（主持建房 / 写槽 / 关闭）与 `GET /rooms/{id}/events`（SSE 直播长连接，必须关闭反代响应缓冲 `proxy_buffering off` 并放宽读超时）
+    - `GET` / `POST` `/.well-known/zu-relay/*`（扫码登录一次性中继房，`/.well-known/zu-relay/{room}`）
 - **TLS 与边缘限流**：强制 HTTPS（HSTS），在反代层为 `/rooms/*/events` 放宽读超时并为建房/认领接口配置基础速率限制。
 - **0.8 旧邀请服务退场接口**：在 `INVITES_URL` 所在服务上线 `POST /v1/retire`，核对 `Authorization: Bearer <INVITES_TOKEN>`（与 `ZULANGUE_ADMIN_TOKEN` 对齐），确保 0.8 邀请无感搬运至新版后立即在旧服务作废。
 

@@ -22,7 +22,7 @@
 | **E2** I8、I9 与 `Stats` 预算在大规模迁移后仍全部成立 | 通过 | `i8_what_one_change_sends_does_not_grow_with_the_library` 复测 `bytes_5=1332`、`bytes_100=1334`、**`ratio=1.00`**、`inv_bytes=(60,60)`；175 条 3 轮启动压测后 `stats.full == 0`、`Tally ≤ 8192 B`、`zutalk_log::refused()` 零增量、`logs/*.jsonl` / `diagnose/**/*` / `settings.json` 逐字节扫描零泄漏；`docs/EVENTS.md` 登记 `migrate.done`（共 **84 个**事件），`events.sh` 与 `every_event_in_the_catalogue_can_be_told_apart` 双重通过 |
 | **E3** 发布配置、版本对齐、权限最小化与防泄漏自动化审计到位 | 通过 | 提交 `55d07e7`（P7-02）：`ui/package.json`（及 `ui/package-lock.json` 顶层自身字段）补齐 `"version": "0.9.0"`；`app/tests/updates.rs` 新增 3 条审计测试（`release_versions_and_manifests_are_aligned` 红灯先验后转绿、`shell_capabilities_and_csp_keep_updater_and_clipboard_off_the_page`、`runtime_sources_contain_no_placeholder_secrets_or_personal_emails`），7/7 全部通过（0.23 s） |
 | **E4** 0.8.6 交接与 v0.9.0 发布操作手册折叠收拢进 `docs/RELEASE.md` | 通过 | `docs/RELEASE.md` 升级为完整 §1–§7（v0.9.0 4 处版本检查点、`check.sh` 门禁、三平台构建与 `.ico`/`.icns`、生产 `ZUTALK_SERVER`、`zulangue` 0.8.5 构建 65 → 0.8.6 构建 66 逐条命令与双项签名 `appcast.xml` `zu` 频道跳跃、`server/src/main.rs` 逐行核对的全部 **16 项**环境变量表、边缘 `/r/*` 重写、5 组真机与 8 小时手工清单）；`docs/migrate.md` 末尾补齐交叉引用；仓库内零平行发布文档，未触碰 `/Users/kant/Zuzalu/zulangue` |
-| **E5** `pending.sh` 终版锁死，10 个规则脚本全绿零欠账，零新增外部依赖 | 通过 | `scripts/build/rules/pending.sh` 升级为 `ignore = "P[0-9]'`；全部 10 个 `scripts/build/rules/*.sh` 全绿退出码 0，且 `bounded.sh`/`spawn.sh`/`layers.sh` 欠账表均为 0 行；相对 `P7.base`（`93e4997`），`Cargo.lock` 零变更、`ui/package-lock.json` 仅新增 2 行自身 `"version": "0.9.0"` 无任何外部包变动；沙箱外终版 `RUSTC_WRAPPER="" scripts/build/check.sh` **`check: all green`**（Rust **790 passed / 0 failed / 6 ignored**、UI **16 文件 / 124 passed**） |
+| **E5** `pending.sh` 终版锁死，10 个规则脚本全绿零欠账，零新增外部依赖 | 通过 | `scripts/build/rules/pending.sh` 升级为 `ignore = "P[0-9]'`；全部 10 个 `scripts/build/rules/*.sh` 全绿退出码 0，且 `bounded.sh`/`spawn.sh`/`layers.sh` 欠账表均为 0 行；相对 `P7.base`（`93e4997`），`Cargo.lock` 零变更、`ui/package-lock.json` 仅新增 2 行自身 `"version": "0.9.0"` 无任何外部包变动；沙箱外终版 `RUSTC_WRAPPER="" scripts/build/check.sh` **`check: all green`**（Rust **791 passed / 0 failed / 6 ignored**、UI **16 文件 / 124 passed**，含 P7-R1-01 新增路由/交接命令守卫测试） |
 | **E6** 文档终版同步与项目收官报告完成 | 通过 | `docs/PLAN.md`、`docs/DESIGN.md`、`docs/LESSONS.md`、`docs/EVENTS.md`、`docs/RELEASE.md`、`docs/migrate.md` 全部同步一致；本报告 `docs/build/reports/P7-03-close.md` 给出完整 P1–P7 实测记分牌与按序编排的负责人行动清单 |
 
 ---
@@ -71,7 +71,7 @@
 
 - `rustfmt` + `clippy --workspace --all-targets -- -D warnings`：零警告通过。
 - 全部 10 个规则脚本（`bounded.sh`、`dropped.sh`、`events.sh`、`hub.sh`、`layers.sh`、`numbers.sh`、`pending.sh`、`shell.sh`、`spawn.sh`、`ui.sh`）：**10/10 全绿，全仓零欠账**。
-- Rust 全量测试：**790 passed, 0 failed, 6 ignored**（全部 6 条 `ignored` 均为真机硬件/真云端钥匙手工测试；零阶段延期挂起项）。
+- Rust 全量测试：**791 passed, 0 failed, 6 ignored**（含 `app/tests/updates.rs` 8/8；全部 6 条 `ignored` 均为真机硬件/真云端钥匙手工测试，零阶段延期挂起项）。
 - UI 全量测试与构建：`tsc` + `vite build`（3 入口）+ Vitest **16 files / 124 passed**。
 - 总结论：**`check: all green`**。
 
@@ -112,7 +112,7 @@
 
 ### 6. 在 `/Users/kant/Zuzalu/zulangue` 发 0.8.6 交接版并正式发布 v0.9.0（见 `docs/RELEASE.md` §4）
 
-- [ ] 在 `/Users/kant/Zuzalu/zulangue` 按 `docs/RELEASE.md` §4.1 应用 `/Users/kant/Zuzalu/zutalk/docs/migrate-0.8.patch`、`just bump 0.8.6`（构建 `66`）、`cargo check -p vt-ffi`、`just dev` 重新生成 UniFFI 绑定。
-- [ ] **必须先用真实 175 条录音目录的副本**在隔离 `CFFIXED_USER_HOME` 下跑一次 `0.8.6`，核对 `handover/index.json`、`handover/recordings/*.json` 与音频块完整且原库未被修改。
-- [ ] 跑 `just ci-check` 发布 `v0.8.6`（构建 `66`），保留其 `appcast.xml`；再按 `docs/RELEASE.md` §4.2 用 `generate_appcast --account Zulangue --channel zu --maximum-versions 2` 合成含 `0.8.6`（构建 `66`）与 `v0.9.0`（构建 `67`，`zu` 频道）的双项签名 `appcast.xml`。
+- [ ] 在 `/Users/kant/Zuzalu/zulangue` 按 `docs/RELEASE.md` §4.1 应用 `/Users/kant/Zuzalu/zutalk/docs/migrate-0.8.patch`、`just bump 0.8.6`（构建 `66`）、`cargo check -p vt-ffi`、`just dev` 重新生成 UniFFI 绑定并执行 `just build-local-app` 产出 `build/app/ZuTalk.app`。
+- [ ] **必须先用真实 175 条录音目录的副本**在隔离 `CFFIXED_USER_HOME` 下启动 `build/app/ZuTalk.app` 跑一次 `0.8.6`，核对 `handover/index.json`、`handover/recordings/*.json` 与音频块完整且原库未被修改。
+- [ ] 跑 `just ci-check`，并显式传入 `GITHUB_REPOSITORY`（与 `git remote get-url github` 一致）和 `GITHUB_REF_NAME=v0.8.6` 执行 `just release-sparkle-adhoc`（或 `just release-ship`）发布 `v0.8.6`（构建 `66`），保留其 `build/dmg/appcast.xml`；再按 `docs/RELEASE.md` §4.2 用 `generate_appcast --account Zulangue --channel zu --maximum-versions 2` 合成含 `0.8.6`（构建 `66`）与 `v0.9.0`（构建 `67`，`zu` 频道）的双项签名 `appcast.xml`。
 - [ ] 发布 `v0.9.0` GitHub Release（附全部更新产物、`.sig`、`latest.json` 与双项 `appcast.xml`），并在装有 `0.8.5` 的真机 Mac 上完整实测 `0.8.5 → 0.8.6 → 0.9.0` Sparkle 跳跃与 Tauri 应用内自更新。

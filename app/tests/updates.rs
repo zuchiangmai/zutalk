@@ -310,3 +310,31 @@ fn runtime_sources_contain_no_placeholder_secrets_or_personal_emails() {
         }
     }
 }
+
+#[test]
+fn release_doc_matches_server_routes_and_handoff_commands() {
+    let doc =
+        fs::read_to_string(root().join("docs/RELEASE.md")).expect("docs/RELEASE.md must exist");
+    for required in [
+        "/healthz",
+        "/grants",
+        "/quota",
+        "/lease",
+        "/claim",
+        "/rooms",
+        "/rooms/{id}/events",
+        "/.well-known/zu-relay/",
+        "just build-local-app",
+        "build/app/ZuTalk.app",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REF_NAME",
+    ] {
+        assert!(doc.contains(required), "docs/RELEASE.md missing required entry `{required}`");
+    }
+    for forbidden in ["/keys/*", "/invites/*", "/signin/*", "macos/ZuTalk/build/Debug/ZuTalk.app"] {
+        assert!(
+            !doc.contains(forbidden),
+            "docs/RELEASE.md must not contain stale or nonexistent `{forbidden}`"
+        );
+    }
+}
