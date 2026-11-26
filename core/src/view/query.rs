@@ -10,7 +10,7 @@ use crate::knowledge::glossary::Term;
 use crate::knowledge::topic::{self, ALWAYS_TOPIC_ID, Topic, TopicSummary};
 use crate::out::city::{Calendar, Filing};
 use crate::record::notes::Note;
-use crate::record::shelf::{FILING, Shelf, TitleCandidate};
+use crate::record::shelf::{FILING, Said, Shelf, TitleCandidate};
 use crate::record::takes::{self, RefineStatus, TakeInfo};
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::{Counter, Spread};
@@ -272,6 +272,14 @@ struct ActiveSlot {
 /// handle has been registered.
 pub type QueryHook = Arc<dyn Fn(&'static str, &CancellationToken) + Send + Sync>;
 
+#[derive(Default)]
+struct LiveDraftCache {
+    id: String,
+    scanned_bytes: usize,
+    pending_bodies: BTreeMap<zu::Cid, zu::Value>,
+    by_seq: BTreeMap<u32, (String, Said)>,
+}
+
 #[derive(Clone)]
 struct ViewSource {
     shelf: Option<Arc<Shelf>>,
@@ -283,6 +291,7 @@ struct ViewSource {
     calendar: Option<Calendar>,
     ready: bool,
     hook: Option<QueryHook>,
+    live_draft: Arc<Mutex<LiveDraftCache>>,
 }
 
 struct EngineInner {
@@ -323,6 +332,7 @@ impl ViewEngine {
             calendar: None,
             ready: false,
             hook: None,
+            live_draft: Arc::new(Mutex::new(LiveDraftCache::default())),
         };
         let inner = EngineInner {
             tree,
@@ -375,7 +385,25 @@ impl ViewEngine {
     /// from the live draft pack.
     pub fn set_active_recording(&self, id: Option<String>) {
         let mut src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner);
+        if src.active_recording != id {
+            *src.live_draft.lock().unwrap_or_else(PoisonError::into_inner) =
+                LiveDraftCache::default();
+        }
         src.active_recording = id;
+    }
+
+    /// Clears `active_recording` only when it still matches `id`, preventing an earlier
+    /// recording's delayed seal from wiping a newly started session's live draft state.
+    pub fn clear_active_recording_if(&self, id: &str) -> bool {
+        let mut src = self.0.source.lock().unwrap_or_else(PoisonError::into_inner);
+        if src.active_recording.as_deref() == Some(id) {
+            src.active_recording = None;
+            *src.live_draft.lock().unwrap_or_else(PoisonError::into_inner) =
+                LiveDraftCache::default();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn active_recording(&self) -> Option<String> {
@@ -724,8 +752,7 @@ fn execute_blocking(
                 src.active_recording.as_deref() == Some(id.as_str()) && target_take == 0;
             let reply = if is_live_draft {
                 if let Some(ref shelf) = src.shelf {
-                    let all = takes::read(shelf, &id, 0).map_err(|_| "shelf")?;
-                    slice_chunk(&id, 0, &all, chunk)
+                    read_live_draft_chunk(shelf, &src.live_draft, &id, chunk)?
                 } else {
                     slice_chunk(&id, 0, &[], chunk)
                 }
@@ -801,4 +828,84 @@ fn execute_blocking(
         return Err("query.cancelled");
     }
     result
+}
+
+/// Incrementally tails newly appended lines from `<id>/lines.jsonl` into `cache_mutex` (`O(Δ)` per
+/// poll) and slices the requested `chunk` without re-parsing earlier hours of the live draft.
+fn read_live_draft_chunk(
+    shelf: &Shelf,
+    cache_mutex: &Mutex<LiveDraftCache>,
+    id: &str,
+    chunk: u32,
+) -> Result<TranscriptChunk, &'static str> {
+    use std::io::{ErrorKind, Read, Seek, SeekFrom};
+
+    let path = shelf.pack_path(id, crate::record::shelf::LINE);
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(slice_chunk(id, 0, &[], chunk)),
+        Err(_) => return Err("shelf"),
+    };
+    let len = file.metadata().map_err(|_| "shelf")?.len() as usize;
+
+    let mut cache = cache_mutex.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.id != id || len < cache.scanned_bytes {
+        *cache = LiveDraftCache { id: id.to_owned(), ..LiveDraftCache::default() };
+    }
+    if len > cache.scanned_bytes {
+        file.seek(SeekFrom::Start(cache.scanned_bytes as u64)).map_err(|_| "shelf")?;
+        let mut tail = vec![0u8; len - cache.scanned_bytes];
+        let n = file.read(&mut tail).map_err(|_| "shelf")?;
+        tail.truncate(n);
+        for raw_line in tail.split_inclusive(|&b| b == b'\n') {
+            let Some(json_bytes) = raw_line.strip_suffix(b"\n") else {
+                break;
+            };
+            let Ok(json_str) = std::str::from_utf8(json_bytes) else {
+                break;
+            };
+            let Ok(val) = zu::Value::from_json(json_str) else {
+                break;
+            };
+            let is_header = matches!(
+                &val,
+                zu::Value::Map(m) if m.get("$type") == Some(&zu::Value::Str("record".into()))
+            );
+            if is_header {
+                let Ok(rec) = zu::Record::try_from(val) else {
+                    break;
+                };
+                if rec.path.ty == crate::record::shelf::LINE
+                    && let Some((0, seq)) = takes::parse_key(id, &rec.path.key)
+                {
+                    match rec.body {
+                        Some(body_cid) => {
+                            if let Some(body_val) = cache.pending_bodies.remove(&body_cid)
+                                && let Ok(body_json) = body_val.to_json()
+                                && let Ok(said) = serde_json::from_str::<Said>(&body_json)
+                            {
+                                cache.by_seq.insert(seq, (rec.path.key, said));
+                            }
+                        }
+                        None => {
+                            cache.by_seq.remove(&seq);
+                        }
+                    }
+                }
+            } else if matches!(val, zu::Value::Map(_)) {
+                let cid = zu::Cid::of(zu::Codec::Drisl, &val.encode());
+                cache.pending_bodies.insert(cid, val);
+            } else {
+                break;
+            }
+            cache.scanned_bytes += raw_line.len();
+        }
+    }
+
+    let total_lines = cache.by_seq.len() as u32;
+    let total_chunks = transcript::total_chunks(total_lines);
+    let start = (chunk as usize).saturating_mul(TRANSCRIPT_CHUNK_LINES);
+    let lines: Vec<(String, Said)> =
+        cache.by_seq.values().skip(start).take(TRANSCRIPT_CHUNK_LINES).cloned().collect();
+    Ok(TranscriptChunk { id: id.to_owned(), take: 0, chunk, total_lines, total_chunks, lines })
 }

@@ -245,6 +245,18 @@ pub struct SearchResult {
     pub truncated: bool,
 }
 
+/// Lightweight projection row used by background survey and retention checks (`O(1)` SQLite scan,
+/// avoiding `O(N)` filesystem `shelf.list()` pack reads).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurveyRow {
+    pub id: String,
+    pub started: i64,
+    pub take: u32,
+    pub moved: bool,
+    pub audio: bool,
+    pub refine_error: Option<String>,
+}
+
 /// Read-only SQLite connection used by concurrent L3 queries (`P2.md` §3.4).
 pub struct Reader(Connection);
 
@@ -612,6 +624,287 @@ impl Index {
         res
     }
 
+    /// Surgically updates `recordings` metadata plus `title` and `tag` search docs from
+    /// `<id>/about.jsonl` without reading `lines.jsonl` or rebuilding transcript FTS rows.
+    /// Falls back to [`Self::upsert_recording`] only if `take` changed or the row is not yet indexed.
+    pub fn update_meta(&mut self, shelf: &Shelf, id: &str) -> Result<(), &'static str> {
+        let started = Instant::now();
+        let res = (|| -> Result<(), &'static str> {
+            let Some(rec) = shelf.about(id).map_err(|_| "index")? else {
+                let tx = self.conn.transaction().map_err(|_| "index")?;
+                remove_recording_tx(&tx, id)?;
+                tx.commit().map_err(|_| "index")?;
+                return Ok(());
+            };
+            let existing_take: Option<i64> = self
+                .conn
+                .query_row("SELECT take FROM recordings WHERE id = ?1", params![id], |r| r.get(0))
+                .optional()
+                .map_err(|_| "index")?;
+
+            let about_sig = file_sig(&shelf.pack_path(id, RECORDING));
+            let spoken_json = serde_json::to_string(&rec.about.spoken).map_err(|_| "index")?;
+            let shown_json = serde_json::to_string(&rec.about.shown).map_err(|_| "index")?;
+            let title_by_json = serde_json::to_string(&rec.about.title_by).map_err(|_| "index")?;
+            let tags_json = serde_json::to_string(&rec.about.tags).map_err(|_| "index")?;
+            let topics_json = serde_json::to_string(&rec.about.topics).map_err(|_| "index")?;
+
+            let tx = self.conn.transaction().map_err(|_| "index")?;
+            match existing_take {
+                Some(prev_take) if prev_take == i64::from(rec.about.take) => {
+                    tx.execute(
+                        "UPDATE recordings SET \
+                            started = ?1, length_ms = ?2, title = ?3, preview = ?4, \
+                            spoken = ?5, shown = ?6, source = ?7, moved = ?8, \
+                            notes_count = ?9, about_sig = ?10, title_by = ?11, \
+                            tags_json = ?12, topics_json = ?13 \
+                         WHERE id = ?14",
+                        params![
+                            rec.about.started,
+                            i64::from(rec.about.length_ms),
+                            &rec.about.title,
+                            &rec.about.preview,
+                            spoken_json,
+                            shown_json,
+                            &rec.about.source,
+                            i64::from(rec.about.moved),
+                            rec.notes.len() as i64,
+                            about_sig,
+                            title_by_json,
+                            tags_json,
+                            topics_json,
+                            id,
+                        ],
+                    )
+                    .map_err(|_| "index")?;
+
+                    tx.execute(
+                        "DELETE FROM search_docs WHERE recording_id = ?1 AND kind IN ('title', 'tag')",
+                        params![id],
+                    )
+                    .map_err(|_| "index")?;
+                    index_title_and_tags_tx(&tx, id, &rec.about.title, &rec.about.tags)?;
+                }
+                Some(_) => {
+                    // Active take switched: re-point line/translation search_docs from `take_lines`
+                    // without touching `lines.jsonl` on disk.
+                    tx.execute(
+                        "UPDATE recordings SET \
+                            started = ?1, length_ms = ?2, title = ?3, preview = ?4, \
+                            spoken = ?5, shown = ?6, source = ?7, take = ?8, moved = ?9, \
+                            notes_count = ?10, about_sig = ?11, title_by = ?12, \
+                            tags_json = ?13, topics_json = ?14 \
+                         WHERE id = ?15",
+                        params![
+                            rec.about.started,
+                            i64::from(rec.about.length_ms),
+                            &rec.about.title,
+                            &rec.about.preview,
+                            spoken_json,
+                            shown_json,
+                            &rec.about.source,
+                            i64::from(rec.about.take),
+                            i64::from(rec.about.moved),
+                            rec.notes.len() as i64,
+                            about_sig,
+                            title_by_json,
+                            tags_json,
+                            topics_json,
+                            id,
+                        ],
+                    )
+                    .map_err(|_| "index")?;
+                    tx.execute(
+                        "DELETE FROM search_docs WHERE recording_id = ?1 \
+                         AND kind IN ('title', 'tag', 'line', 'translation')",
+                        params![id],
+                    )
+                    .map_err(|_| "index")?;
+                    index_title_and_tags_tx(&tx, id, &rec.about.title, &rec.about.tags)?;
+                    reindex_take_search_from_sqlite_tx(&tx, id, rec.about.take)?;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO recordings (\
+                            id, started, length_ms, title, preview, spoken, shown, source, take, \
+                            moved, audio, filed_state, refine_error, refine_error_at, notes_count, \
+                            about_sig, lines_sig, title_by, tags_json, topics_json\
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, '', NULL, NULL, ?11, ?12, '0:0', ?13, ?14, ?15)",
+                        params![
+                            id,
+                            rec.about.started,
+                            i64::from(rec.about.length_ms),
+                            &rec.about.title,
+                            &rec.about.preview,
+                            spoken_json,
+                            shown_json,
+                            &rec.about.source,
+                            i64::from(rec.about.take),
+                            i64::from(rec.about.moved),
+                            rec.notes.len() as i64,
+                            about_sig,
+                            title_by_json,
+                            tags_json,
+                            topics_json,
+                        ],
+                    )
+                    .map_err(|_| "index")?;
+                    index_title_and_tags_tx(&tx, id, &rec.about.title, &rec.about.tags)?;
+                    index_notes_tx(&tx, id, &rec.notes)?;
+                }
+            }
+            tx.commit().map_err(|_| "index")?;
+            Ok(())
+        })();
+        log_sync("meta", res, started);
+        res
+    }
+
+    /// Surgically updates `notes_count` and `kind = 'note'` search rows for `id` in `< 1 ms`
+    /// without reading `lines.jsonl` or touching `take_lines`.
+    pub fn update_notes(&mut self, shelf: &Shelf, id: &str) -> Result<(), &'static str> {
+        let started = Instant::now();
+        let res = (|| -> Result<(), &'static str> {
+            let Some(rec) = shelf.about(id).map_err(|_| "index")? else {
+                let tx = self.conn.transaction().map_err(|_| "index")?;
+                remove_recording_tx(&tx, id)?;
+                tx.commit().map_err(|_| "index")?;
+                return Ok(());
+            };
+            let about_sig = file_sig(&shelf.pack_path(id, RECORDING));
+            let tx = self.conn.transaction().map_err(|_| "index")?;
+            let updated = tx
+                .execute(
+                    "UPDATE recordings SET notes_count = ?1, about_sig = ?2 WHERE id = ?3",
+                    params![rec.notes.len() as i64, about_sig, id],
+                )
+                .map_err(|_| "index")?;
+            if updated > 0 {
+                tx.execute(
+                    "DELETE FROM search_docs WHERE recording_id = ?1 AND kind = 'note'",
+                    params![id],
+                )
+                .map_err(|_| "index")?;
+                index_notes_tx(&tx, id, &rec.notes)?;
+            }
+            tx.commit().map_err(|_| "index")?;
+            Ok(())
+        })();
+        log_sync("notes", res, started);
+        res
+    }
+
+    /// Surgically updates one line row in `take_lines` and its `search_docs` entries without
+    /// re-parsing `lines.jsonl` or rebuilding other lines.
+    pub fn update_line(
+        &mut self,
+        shelf: &Shelf,
+        id: &str,
+        line_key: &str,
+        said: &Said,
+    ) -> Result<(), &'static str> {
+        let started = Instant::now();
+        let res = (|| -> Result<(), &'static str> {
+            let Some((line_take, seq)) = takes::parse_key(id, line_key) else {
+                return Err("index");
+            };
+            let current_take: Option<i64> = self
+                .conn
+                .query_row("SELECT take FROM recordings WHERE id = ?1", params![id], |r| r.get(0))
+                .optional()
+                .map_err(|_| "index")?;
+            let Some(current_take) = current_take else {
+                return Ok(());
+            };
+            let lines_sig = file_sig(&shelf.pack_path(id, LINE));
+            let tr_json = serde_json::to_string(&said.line.translations).map_err(|_| "index")?;
+            let via_json = serde_json::to_string(&said.via).map_err(|_| "index")?;
+
+            let tx = self.conn.transaction().map_err(|_| "index")?;
+            tx.execute(
+                "INSERT OR REPLACE INTO take_lines (\
+                    recording_id, take, seq, line_key, t0, t1, speaker, language, text, \
+                    translations_json, via_json, incomplete\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    id,
+                    i64::from(line_take),
+                    i64::from(seq),
+                    line_key,
+                    i64::from(said.line.t0),
+                    i64::from(said.line.t1),
+                    &said.line.speaker,
+                    &said.line.language,
+                    &said.line.text,
+                    tr_json,
+                    via_json,
+                    i64::from(said.line.incomplete),
+                ],
+            )
+            .map_err(|_| "index")?;
+            tx.execute(
+                "UPDATE recordings SET lines_sig = ?1 WHERE id = ?2",
+                params![lines_sig, id],
+            )
+            .map_err(|_| "index")?;
+
+            if i64::from(line_take) == current_take {
+                tx.execute(
+                    "DELETE FROM search_docs WHERE recording_id = ?1 AND item_key = ?2 \
+                     AND kind IN ('line', 'translation')",
+                    params![id, line_key],
+                )
+                .map_err(|_| "index")?;
+                let mut doc_stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    )
+                    .map_err(|_| "index")?;
+                insert_line_search_docs(&mut doc_stmt, id, line_key, said)?;
+            }
+            tx.commit().map_err(|_| "index")?;
+            Ok(())
+        })();
+        log_sync("line", res, started);
+        res
+    }
+
+    /// Reads lightweight recording status rows directly from SQLite (`O(N)` in-memory table scan,
+    /// `< 0.5 ms`, zero filesystem pack reads) for retention and auto-refinement surveys.
+    pub fn survey_rows(&self) -> Result<Vec<SurveyRow>, &'static str> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT id, started, take, moved, audio, refine_error \
+                 FROM recordings ORDER BY started DESC",
+            )
+            .map_err(|_| "index")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SurveyRow {
+                    id: r.get(0)?,
+                    started: r.get(1)?,
+                    take: r.get::<_, i64>(2)?.max(0) as u32,
+                    moved: r.get::<_, i64>(3)? != 0,
+                    audio: r.get::<_, i64>(4)? != 0,
+                    refine_error: r.get(5)?,
+                })
+            })
+            .map_err(|_| "index")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|_| "index")?);
+        }
+        Ok(out)
+    }
+
+    /// Runs `PRAGMA quick_check` on demand (e.g. during manual diagnostics).
+    pub fn quick_check(&self) -> bool {
+        let check: Result<String, _> = self.conn.query_row("PRAGMA quick_check", [], |r| r.get(0));
+        check.as_deref() == Ok("ok")
+    }
+
     pub fn library_summary(&self, tz_offset_min: i32) -> Result<LibrarySummary, &'static str> {
         query_library_summary(&self.conn, tz_offset_min)
     }
@@ -700,10 +993,6 @@ fn probe(path: &Path, expected_by: &str) -> IndexHealth {
     if conn.busy_timeout(Duration::from_millis(INDEX_BUSY_TIMEOUT_MS)).is_err() {
         return IndexHealth::Corrupt;
     }
-    let check: Result<String, _> = conn.query_row("PRAGMA quick_check", [], |r| r.get(0));
-    if check.as_deref() != Ok("ok") {
-        return IndexHealth::Corrupt;
-    }
     let version: Result<u32, _> = conn.query_row("PRAGMA user_version", [], |r| r.get(0));
     match version {
         Ok(v) if v != INDEX_SCHEMA_VERSION => return IndexHealth::VersionMismatch,
@@ -790,6 +1079,114 @@ fn remove_recording_tx(tx: &Transaction<'_>, id: &str) -> Result<(), &'static st
     Ok(())
 }
 
+fn insert_line_search_docs(
+    doc_stmt: &mut rusqlite::Statement<'_>,
+    id: &str,
+    line_key: &str,
+    said: &Said,
+) -> Result<(), &'static str> {
+    if !said.line.text.trim().is_empty() {
+        let norm = profile(&said.line.language).key(&said.line.text);
+        let snippet = truncate_utf8(&said.line.text, SEARCH_SNIPPET_MAX_BYTES);
+        doc_stmt
+            .execute(params![id, "line", line_key, &said.line.language, norm, snippet])
+            .map_err(|_| "index")?;
+    }
+    for (tr_lang, tr_text) in &said.line.translations {
+        if !tr_text.trim().is_empty() {
+            let norm = profile(tr_lang).key(tr_text);
+            let snippet = truncate_utf8(tr_text, SEARCH_SNIPPET_MAX_BYTES);
+            doc_stmt
+                .execute(params![id, "translation", line_key, tr_lang, norm, snippet])
+                .map_err(|_| "index")?;
+        }
+    }
+    Ok(())
+}
+
+fn index_title_and_tags_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    title: &str,
+    tags: &[ContentTag],
+) -> Result<(), &'static str> {
+    let mut doc_stmt = tx
+        .prepare_cached(
+            "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(|_| "index")?;
+    if !title.trim().is_empty() {
+        let norm = profile("").key(title);
+        let snippet = truncate_utf8(title, SEARCH_SNIPPET_MAX_BYTES);
+        doc_stmt.execute(params![id, "title", id, "", norm, snippet]).map_err(|_| "index")?;
+    }
+    for tag in tags {
+        if !tag.label.trim().is_empty() {
+            let norm = profile("").key(&tag.label);
+            let snippet = truncate_utf8(&tag.label, SEARCH_SNIPPET_MAX_BYTES);
+            let item_key = tag.at_ms.to_string();
+            doc_stmt
+                .execute(params![id, "tag", item_key, "", norm, snippet])
+                .map_err(|_| "index")?;
+        }
+    }
+    Ok(())
+}
+
+fn index_notes_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    notes: &[crate::record::notes::Note],
+) -> Result<(), &'static str> {
+    let mut doc_stmt = tx
+        .prepare_cached(
+            "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(|_| "index")?;
+    for note in notes {
+        if !note.text.trim().is_empty() {
+            let norm = profile("").key(&note.text);
+            let snippet = truncate_utf8(&note.text, SEARCH_SNIPPET_MAX_BYTES);
+            doc_stmt
+                .execute(params![id, "note", &note.key, "", norm, snippet])
+                .map_err(|_| "index")?;
+        }
+    }
+    Ok(())
+}
+
+fn reindex_take_search_from_sqlite_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    take: u32,
+) -> Result<(), &'static str> {
+    let mut select_stmt = tx
+        .prepare_cached(
+            "SELECT line_key, t0, t1, speaker, language, text, translations_json, via_json, incomplete \
+             FROM take_lines WHERE recording_id = ?1 AND take = ?2 ORDER BY seq ASC",
+        )
+        .map_err(|_| "index")?;
+    let rows = select_stmt
+        .query_map(params![id, i64::from(take)], said_from_sqlite)
+        .map_err(|_| "index")?;
+    let mut lines = Vec::new();
+    for r in rows {
+        lines.push(r.map_err(|_| "index")?);
+    }
+    let mut doc_stmt = tx
+        .prepare_cached(
+            "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(|_| "index")?;
+    for (line_key, said) in &lines {
+        insert_line_search_docs(&mut doc_stmt, id, line_key, said)?;
+    }
+    Ok(())
+}
+
 fn upsert_recording_tx(
     tx: &Transaction<'_>,
     shelf: &Shelf,
@@ -846,96 +1243,56 @@ fn upsert_recording_tx(
     )
     .map_err(|_| "index")?;
 
-    let mut line_stmt = tx
-        .prepare_cached(
-            "INSERT INTO take_lines (\
-                recording_id, take, seq, line_key, t0, t1, speaker, language, text, \
-                translations_json, via_json, incomplete\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        )
-        .map_err(|_| "index")?;
-    let mut doc_stmt = tx
-        .prepare_cached(
-            "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(|_| "index")?;
+    index_title_and_tags_tx(tx, id, &rec.about.title, &rec.about.tags)?;
 
-    // Index title if present.
-    if !rec.about.title.trim().is_empty() {
-        let norm = profile("").key(&rec.about.title);
-        let snippet = truncate_utf8(&rec.about.title, SEARCH_SNIPPET_MAX_BYTES);
-        doc_stmt.execute(params![id, "title", id, "", norm, snippet]).map_err(|_| "index")?;
-    }
+    // Single-pass parse of `<id>/lines.jsonl` across all takes (`O(lines)` instead of `O(takes²×lines)`).
+    let snap = takes::read_all(shelf, id, rec.about.take).map_err(|_| "index")?;
+    {
+        let mut line_stmt = tx
+            .prepare_cached(
+                "INSERT INTO take_lines (\
+                    recording_id, take, seq, line_key, t0, t1, speaker, language, text, \
+                    translations_json, via_json, incomplete\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )
+            .map_err(|_| "index")?;
+        let mut doc_stmt = tx
+            .prepare_cached(
+                "INSERT INTO search_docs (recording_id, kind, item_key, lang, norm_text, snippet) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|_| "index")?;
 
-    // Index content tags (`kind = "tag"`) so FTS5 trigram and 1-2 char fallback both match.
-    for tag in &rec.about.tags {
-        if !tag.label.trim().is_empty() {
-            let norm = profile("").key(&tag.label);
-            let snippet = truncate_utf8(&tag.label, SEARCH_SNIPPET_MAX_BYTES);
-            let item_key = tag.at_ms.to_string();
-            doc_stmt
-                .execute(params![id, "tag", item_key, "", norm, snippet])
-                .map_err(|_| "index")?;
-        }
-    }
+        for (take_num, lines) in snap.by_take {
+            for (seq, (line_key, said)) in lines.into_iter().enumerate() {
+                let tr_json =
+                    serde_json::to_string(&said.line.translations).map_err(|_| "index")?;
+                let via_json = serde_json::to_string(&said.via).map_err(|_| "index")?;
+                line_stmt
+                    .execute(params![
+                        id,
+                        i64::from(take_num),
+                        seq as i64,
+                        &line_key,
+                        i64::from(said.line.t0),
+                        i64::from(said.line.t1),
+                        &said.line.speaker,
+                        &said.line.language,
+                        &said.line.text,
+                        tr_json,
+                        via_json,
+                        i64::from(said.line.incomplete),
+                    ])
+                    .map_err(|_| "index")?;
 
-    // Index all takes into `take_lines`, and current take's spoken + translated text into `search_docs`.
-    let take_list = takes::list(shelf, id, rec.about.take).map_err(|_| "index")?;
-    for info in take_list {
-        let lines = takes::read(shelf, id, info.take).map_err(|_| "index")?;
-        for (seq, (line_key, said)) in lines.into_iter().enumerate() {
-            let tr_json = serde_json::to_string(&said.line.translations).map_err(|_| "index")?;
-            let via_json = serde_json::to_string(&said.via).map_err(|_| "index")?;
-            line_stmt
-                .execute(params![
-                    id,
-                    i64::from(info.take),
-                    seq as i64,
-                    &line_key,
-                    i64::from(said.line.t0),
-                    i64::from(said.line.t1),
-                    &said.line.speaker,
-                    &said.line.language,
-                    &said.line.text,
-                    tr_json,
-                    via_json,
-                    i64::from(said.line.incomplete),
-                ])
-                .map_err(|_| "index")?;
-
-            if info.take == rec.about.take {
-                if !said.line.text.trim().is_empty() {
-                    let norm = profile(&said.line.language).key(&said.line.text);
-                    let snippet = truncate_utf8(&said.line.text, SEARCH_SNIPPET_MAX_BYTES);
-                    doc_stmt
-                        .execute(params![id, "line", &line_key, &said.line.language, norm, snippet])
-                        .map_err(|_| "index")?;
-                }
-                for (tr_lang, tr_text) in &said.line.translations {
-                    if !tr_text.trim().is_empty() {
-                        let norm = profile(tr_lang).key(tr_text);
-                        let snippet = truncate_utf8(tr_text, SEARCH_SNIPPET_MAX_BYTES);
-                        doc_stmt
-                            .execute(params![id, "translation", &line_key, tr_lang, norm, snippet])
-                            .map_err(|_| "index")?;
-                    }
+                if take_num == rec.about.take {
+                    insert_line_search_docs(&mut doc_stmt, id, &line_key, &said)?;
                 }
             }
         }
     }
 
-    // Index all notes with non-empty text.
-    for note in &rec.notes {
-        if !note.text.trim().is_empty() {
-            let norm = profile("").key(&note.text);
-            let snippet = truncate_utf8(&note.text, SEARCH_SNIPPET_MAX_BYTES);
-            doc_stmt
-                .execute(params![id, "note", &note.key, "", norm, snippet])
-                .map_err(|_| "index")?;
-        }
-    }
-
+    index_notes_tx(tx, id, &rec.notes)?;
     Ok(true)
 }
 

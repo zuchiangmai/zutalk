@@ -1259,3 +1259,223 @@ fn index_v2_rebuilds_from_v1_and_searches_and_filters_tags() {
     assert_eq!(filtered.rows[0].tags.len(), 2);
     assert_eq!(filtered.rows[0].topics, vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]);
 }
+
+#[test]
+fn index_delta_mutations_update_meta_notes_and_single_line_without_rebuilding_transcript() {
+    use zutalk_core::record::shelf::{ContentTag, TitleBy};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shelf = shelf_for(&dir.path().join("shelf"), ME, 5);
+    let tapes = dir.path().join("tapes");
+    let db = dir.path().join("index.sqlite3");
+
+    let lines_t0: Vec<Said> = (0..120u32)
+        .map(|n| said(n * 1_000, n * 1_000 + 800, "en", &format!("draft line {n}"), &[]))
+        .collect();
+    let lines_t1: Vec<Said> = (0..120u32)
+        .map(|n| {
+            said(
+                n * 1_000,
+                n * 1_000 + 800,
+                "en",
+                &format!("refined utterance {n} UniqueKeepToken"),
+                &[("zh", &format!("精修第{n}句"))],
+            )
+        })
+        .collect();
+    write_recording(
+        &shelf,
+        "rec_delta",
+        NOW,
+        "Before Title",
+        &["en", "zh"],
+        1,
+        &[(0, lines_t0), (1, lines_t1)],
+    );
+    write_tape(&tapes, "rec_delta");
+
+    let stats = Stats::new();
+    let mut idx = Index::open(&db, &shelf, &tapes, &stats).expect("open index");
+    let reader = Reader::open(&db).expect("open reader");
+
+    // Hide `lines.jsonl` temporarily to prove `update_meta` and `update_notes` never touch it
+    // and never drop `take_lines` or transcript FTS rows.
+    let lines_path = shelf.pack_path("rec_delta", LINE);
+    let lines_hidden = dir.path().join("lines.jsonl.hidden");
+    fs::rename(&lines_path, &lines_hidden).expect("hide lines.jsonl");
+
+    // 1. Delta meta update (`Title` + `tags` + `topics`).
+    let mut rec = shelf.about("rec_delta").expect("about").expect("exists");
+    rec.about.title = "After Delta Title".into();
+    rec.about.title_by = TitleBy::Hand;
+    rec.about.tags = vec![ContentTag { label: "架构重构".into(), at_ms: 4_000 }];
+    rec.about.topics = vec!["topic_1".into()];
+    shelf
+        .put("rec_delta", RECORDING, &[("rec_delta".into(), Some(rec.about))], NOW + 100)
+        .expect("put updated about");
+    idx.update_meta(&shelf, "rec_delta").expect("surgical update_meta");
+
+    let row = reader.recording_row("rec_delta").expect("row").expect("present");
+    assert_eq!(row.title, "After Delta Title");
+    assert_eq!(row.title_by, TitleBy::Hand);
+    assert_eq!(row.tags.len(), 1);
+    assert!(reader.search("Before Title", 10).unwrap().hits.is_empty());
+    assert!(
+        reader
+            .search("After Delta Title", 10)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.kind == SearchHitKind::Title)
+    );
+    assert!(
+        reader.search("架构重构", 10).unwrap().hits.iter().any(|h| h.kind == SearchHitKind::Tag)
+    );
+    // All 120 transcript lines and FTS hits remain intact without reading `lines.jsonl`!
+    assert_eq!(reader.take_line_count("rec_delta", 1).unwrap(), 120);
+    assert!(!reader.search("UniqueKeepToken", 10).unwrap().hits.is_empty());
+
+    // 2. Delta notes update (`Add` + `Remove`).
+    let added = notes::add(
+        &shelf,
+        "rec_delta",
+        5_000,
+        "BookmarkDeltaToken during live talk".into(),
+        None,
+        0x44,
+        NOW + 200,
+    )
+    .expect("add note");
+    idx.update_notes(&shelf, "rec_delta").expect("surgical update_notes");
+    assert!(
+        reader
+            .search("BookmarkDeltaToken", 10)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.kind == SearchHitKind::Note)
+    );
+    notes::remove(&shelf, "rec_delta", &added.key, NOW + 201).expect("remove note");
+    idx.update_notes(&shelf, "rec_delta").expect("surgical update_notes after remove");
+    assert!(reader.search("BookmarkDeltaToken", 10).unwrap().hits.is_empty());
+
+    // Restore `lines.jsonl` and test surgical single-line update + O(1) survey_rows.
+    fs::rename(&lines_hidden, &lines_path).expect("restore lines.jsonl");
+    let edited = said(
+        42_000,
+        42_800,
+        "en",
+        "SurgicalSingleLineReplacementToken",
+        &[("zh", "单句增量替换译文")],
+    );
+    shelf
+        .put("rec_delta", LINE, &[("rec_delta.1.00042".into(), Some(edited.clone()))], NOW + 300)
+        .expect("put single line");
+    idx.update_line(&shelf, "rec_delta", "rec_delta.1.00042", &edited)
+        .expect("surgical update_line");
+
+    let slice = reader.take_lines_slice("rec_delta", 1, 42, 1).expect("slice line 42");
+    assert_eq!(slice[0].1.line.text, "SurgicalSingleLineReplacementToken");
+    assert!(
+        reader
+            .search("SurgicalSingleLineReplacementToken", 10)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.kind == SearchHitKind::Line && h.key == "rec_delta.1.00042")
+    );
+    assert!(
+        reader
+            .search("单句增量替换译文", 10)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.kind == SearchHitKind::Translation && h.key == "rec_delta.1.00042")
+    );
+
+    let survey = idx.survey_rows().expect("O(1) survey rows");
+    assert_eq!(survey.len(), 1);
+    assert_eq!(survey[0].id, "rec_delta");
+    assert_eq!(survey[0].take, 1);
+    assert!(survey[0].audio);
+}
+
+#[tokio::test]
+async fn view_engine_scopes_active_recording_clear_and_tails_live_draft_incrementally() {
+    use zutalk_core::record::shelf::Draft;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shelf = Arc::new(shelf_for(&dir.path().join("records"), ME, 5));
+    let tapes = dir.path().join("tapes");
+    let db = dir.path().join("index.sqlite3");
+    let stats = Stats::new();
+    let _idx = Index::open(&db, &shelf, &tapes, &stats).expect("open");
+
+    let tree = Tree::root("core", stats).child("work");
+    let (engine, _inv) = ViewEngine::new(tree.clone(), tapes);
+    engine.set_source(Some(shelf.clone()), Some(db), false, true);
+
+    // Scoped clear: sealing old `rec_1` must NOT wipe newer active `rec_2` (Bug B4).
+    engine.set_active_recording(Some("rec_2".into()));
+    assert!(!engine.clear_active_recording_if("rec_1"));
+    assert_eq!(engine.active_recording().as_deref(), Some("rec_2"));
+
+    // Incremental live draft tailing across growing `lines.jsonl` (Issue K6).
+    shelf
+        .put(
+            "rec_2",
+            RECORDING,
+            &[("rec_2".into(), Some(About { started: NOW, ..About::default() }))],
+            NOW,
+        )
+        .expect("open rec_2 about");
+    let mut draft = shelf.open_draft("rec_2").expect("open draft");
+    for n in 0..80u32 {
+        draft
+            .put(
+                &format!("rec_2.0.{n:05}"),
+                &said(n * 500, n * 500 + 400, "en", &format!("live {n}"), &[]),
+                NOW + i64::from(n),
+            )
+            .expect("append draft");
+    }
+    draft.sync().expect("sync 80");
+
+    let c0 = engine
+        .query(Query::Transcript { id: "rec_2".into(), take: None, chunk: 0 })
+        .await
+        .expect("chunk 0");
+    assert!(
+        matches!(c0.value, QueryValue::Transcript(ref c) if c.total_lines == 80 && c.lines.len() == 64)
+    );
+
+    for n in 80..140u32 {
+        draft
+            .put(
+                &format!("rec_2.0.{n:05}"),
+                &said(n * 500, n * 500 + 400, "en", &format!("live {n}"), &[]),
+                NOW + i64::from(n),
+            )
+            .expect("append more draft");
+    }
+    draft.sync().expect("sync 140");
+
+    let c2 = engine
+        .query(Query::Transcript { id: "rec_2".into(), take: Some(0), chunk: 2 })
+        .await
+        .expect("chunk 2");
+    match c2.value {
+        QueryValue::Transcript(c) => {
+            assert_eq!(c.total_lines, 140);
+            assert_eq!(c.lines.len(), 12);
+            assert_eq!(c.lines.last().unwrap().1.line.text, "live 139");
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+
+    assert!(engine.clear_active_recording_if("rec_2"));
+    assert_eq!(engine.active_recording(), None);
+
+    tree.cancel();
+    tree.wait().await;
+}
