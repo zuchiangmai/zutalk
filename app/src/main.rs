@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{Manager, RunEvent, State, WebviewWindow, WindowEvent, ipc::Channel};
@@ -14,10 +15,28 @@ use zutalk_core::app::hub::{Clip, Config, Core};
 use zutalk_core::app::proto::{Command, Event, Query, QueryReply};
 use zutalk_core::id::keys;
 use zutalk_core::out::host::HOST_EXIT_WAIT_MS;
+use zutalk_core::record::migrate::HANDOVER_HELPER_NAME;
 use zutalk_core::rt::queue::{self, Full};
 use zutalk_core::rt::stats::{Counter, Spread};
 use zutalk_core::rt::supervise::Tree;
 use zutalk_log::{LOG_FLUSH_WAIT_MS, info};
+
+/// Locates the optional bundled 0.8 handover helper inside the macOS app bundle so users
+/// upgrading directly from 0.8.5/0.8.6 on the main Sparkle channel migrate in one hop.
+fn find_handover_helper() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent();
+    let candidates = [
+        contents_dir.map(|c| c.join("Helpers").join(HANDOVER_HELPER_NAME)),
+        Some(macos_dir.join(HANDOVER_HELPER_NAME)),
+        contents_dir.map(|c| c.join("Resources").join(HANDOVER_HELPER_NAME)),
+    ];
+    candidates.into_iter().flatten().find(|path| path.is_file())
+}
 
 struct UiVitals {
     gap_ms: Spread,
@@ -86,6 +105,7 @@ fn main() {
             keys::open_store(&data).map_err(|end| format!("{end:?}"))?;
             // Where the 0.8 app, which ran on macOS alone, kept its data.
             let old = cfg!(target_os = "macos").then_some(app.path().data_dir()?.join("ZuTalk"));
+            let handover_helper = find_handover_helper();
             let clipboard = app.handle().clone();
             let clip: Clip = Arc::new(move |text| clipboard.clipboard().write_text(text).is_ok());
 
@@ -95,7 +115,7 @@ fn main() {
 
             let install_slot = Arc::new(OnceLock::new());
             let install = updates::installer(install_slot.clone());
-            let config = Config { old, clip, install, ..base };
+            let config = Config { old, handover_helper, clip, install, ..base };
             let (core, outlet) = Core::start(config).map_err(|end| format!("{end:?}"))?;
             let shell = Tree::root("shell", core.stats());
             let ui_vitals = UiVitals {

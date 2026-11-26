@@ -99,13 +99,12 @@ handover/
 
 不交接的东西：回收站里的录音；笔记本（主题）本身和它的名字；不属于任何录音的笔记本笔记；Context Pack（术语表）；分享链接与房间；同步与附近；交到城的记录；城的账户；设置。
 
-## 4. 0.8.7 什么时候写，怎么挡住越过它的更新
+## 4. 0.8 交接时机与主频道一跳直升（0.8.5 / 0.8.6 / 0.8.7 → 0.9.0）
 
-- **启动时**在后台写一次整份交接（`LibraryHandover.writeInBackground()`），**Sparkle 安装更新之前**再同步写一次（`updater(_:willInstallUpdate:)`），这样启动以后录的、改的也都在。
-- 每个文件先写到旁边的 `.new`，`fsync`，再改名替换；`index.json` 最后写。读的人看到的不是旧的就是新的，不会是半份。
-- 只读不改：交接不动数据库、Loro 文档、音频和钥匙。
-- **新版放在 appcast 的一个频道上**：新版那一项带 `<sparkle:channel>zu</sparkle:channel>`。0.8.7 的 `allowedChannels(for:)` 只在 `handover/index.json` 存在时返回 `["zu"]`。0.8.6 及更早不认这个频道，只会更新到 0.8.7；0.8.7 交接完了才看得到新版。所以经由自动更新，没有人会越过交接。
-- 新版的构建号要大于 0.8.7 的（0.8.5 是 65，0.8.6 是 66，0.8.7 用 67，新版 0.9.0 用 68）。
+- **经由 0.8.7 升级的用户**：0.8.7 启动时在后台写一次整份交接（`LibraryHandover.writeInBackground()`），Sparkle 安装更新前再同步写一次（`updater(_:willInstallUpdate:)`）；每个文件先写到 `.new`、`fsync` 再原子改名，`index.json` 最后写。
+- **直接从 0.8.5 / 0.8.6 一跳升级（或手动下载 0.9.0 DMG 覆盖）的用户**：0.9.0 macOS 安装包内附带从 `release/0.8` 独立编译的无界面通用二进制 `Contents/Helpers/zutalk-handover-08`（由 `scripts/build/build-handover-08.sh` 生成，不给 `zutalk-core` 引入任何 Loro 依赖）。0.9.0 启动迁移时若发现 `zutalk.db` 存在但 `handover/index.json` 缺失，会自动静默执行一次该 helper 就地生成 `handover/`，再继续正常搬运。
+- **appcast 走默认主频道**：发 `v0.9.0` 时 `appcast.xml` 不再加 `<sparkle:channel>zu</sparkle:channel>`，直接用钥匙圈 `Zulangue` Ed25519 私钥将 `ZuTalk_0.9.0_universal.dmg`（构建号 `69` > 0.8.5 的 `65`、0.8.6 的 `66`、0.8.7 的 `67`、0.8.8 的 `68`）签进默认主频道。0.8.5 / 0.8.6 / 0.8.7 / 0.8.8 均可一跳直升 0.9.0。
+- 只读不改：无论是 0.8.7 还是 `zutalk-handover-08`，都绝不修改或删除旧的音频、钥匙和 Loro 文档内容，只在 `<old>/handover/` 写出交接文件。
 
 ## 5. 新版怎么收（`core/src/record/migrate.rs`）
 

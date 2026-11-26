@@ -20,10 +20,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Component, Path};
+use std::process::{Command, Stdio};
 use zeroize::{Zeroize, Zeroizing};
+use zutalk_log::{info, warn};
 
 /// The handover this version reads.
 const VERSION: u32 = 1;
+/// Executable name of the optional standalone 0.8 handover helper bundled with macOS builds.
+pub const HANDOVER_HELPER_NAME: &str = "zutalk-handover-08";
 
 /// 12-hour cap per migrated recording prevents corrupt `t_ms` values from triggering OOM (`P7.md` §3.2).
 pub const MIGRATE_MAX_AUDIO_MS: u64 = 12 * 60 * 60 * 1_000;
@@ -172,16 +176,52 @@ fn write_owner(data: &Path, me: &str) -> Result<(), &'static str> {
     fs::rename(tmp, data.join("moved.json")).map_err(|_| "shelf")
 }
 
+/// If `old` contains a 0.8 database without `handover/index.json` (e.g. a direct one-hop upgrade
+/// from 0.8.5 or 0.8.6) and a bundled `zutalk-handover-08` helper binary is available, invokes the
+/// helper once to materialize `handover/` non-destructively before reading it.
+fn ensure_handover(old: &Path, helper: Option<&Path>) -> Result<(), &'static str> {
+    let index_path = old.join("handover").join("index.json");
+    if index_path.is_file() || !old.join("zutalk.db").exists() {
+        return Ok(());
+    }
+    let Some(bin) = helper.filter(|path| path.is_file()) else {
+        return Err("migrate.missing");
+    };
+    let status = Command::new(bin)
+        .arg(old)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(exit) if exit.success() && index_path.is_file() => {
+            info!("migrate.helper.done", code = "ok");
+            Ok(())
+        }
+        Ok(exit) => {
+            let code = exit.code().unwrap_or(-1);
+            warn!("migrate.helper.done", code = "migrate.missing", exit = code);
+            Err("migrate.missing")
+        }
+        Err(_) => {
+            warn!("migrate.helper.done", code = "migrate.missing", exit = -1i32);
+            Err("migrate.missing")
+        }
+    }
+}
+
 /// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not
-/// here yet, telling `progress` of each. Returns counts plus those it could not move, each by
-/// its title there and a code. `Err`: none could be.
-pub fn run_report(
+/// here yet, telling `progress` of each. When `helper` is provided and `old` has a 0.8 database
+/// without `handover/index.json`, runs `helper` first so 0.8.5/0.8.6 users migrate in one hop.
+pub fn run_report_with_helper(
     (old, data): (&Path, &Path),
+    helper: Option<&Path>,
     shelf: &Shelf,
     me: &str,
     now: impl Fn() -> i64,
     mut progress: impl FnMut(Progress),
 ) -> Result<MoveReport, &'static str> {
+    ensure_handover(old, helper)?;
     let handover = old.join("handover");
     let index = match fs::read(handover.join("index.json")) {
         // A library that was never handed over is said; none at all is nothing to move.
@@ -233,6 +273,19 @@ pub fn run_report(
         }
     }
     Ok(report)
+}
+
+/// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not
+/// here yet, telling `progress` of each. Returns counts plus those it could not move, each by
+/// its title there and a code. `Err`: none could be.
+pub fn run_report(
+    (old, data): (&Path, &Path),
+    shelf: &Shelf,
+    me: &str,
+    now: impl Fn() -> i64,
+    progress: impl FnMut(Progress),
+) -> Result<MoveReport, &'static str> {
+    run_report_with_helper((old, data), None, shelf, me, now, progress)
 }
 
 /// Moves into `shelf`, the shelf of `me`, each recording 0.8 handed over in `old` that is not

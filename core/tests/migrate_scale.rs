@@ -1096,3 +1096,87 @@ async fn unsigned_local_user_sees_migrated_08_recordings_immediately_and_adopts_
         assert_eq!(transcript.lines[0].1.line.text, "Unsigned line number 0");
     }
 }
+
+/// Direct one-hop upgrade from 0.8.5/0.8.6 (default Sparkle channel): when `zutalk.db` exists
+/// without `handover/index.json`, the bundled `zutalk-handover-08` helper materializes `handover/`
+/// on first launch and migration completes without ever surfacing `migrate.missing`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_one_hop_upgrade_from_085_invokes_handover_helper_and_migrates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _store = STORE.lock().await;
+    store(false);
+
+    let old = tempfile::tempdir().expect("old dir");
+    let data = tempfile::tempdir().expect("data dir");
+    fs::write(old.path().join("zutalk.db"), b"sqlite-085-placeholder").unwrap();
+
+    let uuid = "85000000-0000-4000-8000-000000000001";
+    let started = MONTH_STARTS_MS[0] + 60_000;
+    let handed_json = json!({
+        "version": 1,
+        "id": uuid,
+        "about": {
+            "started": started,
+            "length_ms": 12_000,
+            "title": "Direct 0.8.5 Recording",
+            "spoken": ["zh", "en"],
+            "shown": ["zh", "en"],
+            "source": "mic"
+        },
+        "takes": [[{
+            "t0": 0,
+            "t1": 1000,
+            "speaker": "1",
+            "language": "en",
+            "text": "Direct one-hop transcript line",
+            "translations": { "zh": "一跳直达字幕" },
+            "incomplete": false,
+            "via": { "text": "stt-rt-v6" }
+        }]],
+        "speakers": { "1": "Host" },
+        "note": "Saved in 0.8.5",
+        "audio": null
+    });
+    let expected_id = serde_json::from_value::<Handed>(handed_json.clone()).unwrap().id();
+    let payload_file = data.path().join("payload.json");
+    fs::write(&payload_file, serde_json::to_vec(&handed_json).unwrap()).unwrap();
+
+    // 1. Failing helper surfaces `migrate.missing` safely without deleting `zutalk.db`.
+    let bad_helper = data.path().join("bad-helper.sh");
+    fs::write(&bad_helper, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&bad_helper, fs::Permissions::from_mode(0o755)).unwrap();
+    {
+        let mut app = App::with(Config {
+            old: Some(old.path().to_path_buf()),
+            handover_helper: Some(bad_helper.clone()),
+            ..config(data.path())
+        });
+        app.notice("migrate.missing").await;
+        assert!(old.path().join("zutalk.db").is_file(), "0.8 database must stay untouched");
+    }
+
+    // 2. Working helper writes `handover/` for the 0.8.5 directory and migration completes.
+    let good_helper = data.path().join("zutalk-handover-08");
+    let script = format!(
+        "#!/bin/sh\nset -e\nOLD=\"$1\"\nmkdir -p \"$OLD/handover/recordings\"\ncp \"{}\" \"$OLD/handover/recordings/{uuid}.json\"\nprintf '{{\"version\":1,\"recordings\":[\"{uuid}\"]}}' > \"$OLD/handover/index.json\"\n",
+        payload_file.display()
+    );
+    fs::write(&good_helper, script).unwrap();
+    fs::set_permissions(&good_helper, fs::Permissions::from_mode(0o755)).unwrap();
+    {
+        let mut app = App::with(Config {
+            old: Some(old.path().to_path_buf()),
+            handover_helper: Some(good_helper),
+            ..config(data.path())
+        });
+        let rows = app.wait_library(|r| r.len() == 1).await;
+        app.wait_progress(|p| p.move_old.is_none()).await;
+        assert_eq!(rows[0].id, expected_id);
+        assert_eq!(rows[0].title, "Direct 0.8.5 Recording");
+        let transcript = app.transcript(&expected_id, Some(0), 0).await;
+        assert_eq!(transcript.lines[0].1.line.text, "Direct one-hop transcript line");
+        assert!(old.path().join("handover/index.json").is_file());
+    }
+}

@@ -1746,6 +1746,7 @@ impl Work {
             return false;
         }
         let data = self.config.data.clone();
+        let helper = self.config.handover_helper.clone();
         let results = self.results.clone();
         let progress_reg = self.progress_reg.clone();
         let index_sync = self.index_sync();
@@ -1771,7 +1772,14 @@ impl Work {
                             Writing { id: p.id, step: p.step.into(), done: p.done, of: p.of };
                         set_move_progress(&reg_cb, Some(writing));
                     };
-                    migrate::run_report((&old, &data), &shelf, &me_run, now, progress)
+                    migrate::run_report_with_helper(
+                        (&old, &data),
+                        helper.as_deref(),
+                        &shelf,
+                        &me_run,
+                        now,
+                        progress,
+                    )
                 })
                 .await;
             let ms = started.elapsed().as_millis() as u64;

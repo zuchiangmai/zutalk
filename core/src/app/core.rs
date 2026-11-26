@@ -59,6 +59,9 @@ pub struct Config {
     pub directory: String,
     /// Where the 0.8 app kept its data, if it ran here.
     pub old: Option<PathBuf>,
+    /// Optional bundled 0.8 handover helper binary (`zutalk-handover-08`) used when a user
+    /// upgrades directly from 0.8.5/0.8.6 to 0.9 without passing through 0.8.7.
+    pub handover_helper: Option<PathBuf>,
     /// How sound is heard: real audio capture in production, fake microphone in tests.
     pub hear: Hear,
     /// How the system's audio input devices are listed.
@@ -100,6 +103,7 @@ impl Config {
             openrouter,
             directory,
             old,
+            handover_helper: None,
             hear,
             devices,
             dial,

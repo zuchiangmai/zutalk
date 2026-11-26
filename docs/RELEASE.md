@@ -39,21 +39,25 @@ rm -P "$K"
    - 根目录 `Cargo.toml` 的 `workspace.package.version`（5 个成员 crate 均继承 `version.workspace = true`）；
    - `core/Cargo.toml` 与 `server/Cargo.toml` 里 `zu = { version = "<版本>", path = "../zu" }`；
    - `ui/package.json`（及 `ui/package-lock.json` 顶层自身字段）的 `"version"`；
-   - `app/tauri.conf.json` 的 `bundle.macOS.bundleVersion` 加一（省略顶层 `"version"` 由 Tauri v2 继承 `app/Cargo.toml`）。构建号接着旧版往上数，永不复用（0.8.5 是 65，0.8.6 是 66，交接录音的 0.8.7 是 67，新版第一版 v0.9.0 是 68）。
+   - `app/tauri.conf.json` 的 `bundle.macOS.bundleVersion` 加一（省略顶层 `"version"` 由 Tauri v2 继承 `app/Cargo.toml`）。构建号接着旧版往上数，永不复用（0.8.5 是 65，0.8.6 是 66，0.8.7 是 67，0.8.8 是 68，新版第一版 v0.9.0 是 69）。
 2. **门禁。** 在仓库根目录跑全仓门禁，覆盖 `rustfmt`、`clippy -D warnings`、全部 10 个 `scripts/build/rules/*.sh`、全部 Rust 测试与 UI `check` / `test` / `build`（含 `index.html`、`captions.html`、`viewer.html` 三入口）：
 
    ```sh
    RUSTC_WRAPPER="" scripts/build/check.sh
    ```
 
-3. **在 Mac 上构建、签名。** 在仓库根目录跑。通用二进制，一份给 Apple 芯片和 Intel 两种 Mac。**务必传入生产 `ZUTALK_SERVER`**（未传时 `app/src/main.rs` 编译期默认回落到 `https://localhost:8443`）：
+3. **在 Mac 上构建、签名（含内置一次性 0.8 交接 helper，支持 0.8.5/0.8.6 一跳直升）。** 在仓库根目录跑。通用二进制，一份给 Apple 芯片和 Intel 两种 Mac。**务必传入生产 `ZUTALK_SERVER`**（未传时 `app/src/main.rs` 编译期默认回落到 `https://localhost:8443`）：
 
    ```sh
    rustup target add aarch64-apple-darwin x86_64-apple-darwin
+   # 先从不可变的 release/0.8 编出通用二进制 build/handover/zutalk-handover-08（只需编一次）
+   bash scripts/build/build-handover-08.sh
+
    TAURI_SIGNING_PRIVATE_KEY="$(security find-generic-password -s zutalk-update -w)" \
    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
    ZUTALK_SERVER="https://<正式服务器域名>" \
-   cargo tauri build --target universal-apple-darwin
+   cargo tauri build --target universal-apple-darwin \
+     --config '{"bundle":{"macOS":{"files":{"Helpers/zutalk-handover-08":"../build/handover/zutalk-handover-08"}}}}'
    ```
 
    `target/universal-apple-darwin/release/bundle/` 下面：`macos/ZuTalk.app.tar.gz` 和它的 `.sig` 给更新用；`dmg/ZuTalk_<版本>_universal.dmg` 给新装的人，也给 Sparkle 那一跳（§4）。`codesign --verify --deep --strict` 核一下 `macos/ZuTalk.app`：整包是 ad-hoc 签名（配置里 `signingIdentity: "-"`），和旧版一样。后续如切到 Apple Developer ID 签名与公证，将 `signingIdentity` 改为证书名并在构建后跑 `xcrun notarytool submit ... --wait` + `xcrun stapler staple`，再核对 `spctl --assess --type execute`。
@@ -130,29 +134,28 @@ GITHUB_REF_NAME="v0.8.7" \
 just release-sparkle-adhoc   # 或带同样环境变量跑 just release-ship 打 tag 并发布到 GitHub
 ```
 
-### 4.2 生成双项签名 `appcast.xml`（让 0.8.7 跳到 v0.9.0）
+### 4.2 生成主频道签名 `appcast.xml`（让 0.8.5 / 0.8.6 / 0.8.7 / 0.8.8 直接一跳升到 v0.9.0）
 
-Sparkle 装新版，要五件事都成立：
+Sparkle 装新版，要四件事都成立：
 
 - **同一个应用。** bundle id `xyz.voice.zutalk`，包名 `ZuTalk.app`：配置里的 `identifier` 和 `productName`。系统给的麦克风、录屏授权跟着 bundle id 走，不用重来。
-- **构建号比 67 大。** `bundle.macOS.bundleVersion`，v0.9.0 是 `68`。Sparkle 拿已装那份的构建号和新包里的比，新的不大就当降级攻击，不装。
-- **整包签名有效。** ad-hoc，`signingIdentity: "-"`。
-- **用旧版的钥匙签。** DMG 用旧版 Sparkle 的 Ed25519 私钥签，appcast 本身也要签（旧版开了 `SURequireSignedFeed`）。那把私钥在这台 Mac 的登录钥匙圈里，账户名是改名前的 `Zulangue`。
-- **在 `zu` 频道上。** 新版那一项带 `<sparkle:channel>zu</sparkle:channel>`。0.8.6 及更早不认这个频道，只会更新到 0.8.7；0.8.7 写好交接才允许这个频道。所以经由自动更新，没有人越过交接。
+- **构建号比 68 大。** `bundle.macOS.bundleVersion`，v0.9.0 是 `69`。Sparkle 拿已装那份的构建号和新包里的比，新的不大就当降级攻击，不装。
+- **整包签名有效。** ad-hoc，`signingIdentity: "-"`；包内已附带 `Contents/Helpers/zutalk-handover-08`（由 `scripts/build/build-handover-08.sh` 从 `release/0.8` 构建），0.9.0 首次启动遇到尚未交接的 0.8.5 / 0.8.6 旧库会自动调用该 helper 就地生成 `handover/` 再搬运，无需用户中转 0.8.7。
+- **用旧版的钥匙签进默认主频道（不加 `<sparkle:channel>zu</sparkle:channel>`）。** DMG 用旧版 Sparkle 的 Ed25519 私钥签，appcast 本身也要签（旧版开了 `SURequireSignedFeed`）。那把私钥在这台 Mac 的登录钥匙圈里，账户名是改名前的 `Zulangue`。因为走默认主频道，`0.8.5`（build 65）、`0.8.6`（build 66）、`0.8.7`（build 67）、`0.8.8`（build 68）都会在应用内自动更新时直接一跳升级到 `v0.9.0`（build 69）。
 
 前三件由 `app/tests/updates.rs` 守着。做法：用旧仓库 `release/0.8` 的 `justfile` 里 `sparkle-appcast` 下的同一份 Sparkle 2.9.4 工具（下载地址和 SHA-256 照抄那里）：
 
 ```sh
-mkdir hop && cp <0.8.7 那个 Release 的 appcast.xml> hop/appcast.xml
+mkdir hop
 cp target/universal-apple-darwin/release/bundle/dmg/ZuTalk_0.9.0_universal.dmg hop/
-<Sparkle 工具>/bin/generate_appcast --account Zulangue --channel zu \
+<Sparkle 工具>/bin/generate_appcast --account Zulangue \
   --download-url-prefix "https://github.com/zuchiangmai/ZuTalk/releases/download/v0.9.0/" \
-  --maximum-versions 2 -o hop/appcast.xml hop
+  --maximum-versions 1 -o hop/appcast.xml hop
 ```
 
-`hop` 里只放 `0.8.7` 的 `appcast.xml` 和新版这一个 DMG（放了旧版的 DMG 它会去做增量包）。生成后核对 `hop/appcast.xml`：两项都在，`0.8.7` 那项 `sparkle:version` 是 `67`、不带频道，新版那项 `sparkle:version` 是 `68`、带 `<sparkle:channel>zu</sparkle:channel>`；`sparkle:edSignature=` 和 `<!-- sparkle-signatures:` 都在。然后随 §3 第 6 步一起上传。
+`hop` 里只放新版 `ZuTalk_0.9.0_universal.dmg`（不要放旧版 DMG，也不要加 `--channel zu`）。生成后核对 `hop/appcast.xml`：`sparkle:version` 是 `69`、`sparkle:shortVersionString` 是 `0.9.0`、**没有 `<sparkle:channel>`**，且 `sparkle:edSignature=` 和 `<!-- sparkle-signatures:` 都在。然后随 §3 第 6 步一起上传。
 
-这一跳只做一次，但这份 `appcast.xml` 要一直跟着走：以后每一个标为 Latest 的 Release 都原样再带上它（从第一个新版的 Release 下下来再传）。还没开过的旧版只认「最新那个 Release 里的 `appcast.xml`」，最新的里面没有，它们就再也跳不过来；它指向的 DMG（`0.8.7` 的和 `v0.9.0` 的）也一直不能删。旧版跳过来以后，从 `latest.json` 自己更新到最新。
+这一跳只做一次，但这份 `appcast.xml` 要一直跟着走：以后每一个标为 Latest 的 Release 都原样再带上它（从第一个新版的 Release 下下来再传）。还没开过的旧版（0.8.5 / 0.8.6 / 0.8.7 / 0.8.8）只认「最新那个 Release 里的 `appcast.xml`」，最新的里面没有，它们就再也跳不过来；它指向的 `ZuTalk_0.9.0_universal.dmg` 也一直不能删。旧版一跳升上 0.9.0 以后，就改由 Tauri updater 从 `latest.json` 自己更新到最新。
 
 ## 5. 服务器与前端边缘部署配置
 

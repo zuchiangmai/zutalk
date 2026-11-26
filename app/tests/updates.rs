@@ -58,8 +58,8 @@ fn signed(built: &Path, name: &str, id: [u8; 8]) -> String {
 }
 
 /// The 0.8 app's Sparkle installs only the same app with a higher build number, found by its
-/// bundle id or file name, sealed as a whole (ad hoc, as the 0.8 app was). The last 0.8 (0.8.7),
-/// which hands the library over (docs/migrate.md), is build 67.
+/// bundle id or file name, sealed as a whole (ad hoc, as the 0.8 app was). The 0.8 line runs
+/// through 0.8.8 (build 68), so 0.9.0 must be build 69 or higher.
 #[test]
 fn the_app_is_the_one_the_0_8_app_updates_to() {
     let config = config();
@@ -67,7 +67,7 @@ fn the_app_is_the_one_the_0_8_app_updates_to() {
     assert_eq!(config["productName"], "ZuTalk"); // the bundle is ZuTalk.app
     let mac = &config["bundle"]["macOS"];
     let build = mac["bundleVersion"].as_str().and_then(|n| n.parse::<u32>().ok());
-    assert!(build.is_some_and(|build| build > 67), "0.8.7 is build 67");
+    assert!(build.is_some_and(|build| build > 68), "0.8.8 is build 68");
     assert_eq!(mac["signingIdentity"], "-");
     assert_eq!(config["bundle"]["createUpdaterArtifacts"], true);
     let endpoints = config["plugins"]["updater"]["endpoints"].as_array().expect("endpoints");
@@ -215,7 +215,7 @@ fn release_versions_and_manifests_are_aligned() {
         .as_str()
         .and_then(|v| v.parse::<u32>().ok())
         .expect("macOS bundleVersion");
-    assert!(build_num > 67, "bundleVersion must exceed 0.8.7 build 67, got {build_num}");
+    assert!(build_num > 68, "bundleVersion must exceed 0.8.8 build 68, got {build_num}");
 
     let patch = fs::read_to_string(root.join("docs/migrate-0.8.patch"))
         .expect("docs/migrate-0.8.patch exists");
