@@ -319,3 +319,64 @@ fn a_torn_body_is_cut_off_like_a_torn_record() {
     assert_eq!((held.records.len(), held.bodies.len()), (1, 0));
     assert!(fs::read(&path).unwrap().ends_with(b"\n"));
 }
+
+#[test]
+fn compact_keeps_all_headers_and_live_or_restorable_bodies_while_dropping_superseded_bodies() {
+    let (_dir, path) = fresh();
+    let (mut pack, _) = Pack::open(&path).unwrap();
+
+    let mut prev_always = Vec::new();
+    let mut last_always_cid = None;
+    for i in 0..40i64 {
+        let payload = "x".repeat(1_024) + &format!("-v{i}");
+        let body = map([("bg", text(&payload))]);
+        let body_cid = pack.keep(&body).unwrap();
+        let rec = Record::sign(
+            &secret(1),
+            common::path("always"),
+            Some(body_cid),
+            prev_always.clone(),
+            AT + i,
+            None,
+        )
+        .unwrap();
+        prev_always = vec![rec.cid()];
+        last_always_cid = Some(body_cid);
+        pack.append(&rec).unwrap();
+    }
+
+    // Also write a path that is subsequently removed: its last non-null body stays restorable.
+    let gone_body = map([("title", text("restorable recording"))]);
+    let gone_body_cid = pack.keep(&gone_body).unwrap();
+    let gone_create =
+        Record::sign(&secret(1), common::path("gone"), Some(gone_body_cid), [], AT + 100, None)
+            .unwrap();
+    pack.append(&gone_create).unwrap();
+    let gone_remove =
+        Record::sign(&secret(1), common::path("gone"), None, [gone_create.cid()], AT + 101, None)
+            .unwrap();
+    pack.append(&gone_remove).unwrap();
+    pack.sync().unwrap();
+    drop(pack);
+
+    let size_before = fs::metadata(&path).unwrap().len();
+    let held_before = Pack::read(&path).unwrap();
+    assert_eq!(held_before.records.len(), 42);
+    assert_eq!(held_before.bodies.len(), 41);
+
+    Pack::compact(&path).unwrap();
+
+    let size_after = fs::metadata(&path).unwrap().len();
+    assert!(
+        size_after * 3 < size_before,
+        "expected compaction to reclaim superseded 1KB bodies: before={size_before}, after={size_after}"
+    );
+
+    let held_after = Pack::read(&path).unwrap();
+    // Every signed header is preserved verbatim (record.md § Updating and Removing).
+    assert_eq!(held_after.records, held_before.records);
+    // Only the current body of `always` and the restorable body of `gone` remain.
+    assert_eq!(held_after.bodies.len(), 2);
+    assert!(held_after.bodies.contains_key(&last_always_cid.unwrap()));
+    assert_eq!(held_after.bodies.get(&gone_body_cid), Some(&gone_body));
+}

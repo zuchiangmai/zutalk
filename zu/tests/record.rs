@@ -514,3 +514,18 @@ fn a_record_by_a_devices_own_identity_is_held_and_checked_by_its_key_alone() {
         Err(Error::Field("to"))
     );
 }
+
+#[test]
+fn paths_scales_linearly_on_deep_single_key_chain() {
+    let mut held: Vec<Record> = Vec::with_capacity(2_000);
+    for i in 0..2_000i64 {
+        let prev: Vec<&Record> = held.last().into_iter().collect();
+        held.push(record("always", AT + i, &prev));
+    }
+    let started = std::time::Instant::now();
+    let resolved = zu::record::paths(&held);
+    let elapsed = started.elapsed();
+    assert_eq!(resolved.get(&path("always")).map(Vec::len), Some(1));
+    assert_eq!(resolved[&path("always")][0], held.last().unwrap());
+    assert!(elapsed.as_millis() < 150, "paths(2000 chain) took {elapsed:?}");
+}

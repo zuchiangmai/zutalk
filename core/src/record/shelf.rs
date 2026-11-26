@@ -367,9 +367,15 @@ impl Shelf {
         bodies: &[(String, Option<T>)],
         now: i64,
     ) -> Result<(), Error> {
+        let pack_path = self.pack(id, ty);
         let mut writer = self.open(id, ty)?;
         bodies.iter().try_for_each(|(key, body)| writer.put(key, body.as_ref(), now))?;
-        writer.sync()
+        writer.sync()?;
+        drop(writer);
+        if ty != LINE && fs::metadata(&pack_path).is_ok_and(|m| m.len() > 32 * 1024) {
+            let _ = Pack::compact(&pack_path); // dropped: opportunistic body GC; headers and live bodies stay intact
+        }
+        Ok(())
     }
 
     /// What the person keeps apart from their recordings, by key: the rooms they have and what

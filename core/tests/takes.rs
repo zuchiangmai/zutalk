@@ -127,6 +127,21 @@ fn takes_list_and_read_preserves_draft_alongside_refined_takes() {
     assert_eq!(t1, vec!["refined once"]);
     assert_eq!(t2, vec!["refined twice a", "refined twice b", "refined twice c"]);
     assert!(takes::read(&shelf, ID, 9).expect("missing take").is_empty());
+
+    let all = takes::read_all(&shelf, ID, 2).expect("read all takes in one pass");
+    assert_eq!(all.infos, list);
+    assert_eq!(
+        all.by_take.get(&0).unwrap().iter().map(|(_, s)| s.line.text.clone()).collect::<Vec<_>>(),
+        t0
+    );
+    assert_eq!(
+        all.by_take.get(&1).unwrap().iter().map(|(_, s)| s.line.text.clone()).collect::<Vec<_>>(),
+        t1
+    );
+    assert_eq!(
+        all.by_take.get(&2).unwrap().iter().map(|(_, s)| s.line.text.clone()).collect::<Vec<_>>(),
+        t2
+    );
 }
 
 #[test]

@@ -109,28 +109,54 @@ impl TryFrom<Value> for Record {
 /// § Which Record a Path Refers To, for every path among `held` at once: each path with its
 /// current records, the one it refers to first. `held` are valid records.
 pub fn paths(held: &[Record]) -> BTreeMap<&Path, Vec<&Record>> {
-    let held: BTreeMap<Cid, &Record> = held.iter().map(|record| (record.cid(), record)).collect();
+    let by_cid: BTreeMap<Cid, &Record> = held.iter().map(|record| (record.cid(), record)).collect();
+    let mut by_path: BTreeMap<&Path, Vec<(Cid, &Record)>> = BTreeMap::new();
+    let mut cross_path = false;
+    for (&cid, &record) in &by_cid {
+        by_path.entry(&record.path).or_default().push((cid, record));
+        if !cross_path
+            && record
+                .prev
+                .iter()
+                .any(|p| by_cid.get(p).is_some_and(|earlier| earlier.path != record.path))
+        {
+            cross_path = true;
+        }
+    }
     // Replaced: followed by a record of its own path, directly or through other records.
     let mut replaced = BTreeSet::new();
-    for record in held.values() {
-        let (mut walk, mut seen) = (record.prev.clone(), BTreeSet::new());
-        while let Some(cid) = walk.pop() {
-            if let Some(earlier) = held.get(&cid).filter(|_| seen.insert(cid)) {
-                if earlier.path == record.path {
-                    replaced.insert(cid);
+    if !cross_path {
+        for record in by_cid.values() {
+            for cid in &record.prev {
+                if by_cid.contains_key(cid) {
+                    replaced.insert(*cid);
                 }
-                walk.extend(&earlier.prev);
+            }
+        }
+    } else {
+        for (&target_path, records) in &by_path {
+            let mut seen = BTreeSet::new();
+            let mut walk: Vec<Cid> =
+                records.iter().flat_map(|(_, r)| r.prev.iter().copied()).collect();
+            while let Some(cid) = walk.pop() {
+                if let Some(earlier) = by_cid.get(&cid).filter(|_| seen.insert(cid)) {
+                    if &earlier.path == target_path {
+                        replaced.insert(cid);
+                    }
+                    walk.extend(&earlier.prev);
+                }
             }
         }
     }
-    let mut paths: BTreeMap<&Path, Vec<(&Cid, &Record)>> = BTreeMap::new();
-    for (cid, record) in held.iter().filter(|(cid, _)| !replaced.contains(*cid)) {
-        paths.entry(&record.path).or_default().push((cid, record));
-    }
     let mut first = BTreeMap::new();
-    for (path, mut current) in paths {
+    for (path, records) in by_path {
+        let mut current: Vec<(Cid, &Record)> =
+            records.into_iter().filter(|(cid, _)| !replaced.contains(cid)).collect();
+        if current.is_empty() {
+            continue;
+        }
         // Concurrent records: the greatest `at` first, then the greatest CID, byte by byte.
-        current.sort_by_key(|(cid, record)| Reverse((record.at, **cid)));
+        current.sort_by_key(|(cid, record)| Reverse((record.at, *cid)));
         first.insert(path, current.into_iter().map(|(_, record)| record).collect());
     }
     first

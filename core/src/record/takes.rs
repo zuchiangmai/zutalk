@@ -156,6 +156,61 @@ fn decode_said(held: &Held, current: &[&Record]) -> Result<Option<Said>, Error> 
     serde_json::from_str(&body.to_json()?).map(Some).map_err(|_| Error::Json)
 }
 
+/// Single-pass snapshot of all live takes in `<id>/lines.jsonl`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TakesSnapshot {
+    pub infos: Vec<TakeInfo>,
+    pub by_take: BTreeMap<u32, Vec<(String, Said)>>,
+}
+
+/// Parses `<id>/lines.jsonl` in a single pass (`O(lines)`), returning summary [`TakeInfo`] rows
+/// and ordered `(line_key, Said)` vectors for every take that still has at least one live line.
+pub fn read_all(shelf: &Shelf, id: &str, current_take: u32) -> Result<TakesSnapshot, Error> {
+    let held = read_lines_pack(shelf, id)?;
+    let mut meta: BTreeMap<u32, (u32, Option<i64>)> = BTreeMap::new();
+    let mut grouped: BTreeMap<u32, Vec<(u32, String, Said)>> = BTreeMap::new();
+
+    for (path, current) in record::paths(&held.records) {
+        if path.ty != LINE {
+            continue;
+        }
+        let Some((take, seq)) = parse_key(id, &path.key) else {
+            continue;
+        };
+        let Some(head) = current.first() else {
+            continue;
+        };
+        if head.body.is_none() {
+            continue;
+        }
+        if let Some(said) = decode_said(&held, &current)? {
+            let entry = meta.entry(take).or_insert((0, None));
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = Some(entry.1.map_or(head.at, |prev| prev.max(head.at)));
+            grouped.entry(take).or_default().push((seq, path.key.clone(), said));
+        }
+    }
+
+    let infos = meta
+        .into_iter()
+        .map(|(take, (lines, written_at))| TakeInfo {
+            take,
+            lines,
+            is_live: take == 0,
+            is_current: take == current_take,
+            written_at,
+        })
+        .collect();
+
+    let mut by_take = BTreeMap::new();
+    for (take, mut rows) in grouped {
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        by_take.insert(take, rows.into_iter().map(|(_, key, said)| (key, said)).collect());
+    }
+
+    Ok(TakesSnapshot { infos, by_take })
+}
+
 /// Lists all takes in `<id>/lines.jsonl` that still have at least one live line, ascending by `take`.
 pub fn list(shelf: &Shelf, id: &str, current_take: u32) -> Result<Vec<TakeInfo>, Error> {
     let held = read_lines_pack(shelf, id)?;

@@ -9,7 +9,7 @@ use crate::capture::clock::{BLOCK, Block};
 use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zutalk_log::warn;
@@ -89,24 +89,12 @@ impl Writer {
     /// sizes without decrypting and truncates any partial tail block on the last minute file.
     pub fn create(dir: &Path, key: &[u8; 32]) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let existing = minutes(dir)?;
-        let (minute, next_ms) = if let Some(&last) = existing.last() {
-            for &earlier in &existing[..existing.len() - 1] {
-                let len = fs::metadata(file(dir, earlier))?.len();
-                if len % SEALED as u64 != 0 {
-                    return Err(bad("a short block inside the recording"));
-                }
+        let spans = inspect_minutes(dir, true)?;
+        let (minute, next_ms) = match spans.last() {
+            Some(&(last_min, blocks_in_last)) => {
+                (last_min, last_min * MINUTE_MS + blocks_in_last * BLOCK_MS)
             }
-            let path = file(dir, last);
-            let len = fs::metadata(&path)?.len();
-            let whole = len / SEALED as u64 * SEALED as u64;
-            if whole < len {
-                OpenOptions::new().write(true).open(&path)?.set_len(whole)?;
-            }
-            let blocks_in_last = (whole / SEALED as u64) as u32;
-            (last, last * MINUTE_MS + blocks_in_last * BLOCK_MS)
-        } else {
-            (0, 0)
+            None => (0, 0),
         };
         Ok(Self {
             dir: dir.into(),
@@ -222,21 +210,52 @@ fn minutes(dir: &Path) -> io::Result<Vec<u32>> {
     Ok(minutes)
 }
 
-fn scan(dir: &Path, key: &[u8; 32], repair: bool, mut each: impl FnMut(Block)) -> io::Result<u32> {
+/// Inspects minute files in `dir`, rejecting torn inner files and optionally truncating a torn
+/// tail on the final minute file. Returns `(minute, whole_blocks)` in ascending order.
+fn inspect_minutes(dir: &Path, repair: bool) -> io::Result<Vec<(u32, u32)>> {
+    let mins = match minutes(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        other => other?,
+    };
+    let mut out = Vec::with_capacity(mins.len());
+    for (i, &minute) in mins.iter().enumerate() {
+        let path = file(dir, minute);
+        let len = fs::metadata(&path)?.len();
+        let whole = len / SEALED as u64 * SEALED as u64;
+        if whole < len {
+            // Only a crash leaves a short tail, and only on the file being written.
+            if i + 1 < mins.len() {
+                return Err(bad("a short block inside the recording"));
+            }
+            if repair {
+                OpenOptions::new().write(true).open(&path)?.set_len(whole)?;
+            }
+        }
+        out.push((minute, (whole / SEALED as u64) as u32));
+    }
+    Ok(out)
+}
+
+fn verify_block_at(cipher: &Aes256Gcm, dir: &Path, minute: u32, index: u32) -> io::Result<()> {
+    let mut f = File::open(file(dir, minute))?;
+    f.seek(SeekFrom::Start(u64::from(index) * SEALED as u64))?;
+    let mut sealed = vec![0u8; SEALED];
+    f.read_exact(&mut sealed)?;
+    cipher
+        .decrypt(&nonce(minute, index).into(), sealed.as_slice())
+        .map(|_| ())
+        .map_err(|_| bad("block does not open"))
+}
+
+fn scan(dir: &Path, key: &[u8; 32], mut each: impl FnMut(Block)) -> io::Result<u32> {
     let (cipher, minutes) = (Aes256Gcm::new(key.into()), minutes(dir)?);
     let mut blocks = 0;
     for (i, &minute) in minutes.iter().enumerate() {
         let path = file(dir, minute);
         let bytes = fs::read(&path)?;
         let whole = bytes.len() / SEALED * SEALED;
-        if whole < bytes.len() {
-            // Only a crash leaves a short tail, and only on the file being written.
-            if i + 1 < minutes.len() {
-                return Err(bad("a short block inside the recording"));
-            }
-            if repair {
-                OpenOptions::new().write(true).open(&path)?.set_len(whole as u64)?;
-            }
+        if whole < bytes.len() && i + 1 < minutes.len() {
+            return Err(bad("a short block inside the recording"));
         }
         for (index, sealed) in bytes[..whole].chunks_exact(SEALED).enumerate() {
             let plain = cipher.decrypt(&nonce(minute, index as u32).into(), sealed);
@@ -246,21 +265,37 @@ fn scan(dir: &Path, key: &[u8; 32], repair: bool, mut each: impl FnMut(Block)) -
             blocks += 1;
         }
     }
-    Ok(blocks * 100)
+    Ok(blocks * BLOCK_MS)
 }
 
-/// After a crash: cuts the torn tail off, and returns how much audio is intact, in ms.
+/// Measures intact audio duration in `dir` in `O(minutes)` via file sizes alone (no decryption).
+/// Missing folder returns `Ok(0)`.
+pub fn length_ms(dir: &Path) -> io::Result<u32> {
+    let spans = inspect_minutes(dir, false)?;
+    Ok(spans.into_iter().map(|(_, blocks)| blocks * BLOCK_MS).sum())
+}
+
+/// After a crash: cuts the torn tail off in `O(minutes)` via file sizes, authenticates boundary
+/// blocks against `key`, and returns how much audio is intact, in ms.
 /// A missing folder means nothing was written yet (0 ms), matching [`destroy`].
 pub fn recover(dir: &Path, key: &[u8; 32]) -> io::Result<u32> {
-    match scan(dir, key, true, |_| {}) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
-        other => other,
+    let spans = inspect_minutes(dir, true)?;
+    let cipher = Aes256Gcm::new(key.into());
+    let non_empty: Vec<(u32, u32)> = spans.iter().copied().filter(|&(_, b)| b > 0).collect();
+    if let Some(&(first_min, _)) = non_empty.first() {
+        verify_block_at(&cipher, dir, first_min, 0)?;
     }
+    if let Some(&(last_min, last_blocks)) = non_empty.last()
+        && (non_empty.len() > 1 || last_blocks > 1)
+    {
+        verify_block_at(&cipher, dir, last_min, last_blocks - 1)?;
+    }
+    Ok(spans.into_iter().map(|(_, blocks)| blocks * BLOCK_MS).sum())
 }
 
 /// Every block in order, and the length of the recording in ms. Needs a `Pass`.
 pub fn read(dir: &Path, key: &[u8; 32], _pass: &Pass, each: impl FnMut(Block)) -> io::Result<u32> {
-    scan(dir, key, false, each)
+    scan(dir, key, each)
 }
 
 /// Whether any of the audio is on the disk.

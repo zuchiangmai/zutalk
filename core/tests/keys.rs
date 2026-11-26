@@ -233,3 +233,33 @@ fn a_key_comes_from_the_person_from_a_grant_or_from_nowhere() {
     assert_eq!(alone.from(Service::Soniox), From::Nowhere);
     assert_eq!(granted.from(Service::Soniox), From::Granted);
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn chain_leases_own_keys_from_memory_without_touching_secrets_file_on_live_path() {
+    use zutalk_core::id::keys::{Chain, Keys, Service};
+
+    let _one = STORE.lock().await;
+    let dir = tempfile::tempdir().expect("a folder");
+    store(dir.path());
+
+    let chain = Chain::new(None);
+    chain.own(Service::Soniox, Some("sk-live-ram")).expect("set own soniox key");
+
+    // Temporarily sabotage secrets.json on disk: `Chain::lease` and `Chain::has_own` must serve
+    // directly from the in-memory own-key cache without doing disk IO or contending on `FILE`,
+    // while direct `keys::get` still reports disk corruption.
+    let secrets_file = dir.path().join("Secrets").join("secrets.json");
+    let saved_bytes = fs::read(&secrets_file).expect("read valid secrets");
+    fs::write(&secrets_file, b"corrupt-on-disk").expect("corrupt disk copy");
+
+    assert!(chain.has_own(Service::Soniox));
+    let lease = chain.lease(Service::Soniox).await.expect("lease from RAM cache without disk IO");
+    assert_eq!(lease.key.expose(), "sk-live-ram");
+    assert_eq!(keys::get("soniox").err(), Some(End::Fatal("keys.store")));
+
+    // Restore valid bytes so subsequent `own(None)` writes cleanly and updates RAM cache.
+    fs::write(&secrets_file, saved_bytes).expect("restore valid secrets");
+    chain.own(Service::Soniox, None).expect("clear own key");
+    assert!(!chain.has_own(Service::Soniox));
+}

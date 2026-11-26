@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{fmt, fs, time::Duration};
 use ts_rs::TS;
 use zeroize::Zeroizing;
@@ -74,15 +74,37 @@ pub trait Keys: Send + Sync {
 /// enter, holding one file only it may read. macOS keeps them there while releases are ad-hoc
 /// signed, since each update changes the signature and the keychain then asks for a password.
 static FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Lock-free-ish read mirror of `FILE` + cached own service keys so L1 `Chain::lease` never
+/// touches `secrets.json` or contends with `F_FULLFSYNC` inside `FILE` during live captioning.
+static OWN_CACHE: RwLock<Option<(PathBuf, [Option<Secret>; 2])>> = RwLock::new(None);
 
 /// The secrets in the file, each name with its secret in base64.
 type Kept = Zeroizing<Vec<(String, String)>>;
+
+fn decode_own_from_kept(kept: &Kept) -> Result<[Option<Secret>; 2], End> {
+    let mut out = [None, None];
+    for service in Service::ALL {
+        if let Some((_, b64)) = kept.iter().find(|(k, _)| k == service.name()) {
+            let bytes =
+                Zeroizing::new(BASE64_STANDARD.decode(b64).map_err(|_| End::Fatal("keys.store"))?);
+            let s = String::from_utf8(bytes.to_vec()).map_err(|_| End::Fatal("keys.store"))?;
+            out[service as usize] = Some(Secret(s));
+        }
+    }
+    Ok(out)
+}
 
 /// Opens where this device keeps secrets: on macOS the file under `data`, elsewhere the
 /// system's key store. Call once, before anything is kept or read.
 pub fn open_store(data: &Path) -> Result<(), End> {
     if cfg!(target_os = "macos") {
-        *FILE.lock().map_err(|_| End::Fatal("keys.store"))? = Some(data.join("Secrets"));
+        let dir = data.join("Secrets");
+        *FILE.lock().map_err(|_| End::Fatal("keys.store"))? = Some(dir.clone());
+        if let Ok(mut cache) = OWN_CACHE.write() {
+            *cache = Some((dir, [None, None]));
+            // Drop placeholder so first read lazily hydrates if pre-existing `secrets.json` exists.
+            *cache = None;
+        }
         return Ok(());
     }
     #[cfg(target_os = "windows")]
@@ -141,11 +163,17 @@ pub fn get(name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, End> {
 /// Keeps `secret` under `name`, or forgets it.
 pub fn set(name: &str, secret: Option<&[u8]>) -> Result<(), End> {
     // Held until the file is written: two changes at once would lose one.
-    if let Some(dir) = FILE.lock().map_err(|_| End::Fatal("keys.store"))?.as_deref() {
-        let mut kept = read(dir)?;
+    if let Some(dir) = FILE.lock().map_err(|_| End::Fatal("keys.store"))?.clone() {
+        let mut kept = read(&dir)?;
         kept.retain(|(kept, _)| kept != name);
         kept.extend(secret.map(|secret| (name.to_owned(), BASE64_STANDARD.encode(secret))));
-        return write(dir, &kept).map_err(|_| End::Fatal("keys.store"));
+        write(&dir, &kept).map_err(|_| End::Fatal("keys.store"))?;
+        if let Ok(own) = decode_own_from_kept(&kept)
+            && let Ok(mut cache) = OWN_CACHE.write()
+        {
+            *cache = Some((dir, own));
+        }
+        return Ok(());
     }
     let entry = Entry::new("ZuTalk", name).map_err(|_| End::Fatal("keys.store"))?;
     let done = match secret {
@@ -155,6 +183,26 @@ pub fn set(name: &str, secret: Option<&[u8]>) -> Result<(), End> {
             .or_else(|e| if let Error::NoEntry = e { Ok(()) } else { Err(e) }),
     };
     done.map_err(|_| End::Fatal("keys.store"))
+}
+
+fn own_cached(service: Service) -> Result<Option<Secret>, End> {
+    if let Ok(guard) = OWN_CACHE.read()
+        && let Some((_, ref own)) = *guard
+    {
+        return Ok(own[service as usize].clone());
+    }
+    if let Some(dir) = FILE.lock().map_err(|_| End::Fatal("keys.store"))?.clone() {
+        let kept = read(&dir)?;
+        let own = decode_own_from_kept(&kept)?;
+        let out = own[service as usize].clone();
+        if let Ok(mut cache) = OWN_CACHE.write() {
+            *cache = Some((dir, own));
+        }
+        return Ok(out);
+    }
+    let Some(raw) = get(service.name())? else { return Ok(None) };
+    let s = String::from_utf8(raw.to_vec()).map_err(|_| End::Fatal("keys.store"))?;
+    Ok(Some(Secret(s)))
 }
 
 pub fn random<const N: usize>() -> Result<[u8; N], End> {
@@ -592,7 +640,7 @@ impl Chain {
     }
 
     pub fn has_own(&self, service: Service) -> bool {
-        get(service.name()).is_ok_and(|key| key.is_some())
+        own_cached(service).is_ok_and(|key| key.is_some())
     }
 
     /// Where a key for `service` would come from right now.
@@ -633,9 +681,8 @@ impl Chain {
 impl Keys for Chain {
     async fn lease(&self, service: Service) -> Result<Lease, End> {
         let refused = self.refused.lock().is_ok_and(|refused| refused.contains(&service));
-        if let (false, Some(key)) = (refused, get(service.name())?) {
-            let key = String::from_utf8(key.to_vec()).map_err(|_| End::Fatal("keys.store"))?;
-            return Ok(Lease { key: Secret(key), session_cap: None });
+        if let (false, Some(key)) = (refused, own_cached(service)?) {
+            return Ok(Lease { key, session_cap: None });
         }
         let issuer = self.issuer.as_ref().ok_or(End::Fatal(if refused {
             "keys.refused"

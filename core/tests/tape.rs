@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use zutalk_core::capture::clock::{BLOCK, Block};
-use zutalk_core::capture::tape::{Pass, Place, Writer, place, read, recover};
+use zutalk_core::capture::tape::{Pass, Place, Writer, length_ms, place, read, recover};
 use zutalk_log::Level;
 
 const KEY: [u8; 32] = [7; 32];
@@ -231,4 +231,30 @@ fn a_block_from_before_the_end_is_skipped() {
     assert_eq!(got, [block(0), block(1), block(2), block(3), block(4)]);
     assert!(seen.of("tape.pad").is_empty());
     assert_eq!(seen.refused(), 0);
+}
+
+#[test]
+fn length_ms_and_recover_measure_minutes_without_decrypting_every_middle_block() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), 1_205); // 2 full minutes + 5 blocks = 120_500 ms
+    assert_eq!(length_ms(dir.path()).unwrap(), 120_500);
+
+    // Corrupt a middle block (index 300 in minute 0) and append a 9-byte torn tail on minute 2.
+    let min0 = dir.path().join("00000.tape");
+    let mut bytes0 = fs::read(&min0).unwrap();
+    let sealed_size = BLOCK * 2 + 16;
+    bytes0[300 * sealed_size + 10] ^= 0xFF;
+    fs::write(&min0, bytes0).unwrap();
+
+    let min2 = dir.path().join("00002.tape");
+    OpenOptions::new().append(true).open(&min2).unwrap().write_all(&[0xEE; 9]).unwrap();
+
+    // `recover` repairs the torn tail and verifies boundary blocks with `KEY` without decrypting
+    // all 1,205 middle blocks, while rejecting a wrong key.
+    assert!(recover(dir.path(), &[9; 32]).is_err(), "wrong key must still be rejected");
+    assert_eq!(recover(dir.path(), &KEY).unwrap(), 120_500);
+    assert_eq!(length_ms(dir.path()).unwrap(), 120_500);
+
+    // Full streaming `read` still authenticates every block and catches the tampered middle block.
+    assert!(read_all(dir.path(), &KEY).is_err());
 }

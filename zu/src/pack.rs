@@ -13,8 +13,8 @@
 //! Failure: after a failed write or sync the state of the file is unknown. The pack answers
 //! every later call with the same error; open it again, which checks the file anew.
 
-use crate::{Cid, Codec, Error, Record, Value};
-use std::collections::BTreeMap;
+use crate::{Cid, Codec, Error, Record, Value, record};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -76,6 +76,68 @@ impl Pack {
     /// Wait until everything appended so far is on the disk.
     pub fn sync(&mut self) -> Result<(), Error> {
         self.io(|file| file.sync_data())
+    }
+
+    /// Reclaims superseded bodies while preserving every signed record header in order, every
+    /// body referenced by a current record (`record.md` § Updating and Removing), and the latest
+    /// non-null body of each path so a removed record remains locally restorable.
+    pub fn compact(path: impl AsRef<Path>) -> Result<bool, Error> {
+        let path = path.as_ref();
+        let (lock_pack, held) = match Pack::open(path) {
+            Err(Error::Io(ErrorKind::NotFound)) => return Ok(false),
+            res => res?,
+        };
+        let mut keep_bodies = BTreeSet::new();
+        for current in record::paths(&held.records).values() {
+            for rec in current {
+                keep_bodies.extend(rec.body);
+            }
+        }
+        let mut latest_non_null: BTreeMap<&crate::Path, (i64, Cid, Cid)> = BTreeMap::new();
+        for rec in &held.records {
+            if let Some(body_cid) = rec.body {
+                let rec_cid = rec.cid();
+                let replace = latest_non_null
+                    .get(&rec.path)
+                    .is_none_or(|&(prev_at, prev_cid, _)| (rec.at, rec_cid) > (prev_at, prev_cid));
+                if replace {
+                    latest_non_null.insert(&rec.path, (rec.at, rec_cid, body_cid));
+                }
+            }
+        }
+        for (_, _, body_cid) in latest_non_null.into_values() {
+            keep_bodies.insert(body_cid);
+        }
+        if held.bodies.keys().all(|cid| keep_bodies.contains(cid)) {
+            drop(lock_pack);
+            return Ok(false);
+        }
+
+        let mut out = String::new();
+        for (cid, body) in &held.bodies {
+            if keep_bodies.contains(cid) {
+                out.push_str(&body.to_json()?);
+                out.push('\n');
+            }
+        }
+        for rec in &held.records {
+            out.push_str(&rec.header().to_json()?);
+            out.push('\n');
+        }
+
+        let mut tmp_os = path.as_os_str().to_os_string();
+        tmp_os.push(".compact");
+        let tmp_path = std::path::PathBuf::from(tmp_os);
+        let mut tmp = File::create(&tmp_path)?;
+        tmp.write_all(out.as_bytes())?;
+        tmp.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+        if cfg!(unix) {
+            let dir = path.parent().filter(|d| *d != Path::new("")).unwrap_or(Path::new("."));
+            File::open(dir)?.sync_all()?;
+        }
+        drop(lock_pack);
+        Ok(true)
     }
 
     fn io(&mut self, op: impl FnOnce(&mut File) -> std::io::Result<()>) -> Result<(), Error> {
