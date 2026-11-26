@@ -982,3 +982,135 @@ async fn i2_concurrent_view_queries_do_not_stall_live_captions() {
 
     bench.finish();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surgical_edits_on_real_4_hour_zu_pack_avoid_full_reparse_and_preserve_all_takes() {
+    use zutalk_core::app::proto::{Change, Command, NoteOp};
+
+    let _store = hub::STORE.lock().await;
+    hub::signed_in();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shelf = hub::shelf(dir.path());
+
+    // Seed a real 4-hour, 2-take Zu pack (2,560 lines × 2 takes = 5,120 signed records in lines.jsonl).
+    let rec_id = "19c00000000fourhour";
+    let started = utc_noon_ms(2025, 11, 1);
+    let mut take0 = Vec::with_capacity(2_560);
+    let mut take1 = Vec::with_capacity(2_560);
+    for seq in 0..2_560u32 {
+        let t0 = seq * 5_600;
+        let t1 = t0 + 4_800;
+        take0.push((
+            format!("{rec_id}.0.{seq:05}"),
+            Some(said(t0, t1, "en", &format!("Draft utterance {seq:05} in long town hall"))),
+        ));
+        take1.push((
+            format!("{rec_id}.1.{seq:05}"),
+            Some(said(t0, t1, "en", &format!("Refined utterance {seq:05} in long town hall"))),
+        ));
+    }
+    shelf.put(rec_id, LINE, &take0, started + 1).expect("seed take 0");
+    shelf.put(rec_id, LINE, &take1, started + 2).expect("seed take 1");
+    shelf
+        .put(
+            rec_id,
+            RECORDING,
+            &[(
+                rec_id.into(),
+                Some(About {
+                    started,
+                    length_ms: 14_400_000,
+                    title: "Initial 4h Town Hall".into(),
+                    preview: "Refined utterance 00000".into(),
+                    spoken: vec!["en".into()],
+                    shown: vec!["en".into(), "zh".into()],
+                    source: "mic".into(),
+                    take: 1,
+                    ..About::default()
+                }),
+            )],
+            started + 3,
+        )
+        .expect("seed about");
+
+    let mut app = hub::App::start(dir.path());
+    app.until(|s| s.me.as_deref() == Some(ME)).await;
+    app.wait_recording(rec_id, |v| v.is_some()).await;
+
+    // 1. Add note -> surgical Index::update_notes (never re-reads 5,120 lines.jsonl records).
+    let t_note = Instant::now();
+    app.send(Command::Note {
+        id: rec_id.into(),
+        op: NoteOp::Add {
+            at_ms: 120_000,
+            text: "SurgicalNoteLandmark".into(),
+            anchor: Some(format!("{rec_id}.1.00021")),
+        },
+    });
+    app.wait_recording(rec_id, |v| v.is_some_and(|r| r.notes.len() == 1)).await;
+    let note_ms = t_note.elapsed().as_millis();
+
+    // 2. Rename title -> surgical Index::update_meta.
+    let t_title = Instant::now();
+    app.send(Command::Change {
+        id: rec_id.into(),
+        change: Change::Title { text: "SurgicalTitleLandmark".into() },
+    });
+    app.wait_library(|rows| {
+        rows.iter().any(|r| r.id == rec_id && r.title == "SurgicalTitleLandmark")
+    })
+    .await;
+    let title_ms = t_title.elapsed().as_millis();
+
+    // 3. Rename speaker -> O(1) Recording invalidation without touching SQLite take_lines.
+    let t_spk = Instant::now();
+    app.send(Command::Change {
+        id: rec_id.into(),
+        change: Change::Speaker { label: "1".into(), name: "Moderator".into() },
+    });
+    app.wait_recording(rec_id, |v| {
+        v.is_some_and(|r| r.speakers.get("1").map(String::as_str) == Some("Moderator"))
+    })
+    .await;
+    let spk_ms = t_spk.elapsed().as_millis();
+
+    // 4. Edit last line (#2559) -> surgical Index::update_line + FTS5 doc update.
+    let last_key = format!("{rec_id}.1.02559");
+    let t_line = Instant::now();
+    app.send(Command::Change {
+        id: rec_id.into(),
+        change: Change::Line {
+            key: last_key.clone(),
+            language: "en".into(),
+            text: "SurgicalTailCorrectionLandmark".into(),
+        },
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let c39 = app.transcript(rec_id, Some(1), 39).await;
+        if c39.lines.last().is_some_and(|(_, s)| s.line.text == "SurgicalTailCorrectionLandmark") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "tail line update did not propagate");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let line_ms = t_line.elapsed().as_millis();
+
+    // All 4 mutations stay sub-100ms and preserve all 2,560 lines across both takes + FTS5 search!
+    assert!(note_ms <= 80, "Note took {note_ms} ms on 4h pack");
+    assert!(title_ms <= 80, "Title took {title_ms} ms on 4h pack");
+    assert!(spk_ms <= 80, "Speaker took {spk_ms} ms on 4h pack");
+    assert!(line_ms <= 80, "Line edit took {line_ms} ms on 4h pack");
+
+    let c0_t0 = app.transcript(rec_id, Some(0), 0).await;
+    let c0_t1 = app.transcript(rec_id, Some(1), 0).await;
+    assert_eq!(c0_t0.total_lines, 2_560);
+    assert_eq!(c0_t1.total_lines, 2_560);
+
+    let hits = app.search("SurgicalTailCorrectionLandmark").await.hits;
+    assert!(hits.iter().any(|h| h.recording_id == rec_id && h.key == last_key));
+
+    eprintln!(
+        "surgical_4h_e2e: note={note_ms}ms title={title_ms}ms speaker={spk_ms}ms line={line_ms}ms"
+    );
+}

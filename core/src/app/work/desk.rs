@@ -428,7 +428,7 @@ pub(super) fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static 
         }
         Job::Change { id, change } => {
             let shelf = snapshot(identity).shelf?;
-            let applied = apply(&shelf, &id, change)?;
+            let applied = apply(env, &shelf, &id, change)?;
             let tapes = config.tapes();
             match &applied {
                 AppliedChange::Title => {
@@ -1535,7 +1535,12 @@ fn run_survey(
 }
 
 /// Applies a single user mutation to its Zu pack and returns the surgical delta category.
-fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<AppliedChange, &'static str> {
+fn apply(
+    env: &DeskEnv,
+    shelf: &Shelf,
+    id: &str,
+    change: Change,
+) -> Result<AppliedChange, &'static str> {
     match change {
         Change::Title { text } => {
             let about = shelf.about(id).map_err(fail)?.ok_or("recording.gone")?.about;
@@ -1552,11 +1557,18 @@ fn apply(shelf: &Shelf, id: &str, change: Change) -> Result<AppliedChange, &'sta
         }
         Change::Line { key, language, text } => {
             let rec = shelf.about(id).map_err(fail)?.ok_or("recording.gone")?;
-            let lines = match takes::parse_key(id, &key) {
-                Some((take, _)) => takes::read(shelf, id, take).map_err(fail)?,
-                None => shelf.read(id).map_err(fail)?.ok_or("recording.gone")?.lines,
+            let mut indexed = None;
+            env.with_index(|idx| indexed = idx.line_by_key(id, &key));
+            let mut said = match indexed {
+                Some(found) => found,
+                None => {
+                    let lines = match takes::parse_key(id, &key) {
+                        Some((take, _)) => takes::read(shelf, id, take).map_err(fail)?,
+                        None => shelf.read(id).map_err(fail)?.ok_or("recording.gone")?.lines,
+                    };
+                    lines.into_iter().find(|(k, _)| *k == key).ok_or("line.gone")?.1
+                }
             };
-            let (key, mut said) = lines.into_iter().find(|(k, _)| *k == key).ok_or("line.gone")?;
             let piece =
                 if language == said.line.language { "text".into() } else { language.clone() };
             match piece.as_str() {

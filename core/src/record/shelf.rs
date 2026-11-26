@@ -368,7 +368,21 @@ impl Shelf {
         now: i64,
     ) -> Result<(), Error> {
         let pack_path = self.pack(id, ty);
-        let mut writer = self.open(id, ty)?;
+        fs::create_dir_all(pack_path.parent().unwrap_or(&self.root))?;
+        let key_set: std::collections::BTreeSet<&str> =
+            bodies.iter().map(|(k, _)| k.as_str()).collect();
+        let (pack, matching_records) = Pack::open_for_keys(&pack_path, &key_set)?;
+        let heads = record::paths(&matching_records).into_iter().map(|(path, records)| {
+            let after = records.iter().map(|record| record.at + 1).max().unwrap_or(i64::MIN);
+            (path.clone(), (records.iter().map(|record| record.cid()).collect(), after))
+        });
+        let mut writer = Writer {
+            pack,
+            by: self.by.clone(),
+            ty: ty.to_string(),
+            key: self.key.clone(),
+            heads: heads.collect(),
+        };
         bodies.iter().try_for_each(|(key, body)| writer.put(key, body.as_ref(), now))?;
         writer.sync()?;
         drop(writer);

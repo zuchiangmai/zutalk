@@ -53,6 +53,27 @@ impl Pack {
         Ok((Pack { file, failed: None }, held))
     }
 
+    /// Opens `path` for appending updates to `keys`, truncating any torn tail line while decoding
+    /// only headers whose `"key"` is in `keys` (`O(matching)` curve decompression & CID hashing).
+    pub fn open_for_keys(
+        path: impl AsRef<Path>,
+        keys: &BTreeSet<&str>,
+    ) -> Result<(Pack, Vec<Record>), Error> {
+        let (path, mut bytes) = (path.as_ref(), Vec::new());
+        let mut file =
+            File::options().read(true).write(true).create(true).truncate(false).open(path)?;
+        file.try_lock().map_err(std::io::Error::from)?;
+        file.read_to_end(&mut bytes)?;
+        let (records, intact) = scan_for_keys(&bytes, keys)?;
+        if bytes.is_empty() && cfg!(unix) {
+            let dir = path.parent().filter(|dir| *dir != Path::new("")).unwrap_or(Path::new("."));
+            file.sync_all().and_then(|()| File::open(dir)?.sync_all())?;
+        }
+        file.set_len(intact as u64)?;
+        file.seek(SeekFrom::Start(intact as u64))?;
+        Ok((Pack { file, failed: None }, records))
+    }
+
     /// What the pack at `path` holds, without changing it. A torn last line is left out.
     /// Each header is checked for its structure; its signature is for [`Record::verify`].
     pub fn read(path: impl AsRef<Path>) -> Result<Held, Error> {
@@ -179,4 +200,33 @@ fn scan(bytes: &[u8]) -> Result<(Held, usize), Error> {
         }
     }
     Ok((held, intact))
+}
+
+fn scan_for_keys(bytes: &[u8], keys: &BTreeSet<&str>) -> Result<(Vec<Record>, usize), Error> {
+    let (mut records, mut intact) = (Vec::new(), 0);
+    let mut lines = bytes.split_inclusive(|&byte| byte == b'\n').enumerate().peekable();
+    while let Some((index, line)) = lines.next() {
+        let json = line.strip_suffix(b"\n").and_then(|json| std::str::from_utf8(json).ok());
+        let kept = json.ok_or(Error::Json).and_then(|json| {
+            let parsed: serde_json::Value = serde_json::from_str(json).map_err(|_| Error::Json)?;
+            let serde_json::Value::Object(map) = parsed else {
+                return Err(Error::Json);
+            };
+            if map.get("$type").and_then(serde_json::Value::as_str) == Some("record")
+                && map
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|k| keys.contains(k))
+            {
+                records.push(Record::try_from(Value::from_json(json)?)?);
+            }
+            Ok(())
+        });
+        match kept {
+            Ok(()) => intact += line.len(),
+            Err(_) if lines.peek().is_none() => break,
+            Err(_) => return Err(Error::Corrupt(index + 1)),
+        }
+    }
+    Ok((records, intact))
 }

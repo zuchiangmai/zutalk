@@ -636,6 +636,7 @@ fn execute_blocking(
             | Query::LibraryMonth { .. }
             | Query::LibraryRecent { .. }
             | Query::Search { .. }
+            | Query::Recording { .. }
             | Query::Transcript { .. }
             | Query::Outbound
     );
@@ -688,7 +689,24 @@ fn execute_blocking(
             let Some(rec) = shelf.about(&id).map_err(|_| "shelf")? else {
                 return Ok((QueryValue::Recording(None), 0));
             };
-            let takes_list = takes::list(shelf, &id, rec.about.take).map_err(|_| "shelf")?;
+            let takes_list = if src.active_recording.as_deref() == Some(id.as_str()) {
+                let c0 = read_live_draft_chunk(shelf, &src.live_draft, &id, 0)?;
+                if c0.total_lines > 0 {
+                    vec![takes::TakeInfo {
+                        take: 0,
+                        lines: c0.total_lines,
+                        is_live: true,
+                        is_current: rec.about.take == 0,
+                        written_at: None,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            } else if let Some(ref r) = reader {
+                r.take_infos(&id, rec.about.take)?
+            } else {
+                takes::list(shelf, &id, rec.about.take).map_err(|_| "shelf")?
+            };
             let filed = shelf
                 .kept::<Filing>(FILING)
                 .map_err(|_| "shelf")?

@@ -10,7 +10,7 @@ use crate::live::lang::profile;
 use crate::live::lines::Line;
 use crate::out::city::Filing;
 use crate::record::shelf::{ContentTag, FILING, LINE, RECORDING, Said, Shelf, TitleBy};
-use crate::record::takes::{self, RefineFailure};
+use crate::record::takes::{self, RefineFailure, TakeInfo};
 use crate::rt::stats::Stats;
 use rusqlite::{Connection, InterruptHandle, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -325,6 +325,11 @@ impl Reader {
     /// Looks up one recording's projected summary row.
     pub fn recording_row(&self, id: &str) -> Result<Option<LibraryRow>, &'static str> {
         query_recording_row(&self.0, id)
+    }
+
+    /// Lists indexed takes and line counts for `id` without scanning or verifying `lines.jsonl`.
+    pub fn take_infos(&self, id: &str, current_take: u32) -> Result<Vec<TakeInfo>, &'static str> {
+        query_take_infos(&self.0, id, current_take)
     }
 }
 
@@ -949,6 +954,26 @@ impl Index {
 
     pub fn recording_row(&self, id: &str) -> Result<Option<LibraryRow>, &'static str> {
         query_recording_row(&self.conn, id)
+    }
+
+    pub fn take_infos(&self, id: &str, current_take: u32) -> Result<Vec<TakeInfo>, &'static str> {
+        query_take_infos(&self.conn, id, current_take)
+    }
+
+    /// Point-looks up a single indexed line by `(recording_id, take, seq)` primary key (`O(1)`).
+    pub fn line_by_key(&self, id: &str, line_key: &str) -> Option<Said> {
+        let (take, seq) = takes::parse_key(id, line_key)?;
+        self.conn
+            .query_row(
+                "SELECT line_key, t0, t1, speaker, language, text, translations_json, via_json, incomplete \
+                 FROM take_lines WHERE recording_id = ?1 AND take = ?2 AND seq = ?3",
+                params![id, i64::from(take), i64::from(seq)],
+                said_from_sqlite,
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|(k, s)| (k == line_key).then_some(s))
     }
 }
 
@@ -1677,6 +1702,40 @@ fn query_take_lines_slice(
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|_| "index")?);
+    }
+    Ok(out)
+}
+
+fn query_take_infos(
+    conn: &Connection,
+    id: &str,
+    current_take: u32,
+) -> Result<Vec<TakeInfo>, &'static str> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT take, COUNT(*) FROM take_lines \
+             WHERE recording_id = ?1 GROUP BY take ORDER BY take ASC",
+        )
+        .map_err(|_| "index")?;
+    let rows = stmt
+        .query_map(params![id], |r| {
+            let take = r.get::<_, i64>(0)?.max(0) as u32;
+            let lines = r.get::<_, i64>(1)?.max(0) as u32;
+            Ok(TakeInfo {
+                take,
+                lines,
+                is_live: take == 0,
+                is_current: take == current_take,
+                written_at: None,
+            })
+        })
+        .map_err(|_| "index")?;
+    let mut out = Vec::new();
+    for r in rows {
+        let info = r.map_err(|_| "index")?;
+        if info.lines > 0 {
+            out.push(info);
+        }
     }
     Ok(out)
 }
