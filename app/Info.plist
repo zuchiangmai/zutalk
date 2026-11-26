@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ZuTalk needs microphone access to record and transcribe your voice. Recordings are encrypted with AES-256-GCM and stored only on this device.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>ZuTalk records what this Mac plays, such as the other side of an online meeting, only when you choose System audio as the input. Recordings are encrypted with AES-256-GCM and stored only on this device.</string>
+  <key>SUPublicEDKey</key>
+  <string>Sm3x2TVehf4jFO1YDLPFu2xVQfnPNYGp1IeDYsLZeg8=</string>
+  <key>SURequireSignedFeed</key>
+  <true/>
+</dict>
+</plist>

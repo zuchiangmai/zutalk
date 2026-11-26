@@ -45,7 +45,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "macOS": { "bundleVersion": "69", "signingIdentity": "-" }
+    "macOS": {
+      "bundleVersion": "69",
+      "minimumSystemVersion": "12.5",
+      "signingIdentity": "-"
+    }
   },
   "plugins": {
     "updater": {
