@@ -31,7 +31,9 @@ enum SoftwareUpdateActivity: Equatable {
 /// installs when they quit.
 ///
 /// Checks the user starts themselves are forwarded to `SPUStandardUserDriver`
-/// untouched.
+/// untouched, with one exception: a check that failed on the network. That
+/// one is retried once without a word, and if it fails again the app's own
+/// alert offers the download page, which Sparkle's alert cannot.
 @MainActor
 final class SoftwareUpdateUserDriver: NSObject, SPUUserDriver {
 
@@ -61,6 +63,14 @@ final class SoftwareUpdateUserDriver: NSObject, SPUUserDriver {
     /// Called when the user asks to see an update that is already in flight,
     /// so the window carrying the progress row can be brought forward.
     var revealInFlightUpdate: (() -> Void)?
+
+    /// Asked when a check the user started fails. Unset, every such failure
+    /// gets Sparkle's alert, as before.
+    var userCheckFailure: ((NSError) -> SoftwareUpdateController.UserCheckFailure)?
+    /// "Try Again" in the unreachable alert.
+    var checkAgain: (() -> Void)?
+    /// "Open Download Page" in the unreachable alert.
+    var openDownloadPage: (() -> Void)?
 
     private(set) var activity: SoftwareUpdateActivity = .idle {
         didSet {
@@ -190,7 +200,36 @@ final class SoftwareUpdateUserDriver: NSObject, SPUUserDriver {
             acknowledgement()
             return
         }
-        standardDriver.showUpdaterError(error, acknowledgement: acknowledgement)
+        switch userCheckFailure?(error as NSError) ?? .standardAlert {
+        case .standardAlert:
+            standardDriver.showUpdaterError(error, acknowledgement: acknowledgement)
+        case .retryQuietly:
+            // Close the "checking" window; the retry opens its own.
+            dismissUpdateInstallation()
+            acknowledgement()
+        case .offerDownload:
+            dismissUpdateInstallation()
+            let choice = Self.unreachableAlert().runModal()
+            acknowledgement()
+            switch choice {
+            case .alertFirstButtonReturn: checkAgain?()
+            case .alertSecondButtonReturn: openDownloadPage?()
+            default: break
+            }
+        }
+    }
+
+    /// The update server could not be reached, twice. Says so, and gives the
+    /// two things a person can do about it.
+    private static func unreachableAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "updates.unreachable.title")
+        alert.informativeText = String(localized: "updates.unreachable.message")
+        alert.addButton(withTitle: String(localized: "updates.unreachable.retry"))
+        alert.addButton(withTitle: String(localized: "updates.unreachable.open_download"))
+        alert.addButton(withTitle: String(localized: "common.cancel"))
+        return alert
     }
 
     func showDownloadInitiated(cancellation: @escaping () -> Void) {

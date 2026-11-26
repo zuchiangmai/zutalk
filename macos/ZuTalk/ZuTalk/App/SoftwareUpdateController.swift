@@ -33,6 +33,12 @@ import Sparkle
 /// appcast) are retried automatically a few times before giving up silently,
 /// because the public release CDN is unreliable from some networks.
 ///
+/// A check the user started is retried once as well, and when that also fails
+/// on the network the app says so itself and offers the download page: the
+/// feed and the downloads live on one host, and a browser often gets through
+/// (a proxy, another route) where this process did not. 0.8.5 could only say
+/// "try again later" to people it would never reach.
+///
 /// Sparkle starts only in a real app process. Unit and UI tests can exercise
 /// routing without contacting the public appcast or changing updater defaults.
 @MainActor
@@ -41,6 +47,26 @@ final class SoftwareUpdateController: NSObject, ObservableObject {
 
     static let maximumNetworkRetries = 2
     private static let retryDelaySeconds: TimeInterval = 6
+
+    /// A person is watching a "checking" window: one more try, then tell them.
+    static let maximumUserCheckRetries = 1
+    /// Long enough for a route that just came up, short enough to wait through.
+    private static let userRetryDelaySeconds: TimeInterval = 2
+    /// How long, and how often, to wait for a finished session to let go
+    /// before starting the check the person asked for from the alert.
+    private static let sessionEndPollSeconds: TimeInterval = 0.2
+    private static let sessionEndPollLimit = 25
+
+    /// What to do about a check the user started that failed.
+    enum UserCheckFailure: Equatable {
+        /// Not a network failure, or nothing of ours to add: Sparkle's alert.
+        case standardAlert
+        /// A network failure with a try left: say nothing and check again.
+        case retryQuietly
+        /// A network failure with no tries left: say so, and offer the
+        /// download page as a way round.
+        case offerDownload
+    }
 
     /// Shortest gap between two background checks, whatever triggered them.
     /// Waking a laptop repeatedly, or a flapping Wi-Fi connection, must not
@@ -95,6 +121,21 @@ final class SoftwareUpdateController: NSObject, ObservableObject {
         userDriver.revealInFlightUpdate = {
             WindowCommandRouter.shared.openMainWindow(detail: "software-update")
         }
+        userDriver.userCheckFailure = { [weak self] error in
+            guard let self else { return .standardAlert }
+            return Self.userCheckFailure(
+                error,
+                retriesRemaining: self.retriesRemaining,
+                hasDownloadPage: Self.downloadPageURL(feedURL: Self.configuredFeedURL) != nil
+            )
+        }
+        userDriver.checkAgain = { [weak self] in
+            self?.checkForUpdatesWhenSessionEnds(pollsLeft: Self.sessionEndPollLimit)
+        }
+        userDriver.openDownloadPage = {
+            guard let page = Self.downloadPageURL(feedURL: Self.configuredFeedURL) else { return }
+            NSWorkspace.shared.open(page)
+        }
         guard isConfigured, !TestEnvironment.isAnyTestMode else { return }
         startUpdater()
     }
@@ -131,8 +172,21 @@ final class SoftwareUpdateController: NSObject, ObservableObject {
             return
         }
         lastCheckWasUserInitiated = true
-        retriesRemaining = Self.maximumNetworkRetries
+        retriesRemaining = Self.maximumUserCheckRetries
         updater.checkForUpdates()
+    }
+
+    /// "Try Again" in the alert: the failed session is still winding down when
+    /// the button is pressed, and Sparkle ignores a check started over one.
+    private func checkForUpdatesWhenSessionEnds(pollsLeft: Int) {
+        guard isConfigured, isStarted else { return }
+        guard updater.sessionInProgress, pollsLeft > 0 else {
+            checkForUpdates()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionEndPollSeconds) { [weak self] in
+            self?.checkForUpdatesWhenSessionEnds(pollsLeft: pollsLeft - 1)
+        }
     }
 
     func installTestCheckAction(_ action: (() -> Void)?) {
@@ -237,16 +291,53 @@ final class SoftwareUpdateController: NSObject, ObservableObject {
         return true
     }
 
+    /// Whether a failed check the user started is retried, explained by the
+    /// app, or left to Sparkle. Split out so the rule can be tested without a
+    /// live updater; `handleAbort` and the user driver must agree on it.
+    static func userCheckFailure(
+        _ error: NSError,
+        retriesRemaining: Int,
+        hasDownloadPage: Bool
+    ) -> UserCheckFailure {
+        guard isTransientNetworkFailure(error) else { return .standardAlert }
+        if retriesRemaining > 0 { return .retryQuietly }
+        return hasDownloadPage ? .offerDownload : .standardAlert
+    }
+
+    /// The page the app can be downloaded from by hand. Derived from the feed
+    /// address rather than written down a second time, so the two cannot come
+    /// to name different projects. Nil for a feed that is not a release
+    /// asset: then there is no page to offer.
+    static func downloadPageURL(feedURL: String?) -> URL? {
+        let asset = "/download/appcast.xml"
+        guard let feedURL, feedURL.hasPrefix("https://"), feedURL.hasSuffix(asset) else {
+            return nil
+        }
+        return URL(string: String(feedURL.dropLast(asset.count)))
+    }
+
+    private static var configuredFeedURL: String? {
+        Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String
+    }
+
     private func handleAbort(_ error: NSError) {
         guard isConfigured, isStarted, !TestEnvironment.isAnyTestMode else { return }
-        // A check the user started already reported the failure in Sparkle's
-        // own window; retrying behind that alert would only confuse them.
-        guard !lastCheckWasUserInitiated else { return }
         guard Self.isTransientNetworkFailure(error), retriesRemaining > 0 else { return }
         retriesRemaining -= 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.retryDelaySeconds) { [weak self] in
+        // The user driver swallowed this failure for a check the user started
+        // (`userCheckFailure` said `.retryQuietly` while a try was left), so
+        // the retry must be one they can see end: the same kind of check.
+        let userInitiated = lastCheckWasUserInitiated
+        let delay = userInitiated ? Self.userRetryDelaySeconds : Self.retryDelaySeconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isConfigured, self.isStarted else { return }
-            self.updater.checkForUpdatesInBackground()
+            // Something else began a check while this one waited; it covers it.
+            guard !self.updater.sessionInProgress else { return }
+            if userInitiated {
+                self.updater.checkForUpdates()
+            } else {
+                self.updater.checkForUpdatesInBackground()
+            }
         }
     }
 

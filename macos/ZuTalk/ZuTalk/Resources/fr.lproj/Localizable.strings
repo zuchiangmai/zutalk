@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "Les mises à jour ne sont pas configurées";
 "updates.unavailable.message" = "Cette version de développement ne contient pas la clé publique de signature des mises à jour.";
 "updates.unavailable.dismiss" = "OK";
+"updates.unreachable.title" = "Serveur de mises à jour injoignable";
+"updates.unreachable.message" = "Ce Mac ne parvient pas à joindre le serveur qui héberge les mises à jour de ZuTalk. Réessayez, ou téléchargez la nouvelle version dans votre navigateur.";
+"updates.unreachable.retry" = "Réessayer";
+"updates.unreachable.open_download" = "Ouvrir la page de téléchargement";
 "settings.updates.subtitle" = "Les nouvelles versions sont signées et vérifiées avant l’installation.";
 "settings.updates.automatic" = "Rechercher automatiquement les mises à jour";
 "settings.updates.automatic_hint" = "ZuTalk vérifie périodiquement le flux de mises à jour signé et vous avertit lorsqu’une nouvelle version est disponible.";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "Rien que vous organisez ce jour-là.";
 "city.picker.empty_never" = "La liste des événements n’a pas encore été chargée. Cliquez sur Actualiser pour réessayer.";
 "city.picker.refresh" = "Actualiser";
+"city.picker.sign_in_again" = "Se reconnecter";
 "city.picker.updated_format" = "Liste mise à jour : %@";
 "city.picker.never_updated" = "Liste des événements pas encore chargée";
 "city.picker.confirm" = "Choisir cet événement";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "Cet enregistrement n’a pas encore de transcription. Une fois la transcription terminée, ouvrez « Partager… » pour cet enregistrement et réessayez.";
 "city.error.refused" = "La ville n’a pas accepté cette transcription. Réessayez une fois ; en cas de nouveau refus, indiquez l’événement à un coordinateur de la ville.";
 "city.error.busy" = "Cet enregistrement est déjà en cours de dépôt. Attendez la fin, puis réessayez.";
+"city.error.moved" = "Cette ville est passée à un nouveau système et la connexion de ce Mac ne fonctionne plus. Déconnectez-vous dans Réglages › Compte, puis reconnectez-vous.";
 "city.error.generic" = "Un problème est survenu avec la ville. Réessayez dans un instant.";
 
 /* 0.8.2 live */

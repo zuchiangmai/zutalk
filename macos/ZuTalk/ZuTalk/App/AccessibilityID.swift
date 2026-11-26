@@ -118,6 +118,7 @@ enum AccessibilityID {
     /// 设置 › 城:登录以后
     static let citySettingsAccount = "settings.city.account"
     static let citySettingsSignOut = "settings.city.sign-out"
+    static let citySettingsLeftBehind = "settings.city.left-behind"
     static let citySettingsSpeakerNames = "settings.city.speaker-names"
     static let citySettingsMarks = "settings.city.marks"
     static let citySettingsWhen = "settings.city.when"
@@ -164,6 +165,7 @@ enum AccessibilityID {
     static let cityPickerList = "city.picker.list"
     static let cityPickerEmpty = "city.picker.empty"
     static let cityPickerRefresh = "city.picker.refresh"
+    static let cityPickerSignInAgain = "city.picker.sign-in-again"
     static let cityPickerNotFiling = "city.picker.not-filing"
     static let cityPickerCancel = "city.picker.cancel"
     static let cityPickerConfirm = "city.picker.confirm"

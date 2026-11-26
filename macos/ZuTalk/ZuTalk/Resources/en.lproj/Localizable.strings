@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "Updates are not configured";
 "updates.unavailable.message" = "This development build does not contain the public update-signing key.";
 "updates.unavailable.dismiss" = "OK";
+"updates.unreachable.title" = "Can’t Reach the Update Server";
+"updates.unreachable.message" = "This Mac can’t reach the server that hosts ZuTalk updates right now. Try again, or download the new version in your browser.";
+"updates.unreachable.retry" = "Try Again";
+"updates.unreachable.open_download" = "Open Download Page";
 "settings.updates.subtitle" = "New versions are signed and checked before they install.";
 "settings.updates.automatic" = "Automatically check for updates";
 "settings.updates.automatic_hint" = "ZuTalk checks the signed update feed periodically and notifies you when a new version is available.";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "Nothing you host on this day.";
 "city.picker.empty_never" = "The event list hasn’t been loaded yet. Click Refresh to try again.";
 "city.picker.refresh" = "Refresh";
+"city.picker.sign_in_again" = "Sign In Again";
 "city.picker.updated_format" = "Event list updated: %@";
 "city.picker.never_updated" = "Event list not loaded yet";
 "city.picker.confirm" = "Use This Event";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "This recording has no transcript yet. Once transcription finishes, open the recording’s Share… panel and retry.";
 "city.error.refused" = "The city didn’t accept this transcript. Retry once; if it’s refused again, tell a city coordinator which event it was.";
 "city.error.busy" = "This recording is already being filed. Wait for it to finish, then try again.";
+"city.error.moved" = "This city has moved to a new system, and the sign-in on this Mac no longer works. Sign out under Settings › Account, then sign in again.";
 "city.error.generic" = "Something went wrong talking to the city. Try again in a moment.";
 
 /* 0.8.2 live */

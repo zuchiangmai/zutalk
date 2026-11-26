@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "尚未配置更新";
 "updates.unavailable.message" = "此开发版本未包含更新签名公钥。";
 "updates.unavailable.dismiss" = "好";
+"updates.unreachable.title" = "连不上更新服务器";
+"updates.unreachable.message" = "这台 Mac 现在连不上存放 ZuTalk 更新的服务器。可以再试一次，或者在浏览器里下载新版本。";
+"updates.unreachable.retry" = "再试一次";
+"updates.unreachable.open_download" = "打开下载页面";
 "settings.updates.subtitle" = "新版本在安装前都会先验证签名。";
 "settings.updates.automatic" = "自动检查更新";
 "settings.updates.automatic_hint" = "ZuTalk 会定期检查经过签名的更新源，并在新版本可用时提醒你。";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "这一天没有你主办的活动。";
 "city.picker.empty_never" = "还没有读到活动列表。点「刷新」再试一次。";
 "city.picker.refresh" = "刷新";
+"city.picker.sign_in_again" = "重新登录";
 "city.picker.updated_format" = "活动列表 %@ 更新";
 "city.picker.never_updated" = "活动列表还没读到";
 "city.picker.confirm" = "归到这场";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "这场录音还没有文字稿。等转成文字以后，在这场录音的「分享…」里点重试。";
 "city.error.refused" = "城没有收下这份文字稿。重试一次；还是不行的话，把活动名告诉城的协调者。";
 "city.error.busy" = "这场录音正在交。等它交完再试。";
+"city.error.moved" = "这座城换了新系统，这台 Mac 上原来的登录不能用了。到「设置 › 账号」退出登录，再重新登录。";
 "city.error.generic" = "和城之间出了点问题。过一会儿再试。";
 
 /* 0.8.2 live */

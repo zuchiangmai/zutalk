@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "Las actualizaciones no están configuradas";
 "updates.unavailable.message" = "Esta versión de desarrollo no contiene la clave pública de firma de actualizaciones.";
 "updates.unavailable.dismiss" = "OK";
+"updates.unreachable.title" = "No se puede conectar con el servidor de actualizaciones";
+"updates.unreachable.message" = "Este Mac no puede conectar ahora con el servidor que aloja las actualizaciones de ZuTalk. Inténtalo de nuevo o descarga la nueva versión en el navegador.";
+"updates.unreachable.retry" = "Reintentar";
+"updates.unreachable.open_download" = "Abrir página de descarga";
 "settings.updates.subtitle" = "Las versiones nuevas se firman y se verifican antes de instalarse.";
 "settings.updates.automatic" = "Buscar actualizaciones automáticamente";
 "settings.updates.automatic_hint" = "ZuTalk consulta periódicamente el canal de actualizaciones firmadas y te avisa cuando hay una versión nueva disponible.";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "Ese día no organizas nada.";
 "city.picker.empty_never" = "La lista de eventos aún no se ha cargado. Pulsa Actualizar para volver a intentarlo.";
 "city.picker.refresh" = "Actualizar";
+"city.picker.sign_in_again" = "Volver a iniciar sesión";
 "city.picker.updated_format" = "Lista de eventos actualizada: %@";
 "city.picker.never_updated" = "Lista de eventos aún sin cargar";
 "city.picker.confirm" = "Usar este evento";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "Esta grabación aún no tiene transcripción. Cuando termine la transcripción, abre «Compartir…» en la grabación y vuelve a intentarlo.";
 "city.error.refused" = "La ciudad no aceptó esta transcripción. Inténtalo una vez más; si la vuelve a rechazar, dile a un coordinador de la ciudad de qué evento se trata.";
 "city.error.busy" = "Esta grabación ya se está enviando. Espera a que termine y vuelve a intentarlo.";
+"city.error.moved" = "Esta ciudad se ha pasado a un sistema nuevo y la sesión de este Mac ya no funciona. Cierra sesión en Ajustes › Cuenta y vuelve a iniciarla.";
 "city.error.generic" = "Algo falló al comunicarse con la ciudad. Inténtalo de nuevo en un momento.";
 
 /* 0.8.2 live */

@@ -29,6 +29,7 @@ enum CityText {
         "city.error.no_transcript",
         "city.error.refused",
         "city.error.busy",
+        "city.error.moved",
         "city.error.audio_not_filed",
         "city.error.audio_off",
         "city.error.audio_withheld",
@@ -43,6 +44,10 @@ enum CityText {
     /// 以后才发现,核心把它写在一份「已交」的记录上 —— 两处都要认它,所以
     /// 起个名字。
     static let eventGoneCode = "city.error.event_gone"
+
+    /// 城换了系统,这次登录用的那套接口停了。再试没有用:要人退出再登录,所以
+    /// 各处见到它都指给「设置 › 账号」,不当成一时的服务器出错。
+    static let movedCode = "city.error.moved"
 
     /// 音频这一路上,人要做的事各不一样的那几种(`FfiCityFiling.audioErrorCode`)。
     /// 城没收下:不再自己试。
@@ -88,6 +93,7 @@ enum CityText {
         case "city.error.no_transcript": return String(localized: "city.error.no_transcript")
         case "city.error.refused": return String(localized: "city.error.refused")
         case "city.error.busy": return String(localized: "city.error.busy")
+        case "city.error.moved": return String(localized: "city.error.moved")
         case "city.error.audio_not_filed": return String(localized: "city.error.audio_not_filed")
         case "city.error.audio_off": return String(localized: "city.error.audio_off")
         case "city.error.audio_withheld": return String(localized: "city.error.audio_withheld")

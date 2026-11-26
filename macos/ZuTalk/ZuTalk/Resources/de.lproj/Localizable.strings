@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "Updates sind nicht konfiguriert";
 "updates.unavailable.message" = "Dieser Entwicklungs-Build enthält nicht den öffentlichen Update-Signaturschlüssel.";
 "updates.unavailable.dismiss" = "OK";
+"updates.unreachable.title" = "Update-Server nicht erreichbar";
+"updates.unreachable.message" = "Dieser Mac erreicht den Server mit den ZuTalk-Updates gerade nicht. Versuche es erneut oder lade die neue Version im Browser.";
+"updates.unreachable.retry" = "Erneut versuchen";
+"updates.unreachable.open_download" = "Download-Seite öffnen";
 "settings.updates.subtitle" = "Neue Versionen werden vor der Installation auf ihre Signatur geprüft.";
 "settings.updates.automatic" = "Automatisch nach Updates suchen";
 "settings.updates.automatic_hint" = "ZuTalk prüft den signierten Update-Feed regelmäßig und benachrichtigt dich, wenn eine neue Version verfügbar ist.";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "An diesem Tag veranstaltest du nichts.";
 "city.picker.empty_never" = "Die Veranstaltungsliste wurde noch nicht geladen. Klicke auf „Aktualisieren“, um es erneut zu versuchen.";
 "city.picker.refresh" = "Aktualisieren";
+"city.picker.sign_in_again" = "Erneut anmelden";
 "city.picker.updated_format" = "Veranstaltungsliste aktualisiert: %@";
 "city.picker.never_updated" = "Veranstaltungsliste noch nicht geladen";
 "city.picker.confirm" = "Diese Veranstaltung wählen";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "Diese Aufnahme hat noch kein Transkript. Öffne nach Abschluss der Transkription „Teilen…“ für die Aufnahme und versuche es erneut.";
 "city.error.refused" = "Die Stadt hat dieses Transkript nicht angenommen. Versuche es noch einmal; wird es wieder abgelehnt, nenne einem Koordinator der Stadt die Veranstaltung.";
 "city.error.busy" = "Diese Aufnahme wird bereits abgelegt. Warte, bis das abgeschlossen ist, und versuche es dann erneut.";
+"city.error.moved" = "Diese Stadt ist auf ein neues System umgezogen, und die Anmeldung auf diesem Mac funktioniert nicht mehr. Melde dich unter Einstellungen › Konto ab und dann erneut an.";
 "city.error.generic" = "Bei der Verbindung mit der Stadt ist etwas schiefgegangen. Versuche es gleich noch einmal.";
 
 /* 0.8.2 live */

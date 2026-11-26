@@ -1521,6 +1521,11 @@ final class CityTextTests: XCTestCase {
             CityText.errorCode(CoreError.InternalError(message: "city.error.server")),
             "city.error.server"
         )
+        // A city that changed systems is told apart from one that stumbled.
+        XCTAssertEqual(
+            CityText.errorCode(CoreError.ValidationFailed(message: "city.error.moved")),
+            CityText.movedCode
+        )
         XCTAssertNil(CityText.errorCode(CoreError.InternalError(message: "disk full")))
         XCTAssertNil(CityText.errorCode(CocoaError(.fileNoSuchFile)))
     }

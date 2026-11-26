@@ -85,6 +85,8 @@ mod code {
     pub const NO_TRANSCRIPT: &str = "city.error.no_transcript";
     pub const REFUSED: &str = "city.error.refused";
     pub const BUSY: &str = "city.error.busy";
+    /// 这座城换了系统,这次登录用的那套接口停了:再试没有用,要重新登录。
+    pub const MOVED: &str = "city.error.moved";
     /// 这一场的文字稿还没交上去:音频挂在那段录音上,得先有它。
     pub const AUDIO_NOT_FILED: &str = "city.error.audio_not_filed";
     /// 设置里「连音频一起交」关着。
@@ -131,6 +133,21 @@ fn failure_code(error: &CityError) -> &'static str {
 
 fn city_error(error: CityError) -> CoreError {
     refuse(failure_code(&error))
+}
+
+/// 城答的这个错,是不是在说「这次登录用的那套接口已经停了」:再试多少次都
+/// 一样,只有重新登录才行。`signed_in_under_zu` 说这次登录走的是哪一套:城换成
+/// Zu 记录(Pol V0.3)以后登录的为 true,之前(V0.2)登录的为 false。
+///
+/// 说错的两头都有代价:该说没说,人对着「过一会儿再试」等不来任何东西;不该说
+/// 却说了,人白白退出再登录一次。
+///
+/// 只认最窄的一种:V0.2 的登录,城答 410。410 是城明说的「这个接口永久停用」,
+/// 换到 V0.3 的城对旧接口就是这样回的。别的都不算:404 在几处是正常的「还没
+/// 有」;回了一张看不懂的页面,可能只是路上的门户页;Zu 的登录遇到 410 是别的
+/// 东西没了(一份文件、一个房号),不是登录作废。
+fn left_behind(error: &CityError, signed_in_under_zu: bool) -> bool {
+    !signed_in_under_zu && matches!(error, CityError::Http { status: 410 })
 }
 
 fn now_epoch() -> i64 {
@@ -262,6 +279,16 @@ impl StoredAccount {
 
     fn is_resident(&self) -> bool {
         !self.roles.is_empty()
+    }
+
+    /// 用这次登录办的事没办成,给人看哪一句。城换了系统的那一种单独说:
+    /// 它不是「过一会儿再试」能好的。
+    fn failure_code(&self, error: &CityError) -> &'static str {
+        if left_behind(error, self.is_zu()) {
+            tracing::warn!(error = %error, "the city no longer serves this login");
+            return code::MOVED;
+        }
+        failure_code(error)
     }
 
     /// 协调者。建城人卸任以后还留着「建城人」的名分,所以不看那一项。
@@ -1488,7 +1515,7 @@ impl ZuTalkCore {
         // 现取一遍:主办、记录员可能刚改过,活动也可能刚被取消。
         let event = self
             .city_refresh_calendar(&hub, account)
-            .map_err(|error| failure_code(&error))?
+            .map_err(|error| account.failure_code(&error))?
             .events
             .into_iter()
             .find(|event| event.id == filing.event_id && !event.cancelled)
@@ -1597,7 +1624,7 @@ impl ZuTalkCore {
                 None,
                 None,
             )
-            .map_err(|error| failure_code(&error))?;
+            .map_err(|error| account.failure_code(&error))?;
             self.runtime
                 .block_on(async {
                     hub.zu_deliver(&built.delivery_bytes).await?.accepted()?;
@@ -1608,7 +1635,7 @@ impl ZuTalkCore {
                 })
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
             copy.take = Some(json!({
                 "city": account.city_id,
@@ -1620,7 +1647,7 @@ impl ZuTalkCore {
             (built.take_ref, built.block_ref, Vec::new())
         } else {
             let built = publish::build_take(&identity, &input, built_at)
-                .map_err(|error| failure_code(&error))?;
+                .map_err(|error| account.failure_code(&error))?;
             let as_event = CityEvent {
                 id: event.id.clone(),
                 title: event.title.clone(),
@@ -1645,7 +1672,7 @@ impl ZuTalkCore {
                 .block_on(Self::city_post(&hub, &tags, &card, &built.records))
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
             // 那条 tape/take 是签出来的第一条:留一份,交音频时要连它一起再贴。
             copy.take = built.records.first().cloned();
@@ -1791,7 +1818,7 @@ impl ZuTalkCore {
                 Some(prev_cid),
                 prev_body.get("parts"),
             )
-            .map_err(|error| failure_code(&error))?;
+            .map_err(|error| account.failure_code(&error))?;
             self.runtime
                 .block_on(async {
                     hub.zu_deliver(&built.delivery_bytes).await?.accepted()?;
@@ -1802,7 +1829,7 @@ impl ZuTalkCore {
                 })
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
             let mut next_copy = changes.copy;
             next_copy.take = Some(json!({
@@ -1826,7 +1853,7 @@ impl ZuTalkCore {
                     &[identity.id().to_string()],
                     at_ms,
                 )
-                .map_err(|error| failure_code(&error))?;
+                .map_err(|error| account.failure_code(&error))?;
                 records.push(added.rec);
             }
             let translations: Vec<(String, Vec<Translated>)> =
@@ -1839,14 +1866,14 @@ impl ZuTalkCore {
                     &translations,
                     at_ms + 1,
                 )
-                .map_err(|error| failure_code(&error))?,
+                .map_err(|error| account.failure_code(&error))?,
             );
             let card = self.city_card(&hub, &account, &identity);
             self.runtime
                 .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
             write_private_json(&sent_path, &changes.copy).map_err(|_| code::SERVER)?;
         }
@@ -1889,22 +1916,22 @@ impl ZuTalkCore {
                 &block_id,
                 now_ms(),
             )
-            .map_err(|error| failure_code(&error))?;
+            .map_err(|error| account.failure_code(&error))?;
             self.runtime
                 .block_on(async { hub.zu_deliver(&delivery).await?.accepted() })
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
         } else {
             let records = publish::build_withdraw(&identity, &block_id, now_ms())
-                .map_err(|error| failure_code(&error))?;
+                .map_err(|error| account.failure_code(&error))?;
             let card = self.city_card(&hub, &account, &identity);
             self.runtime
                 .block_on(Self::city_post(&hub, &filing.tags, &card, &records))
                 .map_err(|error| match error {
                     CityError::Refused => code::REFUSED,
-                    other => failure_code(&other),
+                    other => account.failure_code(&other),
                 })?;
         }
         if let Some(path) = self.city_sent_path(session_id) {
@@ -1982,7 +2009,7 @@ impl ZuTalkCore {
                     ],
                     false,
                 ))
-                .map_err(|error| failure_code(&error))?;
+                .map_err(|error| account.failure_code(&error))?;
             let latest = found.into_iter().max_by_key(|r| r.at).ok_or(code::SERVER)?;
             let body_map = latest.body.ok_or(code::SERVER)?;
             let state = json!({
@@ -1998,7 +2025,7 @@ impl ZuTalkCore {
         let on_tag = self
             .runtime
             .block_on(hub.tag_get(&event_tag(&clearance.event_id), &["tape/take"], &[]))
-            .map_err(|error| failure_code(&error))?;
+            .map_err(|error| account.failure_code(&error))?;
         let take = on_tag
             .into_iter()
             .find(|record| {
@@ -2026,12 +2053,12 @@ impl ZuTalkCore {
         let roles = if account.is_zu() {
             self.runtime
                 .block_on(hub.zu_city_view(&account.city_id))
-                .map_err(|error| failure_code(&error))?
+                .map_err(|error| account.failure_code(&error))?
                 .roles_of(&account.person_id)
         } else {
             self.runtime
                 .block_on(hub.roles(&account.city_id, &account.person_id))
-                .map_err(|error| failure_code(&error))?
+                .map_err(|error| account.failure_code(&error))?
         };
         if roles.is_empty() {
             return Err(code::AUDIO_REFUSED);
@@ -2771,7 +2798,7 @@ impl ZuTalkCore {
         if refresh {
             let hub = self.city_hub(&account.server, REQUEST_TIMEOUT)?;
             self.city_refresh_calendar(&hub, &account)
-                .map_err(city_error)?;
+                .map_err(|error| refuse(account.failure_code(&error)))?;
         }
         let stored: StoredCalendar = read_json(&self.city_path(CALENDAR_FILE)).unwrap_or_default();
         Ok(FfiCityCalendar {
@@ -3881,10 +3908,15 @@ mod tests {
 
     /// 登录到假城,不走连设备那一套。
     fn sign_in(core: &ZuTalkCore, city: &FakeCity, roles: &[&str]) {
+        sign_in_at(core, &city.base, roles);
+    }
+
+    /// 同上,只给网址:登录的是一座不照常回话的城时用。
+    fn sign_in_at(core: &ZuTalkCore, base: &str, roles: &[&str]) {
         let identity = test_identity();
         let card = vec![identity.inception().clone()];
         core.city_keep_login(
-            &city.base,
+            base,
             &DoorCity {
                 id: CITY.to_string(),
                 name: "Harbour Town".to_string(),
@@ -3989,6 +4021,90 @@ mod tests {
             300_000,
             "0123456789".into(),
         )
+    }
+
+    /// 一座不管问什么都回同一个状态码的城。
+    fn city_answering(status: u16) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // 这里只有不带正文的读:读到空行就是问完了。
+                    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let reply = r#"{"err":"gone"}"#;
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()); // dropped: the asker may have hung up
+                });
+            }
+        });
+        base
+    }
+
+    fn calendar_refusal(core: &ZuTalkCore) -> String {
+        match core.city_calendar(true) {
+            Err(CoreError::ValidationFailed { message }) => message,
+            other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// 城换了系统,旧接口回 410:用旧登录的人要被告知重新登录,而不是「过一会儿
+    /// 再试」。2026-11 清迈的城换到 V0.3 以后,0.8.5–0.8.7 的活动列表就这样停在
+    /// 了换之前的那一天。
+    #[test]
+    fn a_city_that_moved_on_tells_an_old_login_to_sign_in_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_in(&temp);
+        sign_in_at(&core, &city_answering(410), &["resident"]);
+
+        assert_eq!(calendar_refusal(&core), code::MOVED);
+        // 存着的那一份不受影响:读不到新的,旧的照样给。
+        assert!(core.city_calendar(false).is_ok());
+    }
+
+    /// 服务器一时出错不是换了系统:那一种过一会儿真的会好。
+    #[test]
+    fn a_city_that_stumbles_is_not_taken_for_one_that_moved() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_in(&temp);
+        sign_in_at(&core, &city_answering(500), &["resident"]);
+
+        assert_eq!(calendar_refusal(&core), code::SERVER);
+    }
+
+    /// 没连上说明不了城那头的任何事,哪一种登录都一样。
+    #[test]
+    fn a_city_that_cannot_be_reached_is_never_said_to_have_moved() {
+        for signed_in_under_zu in [false, true] {
+            assert!(!left_behind(&CityError::Offline, signed_in_under_zu));
+        }
+    }
+
+    /// 只认最窄的一种:别的回话再像,也不叫人白白重新登录一次。
+    #[test]
+    fn only_an_old_login_met_with_gone_is_left_behind() {
+        let gone = CityError::Http { status: 410 };
+        assert!(left_behind(&gone, false));
+        // Zu 的登录遇到 410 是别的东西没了,不是登录作废。
+        assert!(!left_behind(&gone, true));
+        for other in [
+            CityError::Http { status: 404 },
+            CityError::Http { status: 500 },
+            CityError::Protocol("a page, not an answer".to_string()),
+            CityError::Refused,
+        ] {
+            assert!(!left_behind(&other, false), "{other}");
+        }
     }
 
     fn refusal(outcome: Result<FfiCityFiling, CoreError>) -> String {

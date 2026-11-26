@@ -248,6 +248,19 @@ struct CityEventPickerSheet: View {
                 }
                 .accessibilityIdentifier(AccessibilityID.cityPickerRefresh)
             }
+            if city.loginLeftBehind {
+                // 城换了系统:刷新多少次都读不到新的。出路只有重新登录,摆成一颗。
+                // 警示记号在旁边那颗时刻上已经有了,图标自己也带着,这里不再加。
+                ActionPill(
+                    String(localized: "city.picker.sign_in_again"),
+                    systemImage: "person.crop.circle.badge.exclamationmark",
+                    help: CityText.message(forCode: CityText.movedCode)
+                ) {
+                    dismiss()
+                    MainNavigationStore.shared.openSettings(section: .account)
+                }
+                .accessibilityIdentifier(AccessibilityID.cityPickerSignInAgain)
+            }
             Spacer(minLength: Spacing.sm)
             ActionPill(
                 String(localized: "home.card.dont_file"),

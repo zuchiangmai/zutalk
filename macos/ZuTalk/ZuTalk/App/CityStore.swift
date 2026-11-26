@@ -101,6 +101,9 @@ final class CityStore: ObservableObject {
     @Published private(set) var calendar = FfiCityCalendar(events: [], fetchedAtEpoch: 0)
     @Published private(set) var refreshingCalendar = false
     @Published private(set) var calendarProblem: String?
+    /// 读活动时城答「这套接口停了」:这次登录再也读不到新的,要人重新登录。
+    /// 读成一次、重新登录或退出以后清掉;别的错(断网、服务器一时出错)不动它。
+    @Published private(set) var loginLeftBehind = false
     /// 登录的人能放东西的频道,以上次读到的为准。
     @Published private(set) var channels: [FfiCityChannel] = []
     /// 各主题选的频道;没选的主题不在里面。
@@ -387,6 +390,7 @@ final class CityStore: ObservableObject {
         loginGeneration += 1
         login = .signedOut
         loginProblem = nil
+        loginLeftBehind = false
         self.account = account
         loadLocalState()
         refreshCalendar()
@@ -413,6 +417,7 @@ final class CityStore: ObservableObject {
         account = nil
         calendar = FfiCityCalendar(events: [], fetchedAtEpoch: 0)
         calendarProblem = nil
+        loginLeftBehind = false
         channels = []
         topicChannels = [:]
         nextChoice = .automatic
@@ -486,12 +491,14 @@ final class CityStore: ObservableObject {
             case .success(let fresh):
                 calendar = fresh
                 calendarProblem = nil
+                loginLeftBehind = false
                 // 频道跟着活动列表一起读回来。
                 channels = core.cityChannels()
                 // 交上去的那几场,活动还在不在,核心照这份新列表重新对。
                 reloadFilings()
             case .failure(let error):
                 calendarProblem = CityText.describe(error)
+                if CityText.errorCode(error) == CityText.movedCode { loginLeftBehind = true }
                 noteFailure(error)
             }
         }

@@ -528,6 +528,10 @@
 "updates.unavailable.title" = "업데이트가 아직 설정되지 않았어요";
 "updates.unavailable.message" = "이 개발 빌드에는 업데이트 서명 공개 키가 들어 있지 않아요.";
 "updates.unavailable.dismiss" = "확인";
+"updates.unreachable.title" = "업데이트 서버에 연결할 수 없어요";
+"updates.unreachable.message" = "이 Mac이 지금 ZuTalk 업데이트 서버에 연결하지 못하고 있어요. 다시 시도하거나 브라우저에서 새 버전을 내려받으세요.";
+"updates.unreachable.retry" = "다시 시도";
+"updates.unreachable.open_download" = "다운로드 페이지 열기";
 "settings.updates.subtitle" = "새 버전은 설치하기 전에 항상 서명을 확인해요.";
 "settings.updates.automatic" = "자동으로 업데이트 확인";
 "settings.updates.automatic_hint" = "ZuTalk가 서명된 업데이트 피드를 주기적으로 확인하고, 새 버전이 나오면 알려 드려요.";
@@ -1507,6 +1511,7 @@
 "city.picker.empty_mine" = "이날 내가 주최하는 이벤트가 없어요.";
 "city.picker.empty_never" = "이벤트 목록을 아직 불러오지 못했어요. ‘새로 고침’을 눌러 다시 시도하세요.";
 "city.picker.refresh" = "새로 고침";
+"city.picker.sign_in_again" = "다시 로그인";
 "city.picker.updated_format" = "이벤트 목록 · %@ 업데이트";
 "city.picker.never_updated" = "이벤트 목록을 아직 불러오지 않음";
 "city.picker.confirm" = "이 이벤트로 지정";
@@ -1562,6 +1567,7 @@
 "city.error.no_transcript" = "이 녹음에는 아직 스크립트가 없어요. 텍스트 변환이 끝나면 녹음의 ‘공유…’에서 다시 시도하세요.";
 "city.error.refused" = "도시에서 이 스크립트를 받아 주지 않았어요. 한 번 더 시도해 보고, 그래도 안 되면 이벤트 이름을 도시의 코디네이터에게 알려 주세요.";
 "city.error.busy" = "이 녹음은 지금 제출하는 중이에요. 끝난 뒤 다시 시도하세요.";
+"city.error.moved" = "이 도시가 새 시스템으로 옮겨서 이 Mac의 로그인을 더 쓸 수 없어요. ‘설정 › 계정’에서 로그아웃한 뒤 다시 로그인하세요.";
 "city.error.generic" = "도시와 주고받는 중에 문제가 생겼어요. 잠시 뒤 다시 시도하세요.";
 
 /* 0.8.2 live */

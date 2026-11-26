@@ -24,7 +24,9 @@ struct CityIdentitySection: View {
         Group {
             if let account = city.account {
                 SettingsGroup(title: String(localized: "city.identity.word")) {
-                    CityAccountCard(account: account) { confirmingSignOut = true }
+                    CityAccountCard(account: account, leftBehind: city.loginLeftBehind) {
+                        confirmingSignOut = true
+                    }
                 }
             } else {
                 SettingsGroup(title: String(localized: "city.identity.word")) {
@@ -51,6 +53,8 @@ struct CityIdentitySection: View {
 /// 登录以后的那一行:是谁、哪座城、退出登录。
 struct CityAccountCard: View {
     let account: FfiCityAccount
+    /// 城换了系统,这次登录用不了了:底下多一行说怎么办。
+    var leftBehind = false
     let onSignOut: () -> Void
 
     var body: some View {
@@ -91,6 +95,23 @@ struct CityAccountCard: View {
                         action: onSignOut
                     )
                     .accessibilityIdentifier(AccessibilityID.citySettingsSignOut)
+                }
+            }
+            if leftBehind {
+                // 和登录卡片上「没成的原因」同一个样子:这是一件要人动手的事。
+                SettingsRowDivider()
+                SettingsFullRow {
+                    Label {
+                        Text(CityText.message(forCode: CityText.movedCode))
+                            .foregroundColor(.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.error)
+                    }
+                    .font(Font.sans12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier(AccessibilityID.citySettingsLeftBehind)
                 }
             }
         }

@@ -4,6 +4,9 @@
 // aborted Sparkle cycles are worth retrying (only genuine network failures —
 // signature, policy, and user-cancelled aborts must not), and when a wake or a
 // reconnect is allowed to start another check against the release CDN.
+//
+// And for the one decision about a check the user started: a network failure
+// is retried once without a word, then explained with the download page.
 
 import Sparkle
 import XCTest
@@ -130,6 +133,90 @@ final class SoftwareUpdateRetryTests: XCTestCase {
     func testUserWhoTurnedOffAutomaticChecksIsNeverOverridden() {
         XCTAssertFalse(
             shouldCheck(automatic: false, secondsSinceLastCheck: nil)
+        )
+    }
+
+    // MARK: - A check the user started
+
+    /// What 0.8.5 met on 2026-11-26: the feed's host dropped the TLS
+    /// handshake, twice, and all the app could say was "try again later".
+    private var droppedHandshake: NSError {
+        sparkleError(
+            .downloadError,
+            underlying: NSError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed)
+        )
+    }
+
+    func testUserCheckThatFailedOnTheNetworkIsRetriedOnceWithoutAWord() {
+        XCTAssertEqual(SoftwareUpdateController.maximumUserCheckRetries, 1)
+        XCTAssertEqual(
+            SoftwareUpdateController.userCheckFailure(
+                droppedHandshake,
+                retriesRemaining: SoftwareUpdateController.maximumUserCheckRetries,
+                hasDownloadPage: true
+            ),
+            .retryQuietly
+        )
+    }
+
+    func testUserCheckThatFailedAgainOffersTheDownloadPage() {
+        XCTAssertEqual(
+            SoftwareUpdateController.userCheckFailure(
+                droppedHandshake,
+                retriesRemaining: 0,
+                hasDownloadPage: true
+            ),
+            .offerDownload
+        )
+    }
+
+    /// With no page to offer, the app's alert would have nothing Sparkle's
+    /// lacks.
+    func testUserCheckWithNoDownloadPageKeepsSparklesAlert() {
+        XCTAssertEqual(
+            SoftwareUpdateController.userCheckFailure(
+                droppedHandshake,
+                retriesRemaining: 0,
+                hasDownloadPage: false
+            ),
+            .standardAlert
+        )
+    }
+
+    /// A bad signature is not something a second try or a browser fixes, and
+    /// must never be routed round.
+    func testUserCheckThatFailedOffTheNetworkKeepsSparklesAlert() {
+        for retriesRemaining in [0, 1] {
+            XCTAssertEqual(
+                SoftwareUpdateController.userCheckFailure(
+                    sparkleError(.signatureError),
+                    retriesRemaining: retriesRemaining,
+                    hasDownloadPage: true
+                ),
+                .standardAlert
+            )
+        }
+    }
+
+    func testDownloadPageIsTheReleasePageTheFeedHangsFrom() {
+        XCTAssertEqual(
+            SoftwareUpdateController.downloadPageURL(
+                feedURL: "https://github.com/4seas-community/ZuTalk/releases/latest/download/appcast.xml"
+            )?.absoluteString,
+            "https://github.com/4seas-community/ZuTalk/releases/latest"
+        )
+    }
+
+    func testFeedThatIsNotAReleaseAssetHasNoDownloadPage() {
+        XCTAssertNil(SoftwareUpdateController.downloadPageURL(feedURL: nil))
+        XCTAssertNil(SoftwareUpdateController.downloadPageURL(feedURL: "$(SPARKLE_FEED_URL)"))
+        XCTAssertNil(
+            SoftwareUpdateController.downloadPageURL(feedURL: "https://example.org/appcast.xml")
+        )
+        XCTAssertNil(
+            SoftwareUpdateController.downloadPageURL(
+                feedURL: "http://example.org/releases/latest/download/appcast.xml"
+            )
         )
     }
 }
