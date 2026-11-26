@@ -114,3 +114,10 @@
 - **`settings.json` 与日志的隐私防线要靠数据结构本身兜底，而不是事后过滤。** 自定义主题 id 强制使用 32 位随机十六进制（绝不取主题名），`Topic.source_file` 在 `normalize` 里强制剥离目录仅留基名，`TopicContext` 手写脱敏 `Debug` 只打计数与字符数——这样即便 `Setup.topics` 落盘 `settings.json` 或代码误打调试日志，也按构造不泄任何主题名、文件路径或背景正文。
 - **后台 AI 标题必须与精修/交城物理隔离，且落盘前必须重读最新 `About` 复核。** `Work` 为标题单独设 `TITLE_AT_ONCE_JOBS = 1` 信号量（不占 `Work.bg`），即使 OpenRouter 慢或卡住也绝不堵住精修、交城或 L3 查询；写回经顺序 `desk` 的 `Job::ApplyTitles` 二次核对 `shelf.about(&id)`，从根上消除了「AI 运行中被用户手改标题覆盖」和「录音已删又被标题写回复活」两类竞态。
 - **额度键被异步转写 403 拒绝时，把自动起标题挂在精修终态失败分支上就能无感兜底。** 沿 `DECISIONS.md` #4 保持现场草稿并给出 `keys.async_refused` 清晰提示，同时只要 OpenRouter 钥匙可用，草稿依然会自动获得人话标题与可搜索的话题词，避免只用额度的人留下满屏「未命名录音」。
+
+## P7 里学到的（2026-11）
+
+- **0.8 交接文件必须按不受信任输入设防：校验路径成分、限制静音上限并分批流式封盘。** 损坏或恶意的 `index.json` / `audio.chunks` 若含 `..` 或超大 `t_ms`，未校验的路径会越出旧目录，一次性 `pcm.resize(gap, 0)` 会瞬间 OOM，空 `chunks` 会把时长静默覆成 0 ms；用纯函数 `safe_recording_name` / `safe_chunk_path`、`MIGRATE_MAX_AUDIO_MS = 12 h` 与 `MIGRATE_SILENCE_CHUNK_SAMPLES = 160_000` 分批写入，再把 `moved.json` 改为 `.tmp` + `sync_all` + `rename` 原子写盘，就把单条损坏彻底隔离在单条失败码里。
+- **后台迁移与身份切换存在天然竞态，必须绑定目标 DID 并对 `State.unmoved` 封顶。** `job.move` 在后台线程跑完时，用户可能已经登出或切了身份；`SyncKind::Migrated { by }` 与 `Msg::Moved(by, res)` 核对当前活跃身份、登出与切换时清空 `State.unmoved` 并用 `cap_unmoved` 封顶 32 行，既防跨身份污染索引和小状态，也守住 I8 有界小状态契约。
+- **把版本对齐、图标存在性、Capabilities/CSP 最小权限与防硬编码密钥写成确定性测试，比发布前靠肉眼核对可靠得多。** `app/tests/updates.rs` 直接红灯拦出了 `ui/package.json` 缺失 `"version": "0.9.0"` 的漂移；以后每次升版或改 Tauri 配置，`check.sh` 都会自动守住全部 4 处版本号、图标、最小权限和零硬编码密钥/个人邮箱。
+- **把旧版 0.8.6 交接命令、服务器 16 项环境变量与 8 小时/3 系统真机清单全部收拢在 `docs/RELEASE.md` 一处，不另起平行文档。** 环境变量直接对着 `server/src/main.rs` 逐行核对（实际 16 项而非口头记的 15 项），并明确划清「已在沙盒自动化实测」与「须负责人真机动手」的边界，绝不夸大。

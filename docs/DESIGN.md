@@ -208,12 +208,13 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 
 - **由 0.8 交接，新版不读旧格式。** 0.8 的文字在 SQLite（15 个 schema 版本）和 Loro 文档里（整场转写的订正、录音笔记只在 Loro）。新版直接读要加 SQLite 和 Loro 两个依赖，还要把旧版怎么叠订正、怎么绑译文、怎么切整场转写重写一遍。所以最后一个 0.8（0.8.6）把每条录音写成新版记录的正文（`handover/`），新版签名即可；音频不进交接，新版按交接给的位置和钥匙名去原处读密文。新版不加依赖。
 - **越不过交接。** 新版在 appcast 的 `zu` 频道上，0.8.6（构建号 66）交接完才允许这个频道，所以自动更新到新版（构建号 67 起）的人都已交接。手动装了新版、跳过 0.8.6 的，新版说 `migrate.missing`，不猜。
-- **一条录音整条搬或不搬。** id 由旧 id 定（和本机造的 id 同形），先封音频，再写各次转写、说话人、笔记，最后写 `talk/recording`；书架上有这条记录就是搬过了，删了也不再搬。断在半路，下次从头来。没搬成的以代码列在 `State.unmoved`，进度在 `State.moving`。
+- **一条录音整条搬或不搬。** id 由旧 id 定（和本机造的 id 同形），先封音频，再写各次转写、说话人、笔记，最后写 `talk/recording`；书架上有这条记录就是搬过了，删了也不再搬。断在半路，下次从头来。没搬成的以代码列在 `State.unmoved`（P7 加固：`cap_unmoved` 封顶 `STATE_UNMOVED_MAX_ROWS = 32` 守住 I8，切身份或登出立即清空并丢弃陈旧 `Msg::Moved`），进度在 `Progress.move_old`。
+- **边界防护与可观测（P7-01 加固）。** 交接文件名与音频块路径经 `safe_recording_name` / `safe_chunk_path` 校验防止越目录读取；空 `audio.chunks` 与超过 `MIGRATE_MAX_AUDIO_MS`（12 小时）的 `t_ms` 直接拒收返回 `migrate.audio`，正常块间静音按 `MIGRATE_SILENCE_CHUNK_SAMPLES = 160_000`（10 秒）分批 `O(1)` 封盘防 OOM；`moved.json` 经 `.tmp` + `sync_all` + `rename` 原子落盘；`SyncKind::Migrated { by }` 核对当前活跃身份后再 `reconcile` 与失效视图；每次迁移结束发零隐私结构化事件 `migrate.done(moved, already, skipped, code, ms)`。
 - **不替本人送出声音。** 搬来的草稿 `About.moved`，不算欠着整场转写：0.8 里整场转写要本人点了才写。也因此，照 §5.8 的规则，它的音频一直留到本人销毁。
-- **只搬给登录的人。** 没登录时不搬 0.8 资料库（避免把 `moved.json` 锁死在临时本机身份上）；第一次以登录身份搬时记下 DID（`moved.json`），换了身份登录不再搬。P4 做领回时再一并定是否允许先搬到本机身份再领回（§5.15）。
+- **只搬给登录的人。** 没登录时不搬 0.8 资料库（避免把 `moved.json` 锁死在临时本机身份上）；第一次以登录身份搬时记下 DID（`moved.json`），换了身份登录不再搬。
 - 现场草稿是第 0 次转写（订正在 `via` 里记为 `hand`），0.8 的整场转写是第 1 次并成为录音的文字；标记的笔记接在录音笔记后面。回收站里的录音、笔记本本身、不属于录音的笔记、术语表、分享、城的记录都不搬。
 
-测试：`core/tests/migrate.rs`（夹具的音频和钥匙由旧仓库代码写成）、`core/tests/app.rs` 的 `the_old_library_moves_in_on_its_own_and_nothing_of_it_leaves`。
+测试：`core/tests/migrate.rs`（夹具的音频和钥匙由旧仓库代码写成，含路径/静音边界与 `MoveReport` 计数测试）、`core/tests/migrate_scale.rs`（175 条多形态合成 0.8 资料库 + 6 条损坏条目 + 本机 `did:key` 领回 + 旧 `talk/term`→`always` 迁移 + 3 轮启动幂等防复活 + 真实落盘隐私审计 + 登出防串台）、`core/tests/app.rs` 的 `the_old_library_moves_in_on_its_own_and_nothing_of_it_leaves`。
 
 ### 5.13 运行时（P1）
 
@@ -229,8 +230,8 @@ P1 已将 `PLAN.md` §4 与 `docs/build/phases/P1.md` §3 落地：现场路径�
 ### 5.14 显式与可观测
 
 - **日志**：写到 `<数据目录>/logs/zutalk.jsonl`（服务器为 `<ZUTALK_DATA>/logs/zutalk-server.jsonl`），每行平铺 JSON（`t_ms`、`seq`、`level`、`component`、`event` 加事件字段），按 8 MB 轮换、留 5 个；发事件的人走 4096 行有界队列，从不等磁盘。
-- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节（含笔记、搜索词、精修、身份、主持、知识库与 AI 标题/话题）与自检包。全部 83 个事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`ui.sh`、`pending.sh` 共 10 个规则脚本在门禁里零欠账守着。
-- **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`；索引重建看 `index.open` 与 `index.sync`；查询变慢看 `query.slow` 与 `query.done`；精修失败看 `refine.state` 与 `write.skipped`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
+- **防泄漏与规矩守护**：字段类型由 `Plain`（数、布尔、`&'static str`、`Id`）在编译期把关，运行期 `is_plain` 二次把关，并由隐私测试检查真实落盘字节（含笔记、搜索词、精修、身份、主持、知识库、AI 标题/话题与 175 条 0.8 迁移）与自检包。全部 **84 个**事件定义在 `docs/EVENTS.md`，由 5 个显式规则脚本（`events.sh`、`numbers.sh`、`bounded.sh`、`spawn.sh`、`dropped.sh`）加上 `layers.sh`、`hub.sh`、`shell.sh`、`ui.sh`、`pending.sh`（终版锁死封禁全部 `ignore = "P[0-9]"`）共 10 个规则脚本在门禁里零欠账守着。
+- **出了事先看什么**：字幕停了看 `recording.start` 的 `captions`、`judge.verdict`、`part.gave_up` 与 `lane.open`；录音自己结束看 `recording.end` 与最后一条 `recording.phase`；界面卡了看 `shell.main_thread.stalled` 与 `ui.frame.gap`；命令没反应看 `command.refused`、`command.done` 与 `job.start`/`job.done`；索引重建看 `index.open` 与 `index.sync`；查询变慢看 `query.slow` 与 `query.done`；精修失败看 `refine.state` 与 `write.skipped`；0.8 迁移异常看 `migrate.done` 与 `State.unmoved`。停滞发生时按 `snap` 号拉出整组 `stall.snapshot`；要交回现场时发 `Command::Diagnose` 生成自检包。
 
 ### 5.15 不登录也能录
 
@@ -390,8 +391,8 @@ Zu 内核另计：1,550 / 1,550（为造 `did:zu` 从 1,500 调高，负责人�
 6. 旧服务退役了邀请、服务器还没写进账本就崩溃，这份时间就丢了：再认领只得到 `claimed`。窗口是一次 fsync。
 7. 留多久的规则只在启动时和写完整场转写后跑：一台开着几周、期间没写过转写的机器，音频会比选的天数留得久。搬运写进来的录音也等下一次清扫。
 8. 真的目录（`plc.zuzalu.ink`）、真的旧服务和 Sparkle 更新都没有跑过；ad-hoc 签名的新版作为旧版的更新装上，要在真机上验。Tauri 更新插件在真机上替换应用、重启，也没有跑过。
-9. 0.8 那边的补丁没有编译，也没有对真数据跑过；Sparkle 频道挡住越过交接的更新，没有在真机上验。新版这边只用合成的交接验过，175 条的真库没有跑过。
+9. 0.8 那边的补丁尚未在 `/Users/kant/Zuzalu/zulangue` 里编译运行，也没有对真实 175 条旧库副本跑过；Sparkle `zu` 频道挡住越过交接的更新尚未在真机上验。新版接收侧已在 `core/tests/migrate_scale.rs` 用 175 条多形态合成交接 + 6 条损坏条目 + 本机领回 + 3 轮启动与真实落盘隐私审计跑通，但真实 175 条旧库副本上的 0.8.6 交接仍待负责人按 `RELEASE.md` §4 验证。
 10. 真的城没有收过：交城只对本机端口上的替身跑过（§5.11）。
-11. 真机 1 小时实录没有跑过（出口 E9，待负责人按 `docs/build/reports/P1-26-close.md` 清单在 macOS / Windows / Linux 上执行）。
-12. 175 条真库搬运（P7）尚未在真数据副本上跑过；I2 与大数据规模的 1,000 条录音索引查询与 10 小时（6,400 行 × 2 版）分块/对比已在 P2 `core/tests/view_scale.rs` 中实测通过（全部 ≤ 13 ms，并发查询下直播零 `Stalled`）。
+11. 真机 1 小时及 8 小时实录没有跑过（待负责人按 `RELEASE.md` §6 与 `docs/build/reports/P7-03-close.md` 清单在 macOS / Windows / Linux 上执行）。
+12. 175 条**合成** 0.8 全链路迁移已在 P7 `core/tests/migrate_scale.rs` 中实测通过（含本机领回、旧词表迁移、全查询、3 轮启动防复活与真实落盘零泄漏），1,000 条录音索引查询与 10 小时（6,400 行 × 2 版）分块/对比已在 P2 `core/tests/view_scale.rs` 中实测通过（全部 ≤ 13 ms，并发查询下直播零 `Stalled`）；尚未在真实 175 条 0.8 数据副本上跑 0.8.6 交接补丁。
 13. 本机身份（`did:key`）签出的记录没有交给任何真的 Zu 主机试过：照规范它们会拒绝，仓库里只对本机服务器替身测过。

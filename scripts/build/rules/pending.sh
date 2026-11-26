@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# No test may stay ignored for a P1, P2, P3, P4, P5, or P6 task once those phases close
-# (P1.md §1 E7, P2.md §1 E7, P3.md §1 E7, P4.md §1 E6, P5.md §1 E6, P6.md §1 E6).
-# Ignores pointing to later phases (e.g. `ignore = "P7...`) and manual hardware tests are allowed.
+# All P1–P7 build phases are closed: no phase-deferred ignored test (`ignore = "P[0-9]...`)
+# is allowed anywhere in the repository (P7.md §1 E5, §3.4).
+# Only explicit manual hardware / live cloud API key tests may remain `#[ignore = "..."]`.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
-found=$(grep -rnE 'ignore = "P(1-|2|3|4|5|6)' core app server zu ui || true)
+found=$(grep -rnE 'ignore = "P[0-9]' core app server zu ui || true)
 if [ -n "$found" ]; then
   printf '%s\n' "$found"
-  echo "  pending P1/P2/P3/P4/P5/P6 ignored tests are not allowed after P1/P2/P3/P4/P5/P6 close"
+  echo "  pending phase-deferred ignored tests (P0–P9) are not allowed"
   exit 1
 fi
