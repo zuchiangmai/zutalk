@@ -110,10 +110,9 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     assert_eq!(
         tracker.diff(show_stage.clone()),
         vec![
-            CaptionWindowOp::SetFullscreen(true),
             CaptionWindowOp::SetIgnoreCursorEvents(false),
             CaptionWindowOp::Show,
-            CaptionWindowOp::SetAlwaysOnTop(false),
+            CaptionWindowOp::SetFullscreen(true),
         ]
     );
     assert_eq!(

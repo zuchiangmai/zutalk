@@ -16,11 +16,15 @@ import {
   setOverlay,
   stateSource,
   statsSource,
+  t,
   toggleOverlay,
   useQuery,
   useSource,
   waterSource,
 } from '../bus';
+import { activeStyle, updateActiveStyle } from '../captions/style';
+import { Icon } from '../ds/icons';
+import { Pill } from '../ds/primitives';
 import { CaptionScenesPage } from '../pages/CaptionScenesPanel';
 import { HomePage } from '../pages/HomePage';
 import { HostPage } from '../pages/HostPage';
@@ -95,6 +99,20 @@ export function Shell() {
   }, []);
 
   const liveElapsedMs = session ? Math.max(0, nowMs - session.started) : 0;
+  const captionsClickThrough = Boolean(
+    state?.captions && activeStyle(state.setup.caption).click_through,
+  );
+
+  const unlockCaptionsClickThrough = () => {
+    if (!state) return;
+    void send({
+      do: 'Setup',
+      setup: {
+        ...state.setup,
+        caption: updateActiveStyle(state.setup.caption, { click_through: false }),
+      },
+    });
+  };
 
   return (
     <div className="zt zt-shell" data-theme={theme} data-page={route.page}>
@@ -107,6 +125,7 @@ export function Shell() {
         route={route}
         me={state?.me ?? null}
         handle={state?.handle ?? null}
+        hasUpdate={Boolean(state?.update)}
         nowMs={nowMs}
         onGo={go}
         onOpenSearch={() => setPaletteOpen(true)}
@@ -114,6 +133,16 @@ export function Shell() {
       />
 
       <main className="main">
+        {captionsClickThrough && (
+          <div className="pass-unlock-bar" role="status">
+            <Icon name="info" size="s" />
+            <span>{t('captions.pass_hint')}</span>
+            <span className="spacer" />
+            <Pill active onClick={unlockCaptionsClickThrough}>
+              {t('captions.flag.pass')}
+            </Pill>
+          </div>
+        )}
         {route.page !== 'live' &&
           route.page !== 'host' &&
           route.page !== 'outbound' &&

@@ -66,6 +66,7 @@ export type SidebarProps = {
   route: Route;
   me: string | null;
   handle?: string | null;
+  hasUpdate?: boolean;
   nowMs?: number;
   onGo: (route: Route) => void;
   onOpenSearch: () => void;
@@ -81,6 +82,7 @@ export function Sidebar({
   route,
   me,
   handle = null,
+  hasUpdate = false,
   nowMs = Date.now(),
   onGo,
   onOpenSearch,
@@ -154,7 +156,9 @@ export function Sidebar({
                   className={`row${active ? ' on' : ''}`}
                   onClick={() => onGo({ page: 'reader', id: r.id })}
                 >
-                  <span className="row-t">{r.title || t('untitled')}</span>
+                  <span className="row-t" title={r.title || r.preview || t('untitled')}>
+                    {r.title || r.preview || t('untitled')}
+                  </span>
                   <span className="row-m">
                     <span className="num">{clock(r.length_ms)}</span>
                     <span>{r.spoken.map((l) => langName(l, l)).join(' · ')}</span>
@@ -211,17 +215,57 @@ export function Sidebar({
       </nav>
 
       <div className="side-foot">
+        <div className="side-foot-nav">
+          <button
+            type="button"
+            className={`side-foot-btn${route.page === 'settings' ? ' on' : ''}`}
+            aria-label={t('nav.settings')}
+            aria-current={route.page === 'settings' ? 'page' : undefined}
+            onClick={() => onGo({ page: 'settings' })}
+          >
+            <Icon name="settings" size="s" />
+            <span className="side-foot-label">{t('nav.settings')}</span>
+            {hasUpdate && <span className="side-update-dot" aria-hidden="true" />}
+          </button>
+          <button
+            type="button"
+            className={`side-foot-icon${route.page === 'captions' ? ' on' : ''}`}
+            aria-label={t('captions.settings')}
+            title={t('captions.settings')}
+            aria-current={route.page === 'captions' ? 'page' : undefined}
+            onClick={() => onGo({ page: 'captions' })}
+          >
+            <Icon name="captions" size="s" />
+          </button>
+          <button
+            type="button"
+            className={`side-foot-icon${route.page === 'knowledge' ? ' on' : ''}`}
+            aria-label={t('knowledge.manage')}
+            title={t('knowledge.manage')}
+            aria-current={route.page === 'knowledge' ? 'page' : undefined}
+            onClick={() => onGo({ page: 'knowledge' })}
+          >
+            <Icon name="book" size="s" />
+          </button>
+        </div>
+
         {me ? (
-          <>
+          <button
+            type="button"
+            className={`side-account${route.page === 'settings' ? ' on' : ''}`}
+            title={identityLabel}
+            onClick={() => onGo({ page: 'settings' })}
+          >
             <span className="avatar" aria-hidden="true">
               {avatarChar}
             </span>
             <span className={`me${handle ? ' handle' : ''}`}>{identityLabel}</span>
-          </>
+            <Icon name="chevron-right" size="s" />
+          </button>
         ) : (
           <button
             type="button"
-            className="side-id"
+            className="side-account local"
             aria-label={t('identity.local')}
             onClick={onOpenIdentity}
           >
@@ -229,16 +273,9 @@ export function Sidebar({
               {avatarChar}
             </span>
             <span className="me">{identityLabel}</span>
+            <span className="side-signin-chip">{t('identity.ask.login')}</span>
           </button>
         )}
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label={t('nav.settings')}
-          onClick={() => onGo({ page: 'settings' })}
-        >
-          <Icon name="settings" />
-        </button>
       </div>
     </aside>
   );

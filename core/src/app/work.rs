@@ -2845,9 +2845,16 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Ok(json) => match serde_json::from_slice::<Setup>(&json) {
             Ok(mut setup) => {
                 if setup.defaults_v < SETUP_DEFAULTS_VERSION {
-                    // Pre-0.9.1 defaults left `self_view.always_on_top` false; upgrade once so
-                    // floating captions stay on top by default without overriding future toggles.
-                    setup.caption.scenes.self_view.always_on_top = true;
+                    if setup.defaults_v < 1 {
+                        // Pre-0.9.1 defaults left `self_view.always_on_top` false; upgrade once so
+                        // floating captions stay on top by default without overriding future toggles.
+                        setup.caption.scenes.self_view.always_on_top = true;
+                    }
+                    // Pre-0.9.2 could leave `click_through: true` trapped on a scene, making the
+                    // captions window completely unclickable and appearing frozen.
+                    setup.caption.scenes.self_view.click_through = false;
+                    setup.caption.scenes.band.click_through = false;
+                    setup.caption.scenes.stage.click_through = false;
                     setup.defaults_v = SETUP_DEFAULTS_VERSION;
                 }
                 setup.caption = setup.caption.normalized();

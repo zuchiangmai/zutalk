@@ -162,7 +162,7 @@ export function LibraryView({
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
       <header className="top" style={{ padding: '0 28px', gap: 10 }}>
         <h1 className="read" style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>
           {t('nav.library')}

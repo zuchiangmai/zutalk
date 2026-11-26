@@ -19,7 +19,8 @@ zutalk-core = { path = "../core" }
 zutalk-log = { path = "../log" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSScreen"] }
 
 [dev-dependencies]
 base64 = "0.23.1"

@@ -329,8 +329,9 @@ impl CaptionPrefs {
 }
 
 /// Current defaults schema version persisted in `settings.json`.
-/// `0` denotes pre-0.9.1 files where `self_view.always_on_top` defaulted to `false`.
-pub const SETUP_DEFAULTS_VERSION: u8 = 1;
+/// `0` denotes pre-0.9.1 files (`self_view.always_on_top` false); `1` denotes 0.9.1 files that
+/// could retain a stuck `click_through: true` trap on `band`/`stage`.
+pub const SETUP_DEFAULTS_VERSION: u8 = 2;
 
 fn legacy_setup_version() -> u8 {
     0

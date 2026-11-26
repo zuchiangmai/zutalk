@@ -24,6 +24,15 @@ use zutalk_log::{debug, info, warn};
 
 /// Schema version stored in `PRAGMA user_version`; bump to trigger automatic rebuild.
 pub const INDEX_SCHEMA_VERSION: u32 = 2;
+/// Dirty-row threshold above which `reconcile` temporarily drops FTS5 triggers and runs one
+/// batched `rebuild` instead of firing per-row triggers tens of thousands of times.
+const RECONCILE_BULK_FTS_ROWS: usize = 16;
+
+const DROP_TRIGGERS_SQL: &str = r#"
+DROP TRIGGER IF EXISTS search_docs_ai;
+DROP TRIGGER IF EXISTS search_docs_ad;
+DROP TRIGGER IF EXISTS search_docs_au;
+"#;
 /// Short WAL busy wait for concurrent readers and the single writer (`P2.md` §3.4).
 pub const INDEX_BUSY_TIMEOUT_MS: u64 = 200;
 /// Default page size for monthly and recent library queries (`P2.md` §3.4).
@@ -466,6 +475,7 @@ impl Index {
             }
         }
 
+        let mut dirty_ids: Vec<&str> = Vec::new();
         for id in &disk_ids {
             let about_sig = file_sig(&shelf.pack_path(id, RECORDING));
             let lines_sig = file_sig(&shelf.pack_path(id, LINE));
@@ -491,13 +501,26 @@ impl Index {
                     }
                 }
                 _ => {
-                    let _ = upsert_recording_tx(&tx, shelf, tapes, id, filed_state)?; // dropped: boolean only counts active recordings during rebuild
+                    dirty_ids.push(id.as_str());
                 }
             }
         }
 
+        let bulk_fts = dirty_ids.len() + existing.len() >= RECONCILE_BULK_FTS_ROWS;
+        if bulk_fts {
+            tx.execute_batch(DROP_TRIGGERS_SQL).map_err(|_| "index")?;
+        }
+        for id in dirty_ids {
+            let filed_state = filings.get(id).map(String::as_str).unwrap_or("");
+            let _ = upsert_recording_tx(&tx, shelf, tapes, id, filed_state)?; // dropped: boolean only counts active recordings during rebuild
+        }
         for gone in existing.keys() {
             remove_recording_tx(&tx, gone)?;
+        }
+        if bulk_fts {
+            tx.execute_batch("INSERT INTO search_fts(search_fts) VALUES('rebuild');")
+                .map_err(|_| "index")?;
+            tx.execute_batch(SCHEMA_TRIGGERS_SQL).map_err(|_| "index")?;
         }
 
         let count: i64 = tx

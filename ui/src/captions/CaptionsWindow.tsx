@@ -649,12 +649,25 @@ export function CaptionsWindow() {
   const handleSelectScene = (nextScene: CaptionScene, bannerRect?: WindowRect) => {
     if (!state) return;
     let nextCaption: CaptionPrefs = { ...state.setup.caption, scene: nextScene };
-    if (nextScene === 'Band' && bannerRect) {
+    if (nextScene === 'Band') {
       nextCaption = {
         ...nextCaption,
         scenes: {
           ...nextCaption.scenes,
-          band: { ...nextCaption.scenes.band, geometry: bannerRect },
+          band: {
+            ...nextCaption.scenes.band,
+            // Switching into Band from inside the captions window must never lock out clicks.
+            click_through: false,
+            ...(bannerRect ? { geometry: bannerRect } : {}),
+          },
+        },
+      };
+    } else if (nextScene === 'Stage') {
+      nextCaption = {
+        ...nextCaption,
+        scenes: {
+          ...nextCaption.scenes,
+          stage: { ...nextCaption.scenes.stage, click_through: false },
         },
       };
     }

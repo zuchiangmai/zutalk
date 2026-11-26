@@ -12,6 +12,15 @@ use zutalk_core::rt::signal::Reading;
 
 /// Wait after the last OS move/resize event before persisting caption window geometry (`P5-03`).
 pub const CAPTION_GEO_DEBOUNCE_MS: u64 = 400;
+/// Maximum physical-pixel delta treated as OS/Retina clamping jitter rather than a user move/resize.
+const GEOMETRY_JITTER_PX: u32 = 2;
+
+fn rect_close(a: WindowRect, b: WindowRect) -> bool {
+    a.x.abs_diff(b.x) <= GEOMETRY_JITTER_PX
+        && a.y.abs_diff(b.y) <= GEOMETRY_JITTER_PX
+        && a.width.abs_diff(b.width) <= GEOMETRY_JITTER_PX
+        && a.height.abs_diff(b.height) <= GEOMETRY_JITTER_PX
+}
 
 /// Outcome of applying caption window operations without waiting for a main-thread reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +143,7 @@ impl CaptionWindowTracker {
             (false, false) => {
                 if next.geometry != prev.geometry
                     && let Some(rect) = next.geometry
+                    && !prev.geometry.is_some_and(|g| rect_close(g, rect))
                 {
                     let prev_size = prev.geometry.map(|g| (g.width, g.height));
                     let prev_pos = prev.geometry.map(|g| (g.x, g.y));
@@ -153,7 +163,7 @@ impl CaptionWindowTracker {
             }
         }
 
-        if !emitted_top && next.always_on_top != prev.always_on_top {
+        if !emitted_top && !next.fullscreen && next.always_on_top != prev.always_on_top {
             ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
         }
         if next.click_through != prev.click_through {
@@ -166,17 +176,21 @@ impl CaptionWindowTracker {
 }
 
 fn push_show_ops(ops: &mut Vec<CaptionWindowOp>, next: &CaptionWindowSpec) {
-    if next.fullscreen {
-        ops.push(CaptionWindowOp::SetFullscreen(true));
-    } else if let Some(rect) = next.geometry {
+    if !next.fullscreen
+        && let Some(rect) = next.geometry
+    {
         ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
         ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
     }
     ops.push(CaptionWindowOp::SetIgnoreCursorEvents(next.click_through));
     ops.push(CaptionWindowOp::Show);
-    // Apply always-on-top after Show so macOS preserves the floating window level, all-Spaces
-    // behavior, and front ordering above other apps and fullscreen Spaces.
-    ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
+    if next.fullscreen {
+        ops.push(CaptionWindowOp::SetFullscreen(true));
+    } else {
+        // Apply always-on-top after Show so macOS preserves the floating window level, all-Spaces
+        // behavior, and front ordering above other apps and fullscreen Spaces.
+        ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
+    }
 }
 
 /// Coalesced physical-pixel window coordinates captured from OS `Moved`/`Resized` events.
@@ -247,92 +261,119 @@ pub async fn run_geometry_saver<F>(
 /// Configures one-time platform defaults on the standalone captions window at startup.
 pub fn prepare_captions_window(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "macos")]
-    apply_macos_caption_policy(window, true, false);
+    {
+        let win = window.clone();
+        let dispatch = window.run_on_main_thread(move || {
+            apply_macos_caption_policy_on_main(&win, true, false);
+        });
+        let _ = dispatch; // dropped: fire-and-forget startup policy update fails only during shutdown
+    }
     #[cfg(not(target_os = "macos"))]
     let _ = window; // dropped: non-macOS platforms need no AppKit policy setup
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_caption_policy(window: &tauri::WebviewWindow, pinned: bool, fullscreen: bool) {
+fn apply_macos_caption_policy_on_main(
+    window: &tauri::WebviewWindow,
+    pinned: bool,
+    fullscreen: bool,
+) {
     use objc2_app_kit::{
-        NSNormalWindowLevel, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior,
+        NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSStatusWindowLevel, NSWindow,
+        NSWindowCollectionBehavior,
     };
 
-    let win = window.clone();
-    let dispatch = window.run_on_main_thread(move || {
-        let Ok(raw) = win.ns_window() else {
-            return;
-        };
-        if raw.is_null() {
-            return;
+    let Ok(raw) = window.ns_window() else {
+        return;
+    };
+    if raw.is_null() {
+        return;
+    }
+    // SAFETY: `tauri::WebviewWindow::ns_window` returns a valid `NSWindow` pointer owned by
+    // Tauri for the lifetime of the app, and this helper runs strictly on the macOS main thread.
+    let ns_win = unsafe { &*(raw as *const NSWindow) };
+    ns_win.setHidesOnDeactivate(false);
+    if fullscreen {
+        // Fill the current display's usable frame without triggering macOS Spaces fullscreen
+        // animation (matching 0.8 `SubtitleOverlayController::setMaximized`), avoiding borderless
+        // transparent-window Spaces hangs and keeping menu bar / Escape reachable.
+        ns_win.setLevel(NSFloatingWindowLevel);
+        ns_win.setCollectionBehavior(
+            NSWindowCollectionBehavior::MoveToActiveSpace
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        if let Some(screen) = ns_win.screen().or_else(|| {
+            // SAFETY: called strictly on the macOS main thread.
+            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+            NSScreen::mainScreen(mtm)
+        }) {
+            ns_win.setFrame_display_animate(screen.visibleFrame(), true, false);
         }
-        // SAFETY: `tauri::WebviewWindow::ns_window` returns a valid `NSWindow` pointer owned by
-        // Tauri for the lifetime of the app, and this closure runs on the macOS main thread.
-        let ns_win = unsafe { &*(raw as *const NSWindow) };
-        ns_win.setHidesOnDeactivate(false);
-        if fullscreen {
-            ns_win.setLevel(NSNormalWindowLevel);
-            ns_win.setCollectionBehavior(
-                NSWindowCollectionBehavior::MoveToActiveSpace
-                    | NSWindowCollectionBehavior::FullScreenPrimary,
-            );
-        } else if pinned {
-            ns_win.setLevel(NSStatusWindowLevel);
-            ns_win.setCollectionBehavior(
-                NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary
-                    | NSWindowCollectionBehavior::IgnoresCycle,
-            );
-            ns_win.orderFrontRegardless();
-        } else {
-            ns_win.setLevel(NSNormalWindowLevel);
-            ns_win.setCollectionBehavior(
-                NSWindowCollectionBehavior::MoveToActiveSpace
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
-            );
-        }
-    });
-    let _ = dispatch; // dropped: fire-and-forget AppKit policy update fails only during shutdown
+        ns_win.orderFrontRegardless();
+    } else if pinned {
+        ns_win.setLevel(NSStatusWindowLevel);
+        ns_win.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        ns_win.orderFrontRegardless();
+    } else {
+        ns_win.setLevel(NSNormalWindowLevel);
+        ns_win.setCollectionBehavior(
+            NSWindowCollectionBehavior::MoveToActiveSpace
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+    }
 }
 
-/// Applies ordered [`CaptionWindowOp`]s to the `captions` window using physical coordinates
-/// directly (matching `WindowEvent::Moved`/`Resized` without ever calling `scale_factor()`).
+/// Applies ordered [`CaptionWindowOp`]s to the `captions` window asynchronously on the OS main
+/// thread so the Tokio pump task never blocks on WindowServer or AppKit animations.
 pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow {
     let Some(window) = app.get_webview_window("captions") else {
         return CaptionWindow::Missing;
     };
-    let mut ok = true;
-    for op in ops {
-        let res = match *op {
-            CaptionWindowOp::SetFullscreen(full) => {
-                #[cfg(target_os = "macos")]
-                if full {
-                    apply_macos_caption_policy(&window, false, true);
+    let ops = ops.to_vec();
+    let win = window.clone();
+    match window.run_on_main_thread(move || {
+        for op in ops {
+            let res = match op {
+                CaptionWindowOp::SetFullscreen(full) => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if full {
+                            apply_macos_caption_policy_on_main(&win, false, true);
+                        }
+                        Ok(())
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        win.set_fullscreen(full)
+                    }
                 }
-                window.set_fullscreen(full)
-            }
-            CaptionWindowOp::SetSize { width, height } => {
-                window.set_size(tauri::PhysicalSize::new(width, height))
-            }
-            CaptionWindowOp::SetPosition { x, y } => {
-                window.set_position(tauri::PhysicalPosition::new(x, y))
-            }
-            CaptionWindowOp::SetAlwaysOnTop(top) => {
-                let top_res = window.set_always_on_top(top);
-                let _ = window.set_visible_on_all_workspaces(top); // dropped: best-effort cross-space pin alongside AppKit policy
-                #[cfg(target_os = "macos")]
-                apply_macos_caption_policy(&window, top, false);
-                top_res
-            }
-            CaptionWindowOp::SetIgnoreCursorEvents(pass) => window.set_ignore_cursor_events(pass),
-            CaptionWindowOp::Show => window.show(),
-            CaptionWindowOp::Hide => window.hide(),
-        };
-        if res.is_err() {
-            ok = false;
+                CaptionWindowOp::SetSize { width, height } => {
+                    win.set_size(tauri::PhysicalSize::new(width, height))
+                }
+                CaptionWindowOp::SetPosition { x, y } => {
+                    win.set_position(tauri::PhysicalPosition::new(x, y))
+                }
+                CaptionWindowOp::SetAlwaysOnTop(top) => {
+                    let top_res = win.set_always_on_top(top);
+                    let _ = win.set_visible_on_all_workspaces(top); // dropped: best-effort cross-space pin alongside AppKit policy
+                    #[cfg(target_os = "macos")]
+                    apply_macos_caption_policy_on_main(&win, top, false);
+                    top_res
+                }
+                CaptionWindowOp::SetIgnoreCursorEvents(pass) => win.set_ignore_cursor_events(pass),
+                CaptionWindowOp::Show => win.show(),
+                CaptionWindowOp::Hide => win.hide(),
+            };
+            let _ = res; // dropped: best-effort main-thread OS window mutation; failures are non-fatal
         }
+    }) {
+        Ok(()) => CaptionWindow::Ok,
+        Err(_) => CaptionWindow::Failed,
     }
-    if ok { CaptionWindow::Ok } else { CaptionWindow::Failed }
 }
 
 /// Prevents the display from sleeping while the standalone captions window is open (matching 0.8's
