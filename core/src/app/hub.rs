@@ -501,7 +501,15 @@ impl Hub {
                     return Err(code);
                 }
             }
-            Msg::Signed(out) => self.apply_signed(out?),
+            Msg::Signed(res) => match res {
+                Ok(out) => self.apply_signed(out),
+                Err(c) => {
+                    if matches!(self.state.auth, AuthFlow::Confirming { .. }) {
+                        self.set_auth(AuthEvent::Failed, c);
+                    }
+                    return Err(c);
+                }
+            },
             Msg::QuotaUpdated { left, quota, notify } => {
                 if self.state.me.is_some() {
                     self.state.left = Some(left);
@@ -738,7 +746,10 @@ impl Hub {
                 }
             }
             Command::SignIn => {
-                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                if matches!(
+                    self.state.auth,
+                    AuthFlow::Confirming { .. } | AuthFlow::Creating | AuthFlow::Recovering
+                ) {
                     return Err("busy");
                 }
                 let next_gen = self.next_auth_gen();
@@ -751,8 +762,12 @@ impl Hub {
                     return Err("id.no_pending");
                 }
                 self.work.confirm_sign_in(self.auth_gen, self.state.setup.keep, self.busy_ids())?;
+                self.set_auth(AuthEvent::BeginConfirm, "confirm");
             }
             Command::CancelSignIn => {
+                if matches!(self.state.auth, AuthFlow::Confirming { .. }) {
+                    return Err("busy");
+                }
                 self.bump_auth_gen();
                 self.work.cancel_sign_in();
                 self.set_auth(AuthEvent::Cancelled, "id.cancelled");
@@ -761,7 +776,10 @@ impl Hub {
                 if self.state.me.is_some() {
                     return Err("id.signed_in");
                 }
-                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                if matches!(
+                    self.state.auth,
+                    AuthFlow::Confirming { .. } | AuthFlow::Creating | AuthFlow::Recovering
+                ) {
                     return Err("busy");
                 }
                 let normalized = match handle {
@@ -776,7 +794,10 @@ impl Hub {
                 if self.state.me.is_some() {
                     return Err("id.signed_in");
                 }
-                if matches!(self.state.auth, AuthFlow::Creating | AuthFlow::Recovering) {
+                if matches!(
+                    self.state.auth,
+                    AuthFlow::Confirming { .. } | AuthFlow::Creating | AuthFlow::Recovering
+                ) {
                     return Err("busy");
                 }
                 let auth_gen = self.bump_auth_gen();

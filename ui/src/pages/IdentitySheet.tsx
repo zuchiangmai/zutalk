@@ -100,6 +100,7 @@ export function IdentitySheetView({
   }, [step]);
 
   const dismiss = () => {
+    if (state.auth.is === 'Confirming') return;
     if (state.auth.is !== 'Idle') {
       onCancelScan();
     }
@@ -111,6 +112,7 @@ export function IdentitySheetView({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (state.auth.is === 'Confirming') return;
         if (state.auth.is !== 'Idle') {
           onCancelScan();
         }
@@ -124,6 +126,7 @@ export function IdentitySheetView({
   if (step === 'closed') return null;
 
   const handleValidation = validateHandleInput(handleInput);
+  const confirming = state.auth.is === 'Confirming';
   const creating = state.auth.is === 'Creating';
   const recovering = state.auth.is === 'Recovering';
   const showRecoverySaved = step === 'create' && state.me !== null && state.rotation_unsaved;
@@ -252,16 +255,18 @@ export function IdentitySheetView({
           </>
         )}
 
-        {step === 'check' && state.auth.is === 'Confirm' && (
+        {step === 'check' && (state.auth.is === 'Confirm' || state.auth.is === 'Confirming') && (
           <>
             <h2 id="id-sheet-title" className="dialog-t">
               {t('identity.check.title')}
             </h2>
             <p className="dialog-d">
-              {state.auth.code !== null ? t('identity.check.desc_code') : t('identity.check.desc')}
+              {state.auth.is === 'Confirm' && state.auth.code !== null
+                ? t('identity.check.desc_code')
+                : t('identity.check.desc')}
             </p>
 
-            {state.auth.code !== null && (
+            {state.auth.is === 'Confirm' && state.auth.code !== null && (
               <div className="num check-digits">{state.auth.code}</div>
             )}
 
@@ -281,6 +286,7 @@ export function IdentitySheetView({
             <div className="dialog-a">
               <Button
                 variant="ghost"
+                disabled={confirming}
                 onClick={() => {
                   onCancelScan();
                   onStep('login');
@@ -288,7 +294,9 @@ export function IdentitySheetView({
               >
                 {t('identity.check.mismatch')}
               </Button>
-              <Button onClick={onConfirmSignIn}>{t('identity.check.confirm')}</Button>
+              <Button disabled={confirming} onClick={onConfirmSignIn}>
+                {confirming ? t('identity.check.confirming') : t('identity.check.confirm')}
+              </Button>
             </div>
           </>
         )}

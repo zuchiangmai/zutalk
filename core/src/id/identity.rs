@@ -44,6 +44,10 @@ pub enum AuthFlow {
         /// Reserved for future 6-digit verification once zu login.md specifies it (DECISIONS.md #5).
         code: Option<String>,
     },
+    Confirming {
+        did: String,
+        handle: Option<String>,
+    },
     Creating,
     Recovering,
 }
@@ -55,6 +59,7 @@ impl AuthFlow {
             AuthFlow::Idle => "Idle",
             AuthFlow::Scanning { .. } => "Scanning",
             AuthFlow::Confirm { .. } => "Confirm",
+            AuthFlow::Confirming { .. } => "Confirming",
             AuthFlow::Creating => "Creating",
             AuthFlow::Recovering => "Recovering",
         }
@@ -66,6 +71,7 @@ impl AuthFlow {
 pub enum AuthEvent {
     BeginScan { url: String, expires_at: i64 },
     Received { did: String, handle: Option<String>, code: Option<String> },
+    BeginConfirm,
     BeginCreate,
     BeginRecover,
     Completed,
@@ -82,6 +88,9 @@ pub fn auth_step(flow: &AuthFlow, event: AuthEvent) -> AuthFlow {
         ) => AuthFlow::Scanning { url, expires_at },
         (AuthFlow::Scanning { .. }, AuthEvent::Received { did, handle, code }) => {
             AuthFlow::Confirm { did, handle, code }
+        }
+        (AuthFlow::Confirm { did, handle, .. }, AuthEvent::BeginConfirm) => {
+            AuthFlow::Confirming { did: did.clone(), handle: handle.clone() }
         }
         (
             AuthFlow::Idle | AuthFlow::Scanning { .. } | AuthFlow::Confirm { .. },

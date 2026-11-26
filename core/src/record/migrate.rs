@@ -176,16 +176,37 @@ fn write_owner(data: &Path, me: &str) -> Result<(), &'static str> {
     fs::rename(tmp, data.join("moved.json")).map_err(|_| "shelf")
 }
 
-/// If `old` contains a 0.8 database without `handover/index.json` (e.g. a direct one-hop upgrade
-/// from 0.8.5 or 0.8.6) and a bundled `zutalk-handover-08` helper binary is available, invokes the
-/// helper once to materialize `handover/` non-destructively before reading it.
+/// Minimum mtime lead (ms) for `zutalk.db` over `handover/index.json` before re-running the
+/// bundled 0.8 helper to capture newly recorded 0.8.8 sessions made after the previous handover.
+const HANDOVER_STALE_LEAD_MS: u64 = 1_000;
+
+/// If `old` contains a 0.8 database without an up-to-date `handover/index.json` (e.g. a direct
+/// one-hop upgrade from 0.8.3 / 0.8.5 / 0.8.6, or a 0.8.8 user who recorded right before updating)
+/// and a bundled `zutalk-handover-08` helper binary is available, invokes the helper once to
+/// materialize `handover/` non-destructively before reading it.
 fn ensure_handover(old: &Path, helper: Option<&Path>) -> Result<(), &'static str> {
+    let db_path = old.join("zutalk.db");
+    if !db_path.exists() {
+        return Ok(());
+    }
     let index_path = old.join("handover").join("index.json");
-    if index_path.is_file() || !old.join("zutalk.db").exists() {
+    let has_index = index_path.is_file();
+    let stale = if has_index {
+        let db_m = fs::metadata(&db_path).and_then(|m| m.modified()).ok(); // dropped: missing mtime falls back to keeping existing handover
+        let idx_m = fs::metadata(&index_path).and_then(|m| m.modified()).ok(); // dropped: missing mtime falls back to keeping existing handover
+        matches!(
+            (db_m, idx_m),
+            (Some(d), Some(i))
+                if d.duration_since(i).is_ok_and(|gap| gap.as_millis() > u128::from(HANDOVER_STALE_LEAD_MS))
+        )
+    } else {
+        false
+    };
+    if has_index && !stale {
         return Ok(());
     }
     let Some(bin) = helper.filter(|path| path.is_file()) else {
-        return Err("migrate.missing");
+        return if has_index { Ok(()) } else { Err("migrate.missing") };
     };
     let status = Command::new(bin)
         .arg(old)
@@ -201,11 +222,11 @@ fn ensure_handover(old: &Path, helper: Option<&Path>) -> Result<(), &'static str
         Ok(exit) => {
             let code = exit.code().unwrap_or(-1);
             warn!("migrate.helper.done", code = "migrate.missing", exit = code);
-            Err("migrate.missing")
+            if has_index { Ok(()) } else { Err("migrate.missing") }
         }
         Err(_) => {
             warn!("migrate.helper.done", code = "migrate.missing", exit = -1i32);
-            Err("migrate.missing")
+            if has_index { Ok(()) } else { Err("migrate.missing") }
         }
     }
 }

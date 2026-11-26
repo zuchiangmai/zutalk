@@ -339,6 +339,7 @@
   "identity.check.as": "以这个身份登录：",
   "identity.check.mismatch": "不一致",
   "identity.check.confirm": "一致，登录",
+  "identity.check.confirming": "正在登录…",
   "identity.create.title": "新建身份",
   "identity.create.desc": "别人可以用句柄找到你（可选）。",
   "identity.create.handle": "句柄",

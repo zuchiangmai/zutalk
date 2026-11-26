@@ -339,6 +339,7 @@
   "identity.check.as": "Anmelden als:",
   "identity.check.mismatch": "Stimmt nicht überein",
   "identity.check.confirm": "Stimmt, anmelden",
+  "identity.check.confirming": "Wird angemeldet…",
   "identity.create.title": "Identität erstellen",
   "identity.create.desc": "Andere können dich über dein Handle finden (optional).",
   "identity.create.handle": "Handle",

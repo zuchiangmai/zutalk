@@ -283,6 +283,14 @@ fn merge_always_topic_value(
     changed.then_some(serde_json::Value::Object(merged))
 }
 
+/// Fast directory-entry count of recording folders on a local shelf (zero pack reads).
+pub fn pending_recordings_count(local: &Shelf) -> usize {
+    let Ok(entries) = fs::read_dir(local.root()) else {
+        return 0;
+    };
+    entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).count()
+}
+
 /// Adopts all eligible local recordings (excluding `exclude_ids`), glossary terms, and knowledge
 /// topics from `local` into `person`, leaving `local` and `tape/` untouched and recording the
 /// binding in `adopted.json`.
@@ -292,6 +300,18 @@ pub fn run(
     person: &Shelf,
     exclude_ids: &[String],
     now: i64,
+) -> Result<AdoptSummary, &'static str> {
+    run_with_progress(data, local, person, exclude_ids, now, |_, _, _| {})
+}
+
+/// Same as [`run`], calling `progress(done, total, id)` before each recording is adopted.
+pub fn run_with_progress(
+    data: &Path,
+    local: &Shelf,
+    person: &Shelf,
+    exclude_ids: &[String],
+    now: i64,
+    mut progress: impl FnMut(u32, u32, &str),
 ) -> Result<AdoptSummary, &'static str> {
     let recs: Vec<Recording> = local
         .list()
@@ -309,8 +329,13 @@ pub fn run(
         return Ok(AdoptSummary { plan: decision, ..AdoptSummary::default() });
     }
 
+    let total = u32::try_from(recs.len()).unwrap_or(u32::MAX);
     let mut adopted_ids = Vec::new();
-    for rec in &recs {
+    for (idx, rec) in recs.iter().enumerate() {
+        if person.known(&rec.id).map_err(|_| "adopt.failed")? {
+            continue;
+        }
+        progress(u32::try_from(idx).unwrap_or(u32::MAX), total, &rec.id);
         if adopt_one_recording(local, person, rec, now)? {
             adopted_ids.push(rec.id.clone());
         }

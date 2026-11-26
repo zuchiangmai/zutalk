@@ -37,7 +37,7 @@ pub const SEARCH_MAX_HITS: u32 = 200;
 /// Maximum UTF-8 byte length kept for each stored search snippet (`P2.md` §3.4).
 pub const SEARCH_SNIPPET_MAX_BYTES: usize = 240;
 
-const SCHEMA_SQL: &str = r#"
+const SCHEMA_TABLES_SQL: &str = r#"
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -104,7 +104,9 @@ CREATE VIRTUAL TABLE search_fts USING fts5(
     content_rowid='doc_id',
     tokenize='trigram'
 );
+"#;
 
+const SCHEMA_TRIGGERS_SQL: &str = r#"
 CREATE TRIGGER search_docs_ai AFTER INSERT ON search_docs BEGIN
     INSERT INTO search_fts(rowid, norm_text) VALUES (new.doc_id, new.norm_text);
 END;
@@ -383,10 +385,22 @@ impl Index {
             fs::create_dir_all(parent).map_err(|_| "index")?;
         }
         let conn = open_rw(path)?;
-        conn.execute_batch(SCHEMA_SQL).map_err(|_| "index")?;
-        conn.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION).map_err(|_| "index")?;
+        // Bulk-load into a disposable fresh DB without per-row FTS triggers, then rebuild FTS5 once.
+        conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA cache_size = -32000;")
+            .map_err(|_| "index")?;
+        conn.execute_batch(SCHEMA_TABLES_SQL).map_err(|_| "index")?;
         let mut index = Self { path: path.to_path_buf(), conn };
         let rows = index.rebuild(shelf, tapes)?;
+        index
+            .conn
+            .execute_batch("INSERT INTO search_fts(search_fts) VALUES('rebuild');")
+            .map_err(|_| "index")?;
+        index.conn.execute_batch(SCHEMA_TRIGGERS_SQL).map_err(|_| "index")?;
+        index
+            .conn
+            .pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)
+            .map_err(|_| "index")?;
+        index.conn.execute_batch("PRAGMA synchronous = NORMAL;").map_err(|_| "index")?;
         Ok((index, rows))
     }
 

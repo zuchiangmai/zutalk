@@ -339,6 +339,7 @@
   "identity.check.as": "Signing in as:",
   "identity.check.mismatch": "Doesn’t match",
   "identity.check.confirm": "Matches, sign in",
+  "identity.check.confirming": "Signing in…",
   "identity.create.title": "Create identity",
   "identity.create.desc": "People can find you by your handle (optional).",
   "identity.create.handle": "Handle",

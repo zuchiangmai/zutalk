@@ -339,6 +339,7 @@
   "identity.check.as": "Connexion en tant que :",
   "identity.check.mismatch": "Ne correspond pas",
   "identity.check.confirm": "Correspond, se connecter",
+  "identity.check.confirming": "Connexion…",
   "identity.create.title": "Créer une identité",
   "identity.create.desc": "On peut vous trouver grâce à votre pseudo (facultatif).",
   "identity.create.handle": "Pseudo",

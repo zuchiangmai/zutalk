@@ -361,6 +361,9 @@
   background: var(--soft2);
 }
 .row-t {
+  display: block;
+  width: 100%;
+  min-width: 0;
   font: 400 14.5px/1.35 var(--f-read);
   white-space: nowrap;
   overflow: hidden;
@@ -1754,6 +1757,7 @@ mark.find {
   grid-template-columns: 56px minmax(0, 1fr) auto 64px auto;
   gap: 12px;
   align-items: center;
+  min-width: 0;
   padding: 9px 12px;
   border-radius: 10px;
   transition: background 0.12s;
@@ -1765,6 +1769,7 @@ mark.find {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow: hidden;
   border: 0;
   background: none;
   color: inherit;
@@ -1773,18 +1778,29 @@ mark.find {
   cursor: pointer;
 }
 .lrow-t {
+  display: block;
+  width: 100%;
+  min-width: 0;
   font: 400 15.5px/1.4 var(--f-read);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .lrow-s {
+  display: block;
+  width: 100%;
+  min-width: 0;
   margin-top: 1px;
   font-size: 12px;
   color: var(--ink3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.lrow .set-v {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  white-space: nowrap;
 }
 .lrow .num {
   font-size: 12.5px;
@@ -2643,6 +2659,8 @@ mark.find {
 .lrow-title-btn {
   display: block;
   width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 0;
   border: 0;
   background: none;

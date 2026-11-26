@@ -67,7 +67,7 @@ fn the_app_is_the_one_the_0_8_app_updates_to() {
     assert_eq!(config["productName"], "ZuTalk"); // the bundle is ZuTalk.app
     let mac = &config["bundle"]["macOS"];
     let build = mac["bundleVersion"].as_str().and_then(|n| n.parse::<u32>().ok());
-    assert!(build.is_some_and(|build| build > 68), "0.8.8 is build 68");
+    assert!(build.is_some_and(|build| build >= 70), "0.9.1 must exceed 0.8.8 (68) and 0.9.0 (69)");
     assert_eq!(mac["minimumSystemVersion"], "12.5");
     assert_eq!(mac["signingIdentity"], "-");
     let plist = fs::read_to_string(root().join("app/Info.plist")).expect("app/Info.plist");

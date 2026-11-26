@@ -7,7 +7,10 @@ use crate::ai::titles::{self, TitleAction, TitleInput};
 use crate::ai::write;
 use crate::app::core::{Config, Voice};
 use crate::app::hub::Msg;
-use crate::app::proto::{Change, From, LocalShelf, NoteOp, Progress, Quota, Setup, Sound, Writing};
+use crate::app::proto::{
+    Change, From, LocalShelf, NoteOp, Progress, Quota, SETUP_DEFAULTS_VERSION, Setup, Sound,
+    Writing,
+};
 use crate::app::recording;
 use crate::capture::clock::wall_ms;
 use crate::capture::tape;
@@ -63,6 +66,9 @@ pub const TITLE_AT_ONCE_JOBS: usize = 1;
 /// Diagnose bundles retained under `<data>/diagnose/`: each copies at most 2 log files (16 MB),
 /// so 3 bundles stay under 50 MB (`P1-22-diagnose.md`).
 pub const DIAGNOSE_KEPT_DIRS: usize = 3;
+/// Local-shelf recording count up to which adoption runs inline during sign-in; larger libraries
+/// run asynchronously on the `work` subtree so `ConfirmSignIn` never blocks `desk`.
+const INLINE_ADOPT_MAX_RECORDINGS: usize = 8;
 /// Most recent rotated `*.jsonl` log files copied into one diagnose bundle (`P1.md` §3.13.6).
 pub const DIAGNOSE_LOG_FILES: usize = 2;
 
@@ -471,6 +477,12 @@ impl DeskJob for Job {
     }
 }
 
+struct DeferredAdopt {
+    local: Arc<Shelf>,
+    person: Arc<Shelf>,
+    exclude: Vec<String>,
+}
+
 enum DeskOut {
     Silent,
     Copied,
@@ -483,11 +495,13 @@ enum DeskOut {
         start_create: bool,
         start_claim: Option<Secret>,
         recover_host: Option<String>,
+        deferred_adopt: Option<DeferredAdopt>,
     },
     Signed {
         out: SignedOut,
         start_claim: Option<Secret>,
         recover_host: Option<String>,
+        deferred_adopt: Option<DeferredAdopt>,
     },
     Refreshed(Refreshed),
     ExportWrite {
@@ -637,6 +651,9 @@ impl Work {
         let deliver_signing = signing.clone();
         let deliver_confirm_gen = confirm_gen;
         let deliver_keep = keep_hint.clone();
+        let deliver_bg = bg.clone();
+        let deliver_progress = progress_reg.clone();
+        let deliver_views = views.clone();
 
         let desk_tx_holder: Arc<Mutex<Option<Desk<Job>>>> = Arc::new(Mutex::new(None));
         let deliver_desk = desk_tx_holder.clone();
@@ -659,6 +676,9 @@ impl Work {
                 let signing = deliver_signing.clone();
                 let confirm_gen = deliver_confirm_gen.clone();
                 let keep_hint = deliver_keep.clone();
+                let bg = deliver_bg.clone();
+                let progress_reg = deliver_progress.clone();
+                let views = deliver_views.clone();
                 let desk_holder = deliver_desk.clone();
                 async move {
                     match outcome {
@@ -678,8 +698,34 @@ impl Work {
                         Ok(DeskOut::TopicRemoved(id)) => {
                             let _ = results.send(Msg::TopicRemoved(id)).await; // dropped: the hub has ended
                         }
-                        Ok(DeskOut::Booted { out, start_create, start_claim, recover_host }) => {
+                        Ok(DeskOut::Booted {
+                            out,
+                            start_create,
+                            start_claim,
+                            recover_host,
+                            deferred_adopt,
+                        }) => {
                             let snap = snapshot(&identity);
+                            if let Some(adopt_task) = deferred_adopt {
+                                let desk = desk_holder
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .clone();
+                                if let Some(desk) = desk {
+                                    spawn_adopt(
+                                        &tree,
+                                        bg.clone(),
+                                        &next_seq,
+                                        &jobs_done,
+                                        &jobs_failed,
+                                        config.data.clone(),
+                                        adopt_task,
+                                        progress_reg.clone(),
+                                        IndexSync { desk, views },
+                                        results.clone(),
+                                    );
+                                }
+                            }
                             if let (Some(ours), Some(stale_id)) = (snap.ours.clone(), recover_host)
                                 && host_live
                                     .lock()
@@ -754,8 +800,28 @@ impl Work {
                             }
                             let _ = results.send(Msg::Booted(out)).await; // dropped: the hub has ended
                         }
-                        Ok(DeskOut::Signed { out, start_claim, recover_host }) => {
+                        Ok(DeskOut::Signed { out, start_claim, recover_host, deferred_adopt }) => {
                             let snap = snapshot(&identity);
+                            if let Some(adopt_task) = deferred_adopt {
+                                let desk = desk_holder
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .clone();
+                                if let Some(desk) = desk {
+                                    spawn_adopt(
+                                        &tree,
+                                        bg.clone(),
+                                        &next_seq,
+                                        &jobs_done,
+                                        &jobs_failed,
+                                        config.data.clone(),
+                                        adopt_task,
+                                        progress_reg.clone(),
+                                        IndexSync { desk, views },
+                                        results.clone(),
+                                    );
+                                }
+                            }
                             if let (Some(ours), Some(stale_id)) = (snap.ours.clone(), recover_host)
                                 && host_live
                                     .lock()
@@ -1966,14 +2032,14 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
         }
         Job::Sign { who, why, made, keep, busy, initial_handle } => {
             let has_person = who.person().is_some();
-            let out = run_sign(env, who, why, made, keep, &busy, initial_handle)?;
+            let (out, deferred_adopt) = run_sign(env, who, why, made, keep, &busy, initial_handle)?;
             let start_claim = if has_person {
                 env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone()
             } else {
                 None
             };
             let recover_host = if has_person { host::read_lock(&config.data) } else { None };
-            Ok(DeskOut::Signed { out, start_claim, recover_host })
+            Ok(DeskOut::Signed { out, start_claim, recover_host, deferred_adopt })
         }
         Job::ConfirmSignIn { auth_gen, keep, busy } => {
             env.confirm_gen.store(auth_gen, Ordering::Release);
@@ -1984,17 +2050,19 @@ fn run_desk_job(job: Job, env: &DeskEnv) -> Result<DeskOut, &'static str> {
                 .take()
                 .ok_or("id.no_pending")?;
             let (me, handle) = pending.commit().map_err(code)?;
-            let out = run_sign(env, Who::Person(me), "sign_in", false, keep, &busy, Some(handle))?;
+            let (out, deferred_adopt) =
+                run_sign(env, Who::Person(me), "sign_in", false, keep, &busy, Some(handle))?;
             let start_claim = env.invite.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let recover_host = host::read_lock(&config.data);
-            Ok(DeskOut::Signed { out, start_claim, recover_host })
+            Ok(DeskOut::Signed { out, start_claim, recover_host, deferred_adopt })
         }
         Job::SignOut { keep, busy } => {
             cancel_signing(&env.signing, &env.pending_signin);
             keys::set("identity", None).map_err(code)?;
             let local = keys::local().map(|(me, _)| me);
-            let out = run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
-            Ok(DeskOut::Signed { out, start_claim: None, recover_host: None })
+            let (out, deferred_adopt) =
+                run_sign(env, Who::of(None, local), "sign_out", false, keep, &busy, None)?;
+            Ok(DeskOut::Signed { out, start_claim: None, recover_host: None, deferred_adopt })
         }
         Job::DiscardLocal => {
             let person_did = {
@@ -2776,6 +2844,12 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
     let setup = match fs::read(env.config.data.join("settings.json")) {
         Ok(json) => match serde_json::from_slice::<Setup>(&json) {
             Ok(mut setup) => {
+                if setup.defaults_v < SETUP_DEFAULTS_VERSION {
+                    // Pre-0.9.1 defaults left `self_view.always_on_top` false; upgrade once so
+                    // floating captions stay on top by default without overriding future toggles.
+                    setup.caption.scenes.self_view.always_on_top = true;
+                    setup.defaults_v = SETUP_DEFAULTS_VERSION;
+                }
                 setup.caption = setup.caption.normalized();
                 setup.topics = topic::normalize_selected_topics(setup.topics);
                 let ms = t.elapsed().as_millis() as u64;
@@ -2821,7 +2895,7 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         Who::Local(_) | Who::Person(_) => None,
     };
     let has_person = who.person().is_some();
-    let mut signed = run_sign(env, who, "boot", made, setup.keep, &[], None)?;
+    let (mut signed, deferred_adopt) = run_sign(env, who, "boot", made, setup.keep, &[], None)?;
     let id_ms = t.elapsed().as_millis() as u64;
     if let Some(c) = who_err {
         warn!("boot.step", step = "identity", code = c, ms = id_ms);
@@ -2862,6 +2936,7 @@ fn run_boot(env: &DeskEnv) -> Result<DeskOut, &'static str> {
         start_create,
         start_claim,
         recover_host,
+        deferred_adopt,
     })
 }
 
@@ -2873,7 +2948,7 @@ fn run_sign(
     keep: Option<u32>,
     busy: &[String],
     initial_handle: Option<Option<String>>,
-) -> Result<SignedOut, &'static str> {
+) -> Result<(SignedOut, Option<DeferredAdopt>), &'static str> {
     let config = &env.config;
     let http = &env.http;
     let identity = &env.identity;
@@ -2903,8 +2978,10 @@ fn run_sign(
     };
 
     // Adopt any existing device-local (`did:key`) records and terms into the first signed-in
-    // person's shelf before opening the SQLite index and loading the glossary (`P4.md` §3.4).
-    let local_shelf = match (&who, shelf.as_deref()) {
+    // person's shelf (`P4.md` §3.4). Small libraries run inline; large libraries (e.g. migrated
+    // 0.8 shelves) run asynchronously on the `work` subtree so sign-in never freezes `desk`.
+    let mut deferred_adopt = None;
+    let local_shelf = match (&who, shelf.as_ref()) {
         (Who::Person(person), Some(person_shelf)) => {
             let _ = topic::ensure_migrated(person_shelf, now()); // dropped: best-effort legacy talk/term migration before adopt
             if let Ok(Some(local_me)) = keys::local_kept() {
@@ -2916,22 +2993,30 @@ fn run_sign(
                     {
                         exclude.push(active);
                     }
-                    match adopt::run(&config.data, &local, person_shelf, &exclude, now()) {
-                        Ok(sum) => {
-                            if sum.plan == adopt::AdoptPlan::Adopt
-                                && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0)
-                            {
-                                info!(
-                                    "identity.adopt",
-                                    recordings = sum.recordings,
-                                    terms = sum.terms,
-                                    code = "ok"
-                                );
+                    if adopt::pending_recordings_count(&local) > INLINE_ADOPT_MAX_RECORDINGS {
+                        deferred_adopt = Some(DeferredAdopt {
+                            local: local.clone(),
+                            person: person_shelf.clone(),
+                            exclude,
+                        });
+                    } else {
+                        match adopt::run(&config.data, &local, person_shelf, &exclude, now()) {
+                            Ok(sum) => {
+                                if sum.plan == adopt::AdoptPlan::Adopt
+                                    && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0)
+                                {
+                                    info!(
+                                        "identity.adopt",
+                                        recordings = sum.recordings,
+                                        terms = sum.terms,
+                                        code = "ok"
+                                    );
+                                }
                             }
-                        }
-                        Err(c) => {
-                            warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
-                            say.push(c);
+                            Err(c) => {
+                                warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
+                                say.push(c);
+                            }
                         }
                     }
                 }
@@ -3012,7 +3097,93 @@ fn run_sign(
     };
 
     let shelf_by = snap.shelf.as_ref().ok().map(|s| s.by().to_owned());
-    Ok(SignedOut { me, shelf_by, handle, rotation_unsaved, local_shelf, refreshed, survey, say })
+    Ok((
+        SignedOut { me, shelf_by, handle, rotation_unsaved, local_shelf, refreshed, survey, say },
+        deferred_adopt,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_adopt(
+    tree: &Tree,
+    bg: Arc<Semaphore>,
+    next_seq: &Arc<AtomicU64>,
+    jobs_done: &Counter,
+    jobs_failed: &Counter,
+    data: PathBuf,
+    task: DeferredAdopt,
+    progress_reg: Register<Progress>,
+    index_sync: IndexSync,
+    results: Tx<Msg>,
+) {
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    let tree_run = tree.clone();
+    let jobs_done = jobs_done.clone();
+    let jobs_failed = jobs_failed.clone();
+    tree.spawn("job.adopt", async move {
+        let wait_at = tokio::time::Instant::now();
+        let Ok(_permit) = bg.acquire().await else {
+            return;
+        };
+        let waited_ms = wait_at.elapsed().as_millis() as u64;
+        info!("job.start", kind = "adopt", job = seq, waited_ms = waited_ms);
+        let started = std::time::Instant::now();
+        let reg_cb = progress_reg.clone();
+        let data_run = data.clone();
+        let local_run = task.local.clone();
+        let person_run = task.person.clone();
+        let exclude = task.exclude;
+        let outcome = tree_run
+            .blocking("job.adopt", move || {
+                let res = adopt::run_with_progress(
+                    &data_run,
+                    &local_run,
+                    &person_run,
+                    &exclude,
+                    now(),
+                    |done, of, id| {
+                        let writing =
+                            Writing { id: id.to_owned(), step: "moving".into(), done, of };
+                        set_move_progress(&reg_cb, Some(writing));
+                    },
+                );
+                let status = adopt::status(&data_run, Some(&local_run), Some(person_run.by()));
+                (res, status)
+            })
+            .await;
+        set_move_progress(&progress_reg, None);
+        let ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((Ok(sum), status)) => {
+                info!("job.done", kind = "adopt", job = seq, code = "ok", ms = ms);
+                jobs_done.add(1);
+                let changed = sum.plan == adopt::AdoptPlan::Adopt
+                    && (sum.recordings > 0 || sum.terms > 0 || sum.topics > 0);
+                if changed {
+                    info!(
+                        "identity.adopt",
+                        recordings = sum.recordings,
+                        terms = sum.terms,
+                        code = "ok"
+                    );
+                    index_sync.migrated(task.person.by().to_owned()).await;
+                    let _ = results.send(Msg::LocalShelf(status)).await; // dropped: the hub has ended
+                }
+            }
+            Ok((Err(c), _)) => {
+                warn!("job.done", kind = "adopt", job = seq, code = c, ms = ms);
+                warn!("identity.adopt", recordings = 0u32, terms = 0u32, code = c);
+                jobs_failed.add(1);
+            }
+            Err(_) => {
+                if tree_run.is_cancelled() {
+                    return;
+                }
+                warn!("job.done", kind = "adopt", job = seq, code = "panic", ms = ms);
+                jobs_failed.add(1);
+            }
+        }
+    });
 }
 
 fn refresh_topic_caches(env: &DeskEnv, shelf: &Shelf) {

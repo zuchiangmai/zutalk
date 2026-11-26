@@ -339,6 +339,7 @@
   "identity.check.as": "サインインする ID：",
   "identity.check.mismatch": "一致しない",
   "identity.check.confirm": "一致、サインイン",
+  "identity.check.confirming": "サインイン中…",
   "identity.create.title": "ID を作成",
   "identity.create.desc": "ハンドルでほかの人から見つけてもらえます（任意）。",
   "identity.create.handle": "ハンドル",

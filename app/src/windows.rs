@@ -113,6 +113,7 @@ impl CaptionWindowTracker {
         }
 
         // Window is already visible: diff fullscreen, geometry, always-on-top, and click-through.
+        let mut emitted_top = false;
         match (prev.fullscreen, next.fullscreen) {
             (false, true) => {
                 ops.push(CaptionWindowOp::SetFullscreen(true));
@@ -122,6 +123,12 @@ impl CaptionWindowTracker {
                 if let Some(rect) = next.geometry {
                     ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
                     ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
+                }
+                // Re-apply always-on-top after leaving macOS fullscreen so the window level and
+                // Spaces collection behavior are restored even when `always_on_top` stayed true.
+                if next.always_on_top || next.always_on_top != prev.always_on_top {
+                    ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
+                    emitted_top = true;
                 }
             }
             (false, false) => {
@@ -146,7 +153,7 @@ impl CaptionWindowTracker {
             }
         }
 
-        if next.always_on_top != prev.always_on_top {
+        if !emitted_top && next.always_on_top != prev.always_on_top {
             ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
         }
         if next.click_through != prev.click_through {
@@ -165,9 +172,11 @@ fn push_show_ops(ops: &mut Vec<CaptionWindowOp>, next: &CaptionWindowSpec) {
         ops.push(CaptionWindowOp::SetSize { width: rect.width, height: rect.height });
         ops.push(CaptionWindowOp::SetPosition { x: rect.x, y: rect.y });
     }
-    ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
     ops.push(CaptionWindowOp::SetIgnoreCursorEvents(next.click_through));
     ops.push(CaptionWindowOp::Show);
+    // Apply always-on-top after Show so macOS preserves the floating window level, all-Spaces
+    // behavior, and front ordering above other apps and fullscreen Spaces.
+    ops.push(CaptionWindowOp::SetAlwaysOnTop(next.always_on_top));
 }
 
 /// Coalesced physical-pixel window coordinates captured from OS `Moved`/`Resized` events.
@@ -235,6 +244,57 @@ pub async fn run_geometry_saver<F>(
     }
 }
 
+/// Configures one-time platform defaults on the standalone captions window at startup.
+pub fn prepare_captions_window(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    apply_macos_caption_policy(window, true, false);
+    #[cfg(not(target_os = "macos"))]
+    let _ = window; // dropped: non-macOS platforms need no AppKit policy setup
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_caption_policy(window: &tauri::WebviewWindow, pinned: bool, fullscreen: bool) {
+    use objc2_app_kit::{
+        NSNormalWindowLevel, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior,
+    };
+
+    let win = window.clone();
+    let dispatch = window.run_on_main_thread(move || {
+        let Ok(raw) = win.ns_window() else {
+            return;
+        };
+        if raw.is_null() {
+            return;
+        }
+        // SAFETY: `tauri::WebviewWindow::ns_window` returns a valid `NSWindow` pointer owned by
+        // Tauri for the lifetime of the app, and this closure runs on the macOS main thread.
+        let ns_win = unsafe { &*(raw as *const NSWindow) };
+        ns_win.setHidesOnDeactivate(false);
+        if fullscreen {
+            ns_win.setLevel(NSNormalWindowLevel);
+            ns_win.setCollectionBehavior(
+                NSWindowCollectionBehavior::MoveToActiveSpace
+                    | NSWindowCollectionBehavior::FullScreenPrimary,
+            );
+        } else if pinned {
+            ns_win.setLevel(NSStatusWindowLevel);
+            ns_win.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            ns_win.orderFrontRegardless();
+        } else {
+            ns_win.setLevel(NSNormalWindowLevel);
+            ns_win.setCollectionBehavior(
+                NSWindowCollectionBehavior::MoveToActiveSpace
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+        }
+    });
+    let _ = dispatch; // dropped: fire-and-forget AppKit policy update fails only during shutdown
+}
+
 /// Applies ordered [`CaptionWindowOp`]s to the `captions` window using physical coordinates
 /// directly (matching `WindowEvent::Moved`/`Resized` without ever calling `scale_factor()`).
 pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow {
@@ -244,14 +304,26 @@ pub fn apply_captions(app: &AppHandle, ops: &[CaptionWindowOp]) -> CaptionWindow
     let mut ok = true;
     for op in ops {
         let res = match *op {
-            CaptionWindowOp::SetFullscreen(full) => window.set_fullscreen(full),
+            CaptionWindowOp::SetFullscreen(full) => {
+                #[cfg(target_os = "macos")]
+                if full {
+                    apply_macos_caption_policy(&window, false, true);
+                }
+                window.set_fullscreen(full)
+            }
             CaptionWindowOp::SetSize { width, height } => {
                 window.set_size(tauri::PhysicalSize::new(width, height))
             }
             CaptionWindowOp::SetPosition { x, y } => {
                 window.set_position(tauri::PhysicalPosition::new(x, y))
             }
-            CaptionWindowOp::SetAlwaysOnTop(top) => window.set_always_on_top(top),
+            CaptionWindowOp::SetAlwaysOnTop(top) => {
+                let top_res = window.set_always_on_top(top);
+                let _ = window.set_visible_on_all_workspaces(top); // dropped: best-effort cross-space pin alongside AppKit policy
+                #[cfg(target_os = "macos")]
+                apply_macos_caption_policy(&window, top, false);
+                top_res
+            }
             CaptionWindowOp::SetIgnoreCursorEvents(pass) => window.set_ignore_cursor_events(pass),
             CaptionWindowOp::Show => window.show(),
             CaptionWindowOp::Hide => window.hide(),

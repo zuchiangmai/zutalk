@@ -339,6 +339,7 @@
   "identity.check.as": "เข้าสู่ระบบในชื่อ:",
   "identity.check.mismatch": "ไม่ตรงกัน",
   "identity.check.confirm": "ตรงกัน เข้าสู่ระบบ",
+  "identity.check.confirming": "กำลังเข้าสู่ระบบ…",
   "identity.create.title": "สร้างตัวตนใหม่",
   "identity.create.desc": "ผู้อื่นสามารถค้นหาคุณด้วยแฮนเดิลได้ (ไม่บังคับ)",
   "identity.create.handle": "แฮนเดิล",

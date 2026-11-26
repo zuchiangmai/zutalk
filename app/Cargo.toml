@@ -18,6 +18,9 @@ tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
 zutalk-core = { path = "../core" }
 zutalk-log = { path = "../log" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }
+
 [dev-dependencies]
 base64 = "0.23.1"
 tempfile = "3.27.0"

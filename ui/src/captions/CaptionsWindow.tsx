@@ -61,7 +61,7 @@ const FALLBACK_STYLE: SceneStyle = {
   light: false,
   sans: false,
   top: false,
-  always_on_top: false,
+  always_on_top: true,
   click_through: false,
   auto_hide: false,
   fullscreen: false,

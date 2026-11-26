@@ -204,7 +204,7 @@ impl SceneStyle {
             light: false,
             sans: false,
             top: false,
-            always_on_top: false,
+            always_on_top: true,
             click_through: false,
             auto_hide: false,
             fullscreen: false,
@@ -328,9 +328,17 @@ impl CaptionPrefs {
     }
 }
 
+/// Current defaults schema version persisted in `settings.json`.
+/// `0` denotes pre-0.9.1 files where `self_view.always_on_top` defaulted to `false`.
+pub const SETUP_DEFAULTS_VERSION: u8 = 1;
+
+fn legacy_setup_version() -> u8 {
+    0
+}
+
 /// What the next recording will be, which a recording freezes; the interface's language; and
 /// how long audio stays on this device once a recording's record is written (`retain`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(default)]
 pub struct Setup {
     pub spoken: Vec<String>,
@@ -346,6 +354,27 @@ pub struct Setup {
     pub city: Option<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    #[serde(default = "legacy_setup_version")]
+    #[ts(skip)]
+    pub defaults_v: u8,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            spoken: Vec::new(),
+            shown: Vec::new(),
+            sound: Sound::default(),
+            device: None,
+            mode: Mode::default(),
+            language: None,
+            keep: None,
+            caption: CaptionPrefs::default(),
+            city: None,
+            topics: Vec::new(),
+            defaults_v: SETUP_DEFAULTS_VERSION,
+        }
+    }
 }
 
 impl Setup {

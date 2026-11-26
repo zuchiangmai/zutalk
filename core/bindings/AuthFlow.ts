@@ -7,4 +7,4 @@ export type AuthFlow = { "is": "Idle" } | { "is": "Scanning", url: string, expir
 /**
  * Reserved for future 6-digit verification once zu login.md specifies it (DECISIONS.md #5).
  */
-code: string | null, } | { "is": "Creating" } | { "is": "Recovering" };
+code: string | null, } | { "is": "Confirming", did: string, handle: string | null, } | { "is": "Creating" } | { "is": "Recovering" };

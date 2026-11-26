@@ -347,6 +347,7 @@ export function LibraryView({
                       <button
                         type="button"
                         className="lrow-title-btn"
+                        title={row.title || row.preview || t('untitled')}
                         onClick={() => onOpenRecording(row.id)}
                       >
                         <span className="lrow-t">{row.title || row.preview || t('untitled')}</span>

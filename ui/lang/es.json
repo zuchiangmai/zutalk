@@ -339,6 +339,7 @@
   "identity.check.as": "Iniciando sesión como:",
   "identity.check.mismatch": "No coincide",
   "identity.check.confirm": "Coincide, iniciar sesión",
+  "identity.check.confirming": "Iniciando sesión…",
   "identity.create.title": "Crear identidad",
   "identity.create.desc": "Otros pueden encontrarte por tu identificador (opcional).",
   "identity.create.handle": "Identificador",

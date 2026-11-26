@@ -30,7 +30,7 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
     assert!(tracker.diff(hidden.clone()).is_empty());
     assert!(tracker.diff(hidden).is_empty());
 
-    // 2. First show applies SetSize -> SetPosition -> SetAlwaysOnTop -> SetIgnoreCursorEvents -> Show.
+    // 2. First show applies SetSize -> SetPosition -> SetIgnoreCursorEvents -> Show -> SetAlwaysOnTop.
     let self_rect = WindowRect { x: 120, y: 80, width: 900, height: 220 };
     let shown_self = CaptionWindowSpec {
         shown: true,
@@ -45,9 +45,9 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
         vec![
             CaptionWindowOp::SetSize { width: 900, height: 220 },
             CaptionWindowOp::SetPosition { x: 120, y: 80 },
-            CaptionWindowOp::SetAlwaysOnTop(false),
             CaptionWindowOp::SetIgnoreCursorEvents(false),
             CaptionWindowOp::Show,
+            CaptionWindowOp::SetAlwaysOnTop(false),
         ]
     );
 
@@ -111,9 +111,9 @@ fn tracker_diff_orders_fullscreen_geometry_and_show_cleanly() {
         tracker.diff(show_stage.clone()),
         vec![
             CaptionWindowOp::SetFullscreen(true),
-            CaptionWindowOp::SetAlwaysOnTop(false),
             CaptionWindowOp::SetIgnoreCursorEvents(false),
             CaptionWindowOp::Show,
+            CaptionWindowOp::SetAlwaysOnTop(false),
         ]
     );
     assert_eq!(

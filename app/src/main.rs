@@ -145,6 +145,7 @@ fn main() {
                 move |ops| windows::apply_captions(&handle_captions, ops),
             );
             if let Some(cap_win) = app.get_webview_window("captions") {
+                windows::prepare_captions_window(&cap_win);
                 let (geo_tx, geo_rx) =
                     tokio::sync::watch::channel::<Option<windows::GeometrySample>>(None);
                 let close_handle = app.handle().clone();

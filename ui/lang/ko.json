@@ -339,6 +339,7 @@
   "identity.check.as": "로그인할 신원:",
   "identity.check.mismatch": "일치하지 않음",
   "identity.check.confirm": "일치, 로그인",
+  "identity.check.confirming": "로그인 중…",
   "identity.create.title": "신원 만들기",
   "identity.create.desc": "다른 사람이 핸들로 나를 찾을 수 있습니다(선택).",
   "identity.create.handle": "핸들",
