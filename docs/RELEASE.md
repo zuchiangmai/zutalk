@@ -151,6 +151,12 @@ cp target/universal-apple-darwin/release/bundle/dmg/ZuTalk_0.9.0_universal.dmg h
 <Sparkle 工具>/bin/generate_appcast --account Zulangue \
   --download-url-prefix "https://github.com/zuchiangmai/ZuTalk/releases/download/v0.9.0/" \
   --maximum-versions 1 -o hop/appcast.xml hop
+# 因 0.9.0 为 Tauri 应用（Info.plist 无 SUPublicEDKey），需用 sign_update 显式为 DMG 与 appcast.xml 签名并校验：
+DMG_SIG="$(<Sparkle 工具>/bin/sign_update --account Zulangue -p hop/ZuTalk_0.9.0_universal.dmg)"
+# 将 sparkle:edSignature="$DMG_SIG" 写入 <enclosure .../> 后再签 feed 本身：
+<Sparkle 工具>/bin/sign_update --account Zulangue hop/appcast.xml
+<Sparkle 工具>/bin/sign_update --account Zulangue --verify hop/ZuTalk_0.9.0_universal.dmg "$DMG_SIG"
+<Sparkle 工具>/bin/sign_update --account Zulangue --verify hop/appcast.xml
 ```
 
 `hop` 里只放新版 `ZuTalk_0.9.0_universal.dmg`（不要放旧版 DMG，也不要加 `--channel zu`）。生成后核对 `hop/appcast.xml`：`sparkle:version` 是 `69`、`sparkle:shortVersionString` 是 `0.9.0`、**没有 `<sparkle:channel>`**，且 `sparkle:edSignature=` 和 `<!-- sparkle-signatures:` 都在。然后随 §3 第 6 步一起上传。
