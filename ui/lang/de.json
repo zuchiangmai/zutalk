@@ -544,5 +544,15 @@
   "city.event_upcoming": "Bevorstehend & aktuell",
   "city.event_past": "Frühere Veranstaltungen",
   "city.event_select": "Veranstaltung wählen",
-  "city.retry": "Erneut versuchen"
+  "city.retry": "Erneut versuchen",
+  "code.update.none": "ZuTalk ist auf dem neuesten Stand",
+  "code.update.ready": "Update bereit – zum Installieren auf Aktualisieren klicken",
+  "settings.version_title": "Version & Updates",
+  "settings.current_version": "Aktuelle Version {0}",
+  "settings.check_update": "Nach Updates suchen",
+  "settings.update_checking": "Suche nach Updates…",
+  "settings.update_downloading": "Version {0} wird heruntergeladen…",
+  "settings.update_up_to_date": "Auf dem neuesten Stand",
+  "settings.update_failed": "Updates konnten nicht geprüft werden",
+  "settings.update_recording_wait": "Version {0} ist bereit – nach der Aufnahme aktualisieren"
 }

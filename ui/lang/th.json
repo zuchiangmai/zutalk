@@ -544,5 +544,15 @@
   "city.event_upcoming": "กำลังจะมาถึงและล่าสุด",
   "city.event_past": "กิจกรรมก่อนหน้า",
   "city.event_select": "เลือกกิจกรรม",
-  "city.retry": "ลองอีกครั้ง"
+  "city.retry": "ลองอีกครั้ง",
+  "code.update.none": "ZuTalk เป็นเวอร์ชันล่าสุดแล้ว",
+  "code.update.ready": "อัปเดตพร้อมแล้ว — กดอัปเดตเพื่อติดตั้ง",
+  "settings.version_title": "เวอร์ชันและการอัปเดต",
+  "settings.current_version": "เวอร์ชันปัจจุบัน {0}",
+  "settings.check_update": "ตรวจสอบอัปเดต",
+  "settings.update_checking": "กำลังตรวจสอบอัปเดต…",
+  "settings.update_downloading": "กำลังดาวน์โหลดเวอร์ชัน {0}…",
+  "settings.update_up_to_date": "เป็นเวอร์ชันล่าสุดแล้ว",
+  "settings.update_failed": "ไม่สามารถตรวจสอบอัปเดตได้",
+  "settings.update_recording_wait": "เวอร์ชัน {0} พร้อมแล้ว — หยุดบันทึกเสียงก่อนจึงอัปเดต"
 }

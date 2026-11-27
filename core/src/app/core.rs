@@ -32,9 +32,22 @@ pub type Devices = Arc<dyn Fn() -> Vec<Device> + Send + Sync>;
 /// Puts text on the system clipboard: the shell's to give. `false`: it could not.
 pub type Clip = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Signals the shell to wake up and check for a newer version of the app: non-blocking.
+pub type CheckUpdate = Arc<dyn Fn() + Send + Sync>;
+
 /// Installs the newer version the shell has ready and relaunches the app: the shell's to give.
 /// It returns only if it could not.
 pub type Install = Arc<dyn Fn() + Send + Sync>;
+
+/// Progress or outcome reported by the shell's update task to the hub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateReport {
+    Checking,
+    Downloading(String),
+    Ready(String),
+    UpToDate,
+    Failed(&'static str),
+}
 
 /// What the core is started with: where things are, the ports the shell and the tests give,
 /// and how much it says.
@@ -68,6 +81,8 @@ pub struct Config {
     pub drafts: Drafts,
     /// Puts text on the clipboard.
     pub clip: Clip,
+    /// Triggers an immediate update check on the shell.
+    pub check_update: CheckUpdate,
     /// Installs a newer version.
     pub install: Install,
     /// How much the log says: `ZUTALK_LOG` through `from_env`, else `info`.
@@ -86,8 +101,9 @@ impl Config {
         let devices: Devices = Arc::new(audio::devices);
         let (dial, reels, drafts) = (wire::dial(), tape::reels(), shelf::drafts());
         let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
-        // Without a shell to give them, nothing can be put on the clipboard, nor installed.
-        let (clip, install): (Clip, Install) = (Arc::new(|_| false), Arc::new(|| {}));
+        // Without a shell to give them, nothing can be put on the clipboard, checked, or installed.
+        let (clip, check_update, install): (Clip, CheckUpdate, Install) =
+            (Arc::new(|_| false), Arc::new(|| {}), Arc::new(|| {}));
         let log = Level::Info;
         Self {
             data,
@@ -104,6 +120,7 @@ impl Config {
             reels,
             drafts,
             clip,
+            check_update,
             install,
             log,
         }
@@ -286,10 +303,19 @@ impl Core {
         }
     }
 
+    /// Reports progress or outcome from the shell's update checker to the hub.
+    pub async fn report_update(&self, report: UpdateReport) {
+        let _ = self.results.send(Msg::UpdateReported(report)).await; // dropped: the hub has ended
+    }
+
     /// The shell's report from looking for a newer version of the app: one downloaded and
     /// ready to install, or what kept it from being had.
     pub async fn looked(&self, found: Result<String, &'static str>) {
-        let _ = self.results.send(Msg::Looked(found)).await; // dropped: the hub has ended
+        let report = match found {
+            Ok(version) => UpdateReport::Ready(version),
+            Err(code) => UpdateReport::Failed(code),
+        };
+        self.report_update(report).await;
     }
 
     /// Reports the latest frame sequence pushed by the shell (`P1.md` §3.3, §3.5).

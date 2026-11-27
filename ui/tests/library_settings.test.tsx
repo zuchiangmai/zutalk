@@ -10,6 +10,7 @@ import type { State } from '$proto/State';
 import { EMPTY } from '../dev/mock';
 import {
   type Bus,
+  flushPendingSignals,
   noticesSource,
   overlaySource,
   resetChannel,
@@ -626,5 +627,123 @@ describe('SettingsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
     expect(sent).toContainEqual({ do: 'OwnKey', service: 'soniox', key: null });
+  });
+
+  it('settings_always_shows_version_manual_check_downloading_and_recording_guard', () => {
+    const sent: Command[] = [];
+    let emit: (e: Event) => void = () => {};
+    const initial: State = {
+      ...EMPTY,
+      version: '0.9.5',
+      update: null,
+      update_status: { is: 'Idle' },
+    };
+    const bus: Bus = {
+      async send(cmd) {
+        sent.push(cmd);
+      },
+      async query(): Promise<QueryReply> {
+        return { version: 1, value: { view: 'Glossary', data: [] } };
+      },
+      listen(on) {
+        emit = on;
+        on({ kind: 'State', is: initial });
+        return () => {};
+      },
+    };
+
+    stopBus = startBus(bus);
+    render(<SettingsPage />);
+
+    // Always visible even when no update is available
+    expect(screen.getByText('Version & updates')).toBeTruthy();
+    expect(screen.getByText('Current version v0.9.5')).toBeTruthy();
+    const checkBtn = screen.getByRole('button', { name: 'Check for updates' }) as HTMLButtonElement;
+    expect(checkBtn.disabled).toBe(false);
+    fireEvent.click(checkBtn);
+    expect(sent).toContainEqual({ do: 'CheckUpdate' });
+
+    // Checking -> button disabled with progress label
+    act(() => {
+      emit({
+        kind: 'State',
+        is: { ...initial, update_status: { is: 'Checking' } },
+      });
+    });
+    expect(
+      (screen.getByRole('button', { name: 'Checking for updates…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // Downloading -> shows incoming version while button stays disabled
+    act(() => {
+      emit({
+        kind: 'State',
+        is: { ...initial, update_status: { is: 'Downloading', version: '0.9.6' } },
+      });
+    });
+    expect(screen.getByText('Downloading version 0.9.6…')).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Checking for updates…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // UpToDate -> shows confirmation and re-enables Check for updates
+    act(() => {
+      emit({
+        kind: 'State',
+        is: { ...initial, update_status: { is: 'UpToDate' } },
+      });
+    });
+    expect(screen.getByText('Up to date')).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Check for updates' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    // Ready while recording -> section stays visible, Update button is disabled with clear copy
+    act(() => {
+      emit({
+        kind: 'Signal',
+        is: {
+          seq: 1,
+          signal: {
+            of: 'Session',
+            is: {
+              id: 'rec-live',
+              started: Date.now(),
+              status: { is: 'Recording' },
+              outbound: false,
+              viewers: 0,
+              event_title: null,
+            },
+          },
+        },
+      });
+      emit({
+        kind: 'State',
+        is: {
+          ...initial,
+          update: '0.9.6',
+          update_status: { is: 'Ready', version: '0.9.6' },
+        },
+      });
+      flushPendingSignals();
+    });
+    expect(screen.getByText('Current version v0.9.5')).toBeTruthy();
+    expect(screen.getByText('Version 0.9.6 is ready — finish recording to update')).toBeTruthy();
+    const updateWhileRec = screen.getByRole('button', { name: 'Update' }) as HTMLButtonElement;
+    expect(updateWhileRec.disabled).toBe(true);
+
+    // Once recording stops -> Update button enables and dispatches Command::Update
+    act(() => {
+      emit({
+        kind: 'Signal',
+        is: { seq: 2, signal: { of: 'Session', is: null } },
+      });
+      flushPendingSignals();
+    });
+    expect(screen.getByText('Version 0.9.6 is ready')).toBeTruthy();
+    const updateReady = screen.getByRole('button', { name: 'Update' }) as HTMLButtonElement;
+    expect(updateReady.disabled).toBe(false);
+    fireEvent.click(updateReady);
+    expect(sent).toContainEqual({ do: 'Update' });
   });
 });

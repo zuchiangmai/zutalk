@@ -1048,6 +1048,61 @@ async fn an_update_is_installed_only_while_nothing_is_recording() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn manual_update_check_wakes_shell_and_tracks_download_and_ready_states() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use zutalk_core::app::hub::{CheckUpdate, UpdateReport};
+    use zutalk_core::app::proto::UpdateStatus;
+
+    let _store = STORE.lock().await;
+    store(false);
+    let (checks, dir) = (Arc::new(AtomicUsize::new(0)), tempfile::tempdir().expect("a folder"));
+    let counted = checks.clone();
+    let check_update: CheckUpdate = Arc::new(move || _ = counted.fetch_add(1, SeqCst));
+    let mut app = App::with(Config { check_update, ..config(dir.path(), NOWHERE) });
+
+    let boot_state = app.until(|_| true).await;
+    assert_eq!(boot_state.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(boot_state.update_status, UpdateStatus::Idle);
+
+    // Manual CheckUpdate wakes shell once and enters Checking; second click while Checking coalesces.
+    app.send(Command::CheckUpdate);
+    app.until(|s| s.update_status == UpdateStatus::Checking).await;
+    assert_eq!(checks.load(SeqCst), 1);
+    app.send(Command::CheckUpdate);
+    assert_eq!(checks.load(SeqCst), 1);
+
+    // UpToDate after manual check emits `update.none`; background UpToDate stays quiet.
+    app.core.report_update(UpdateReport::UpToDate).await;
+    app.until(|s| s.update_status == UpdateStatus::UpToDate).await;
+    app.notice("update.none").await;
+    let said_before = app.outlet.said.now().1.next;
+    app.core.report_update(UpdateReport::UpToDate).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(app.outlet.said.now().1.next, said_before);
+
+    // Manual check -> Downloading -> Ready updates both `update_status` and `update`, emitting `update.ready`.
+    app.send(Command::CheckUpdate);
+    app.until(|s| s.update_status == UpdateStatus::Checking).await;
+    assert_eq!(checks.load(SeqCst), 2);
+
+    app.core.report_update(UpdateReport::Downloading("0.9.9".into())).await;
+    let dl = app
+        .until(|s| s.update_status == UpdateStatus::Downloading { version: "0.9.9".into() })
+        .await;
+    assert!(dl.update.is_none());
+
+    app.core.report_update(UpdateReport::Ready("0.9.9".into())).await;
+    let ready = app.until(|s| s.update.as_deref() == Some("0.9.9")).await;
+    assert_eq!(ready.update_status, UpdateStatus::Ready { version: "0.9.9".into() });
+    app.notice("update.ready").await;
+
+    // Clicking CheckUpdate when already Ready immediately notifies `update.ready` without re-checking.
+    app.send(Command::CheckUpdate);
+    app.notice("update.ready").await;
+    assert_eq!(checks.load(SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_core_runs_on_a_tree_with_a_name() {
     let _store = STORE.lock().await;
     store(false);

@@ -544,5 +544,15 @@
   "city.event_upcoming": "直近・今後のイベント",
   "city.event_past": "過去のイベント",
   "city.event_select": "イベントを選択",
-  "city.retry": "再試行"
+  "city.retry": "再試行",
+  "code.update.none": "ZuTalk は最新です",
+  "code.update.ready": "新しいバージョンの準備ができました。「更新」で適用します",
+  "settings.version_title": "バージョンと更新",
+  "settings.current_version": "現在のバージョン {0}",
+  "settings.check_update": "アップデートを確認",
+  "settings.update_checking": "アップデートを確認中…",
+  "settings.update_downloading": "バージョン {0} をダウンロード中…",
+  "settings.update_up_to_date": "最新です",
+  "settings.update_failed": "アップデートを確認できませんでした",
+  "settings.update_recording_wait": "バージョン {0} の準備完了 — 録音終了後に更新できます"
 }

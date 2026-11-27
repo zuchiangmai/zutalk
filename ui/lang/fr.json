@@ -544,5 +544,15 @@
   "city.event_upcoming": "À venir et récents",
   "city.event_past": "Événements passés",
   "city.event_select": "Choisir un événement",
-  "city.retry": "Réessayer"
+  "city.retry": "Réessayer",
+  "code.update.none": "ZuTalk est à jour",
+  "code.update.ready": "Mise à jour prête — cliquez sur Mettre à jour pour installer",
+  "settings.version_title": "Version et mises à jour",
+  "settings.current_version": "Version actuelle {0}",
+  "settings.check_update": "Rechercher des mises à jour",
+  "settings.update_checking": "Recherche de mises à jour…",
+  "settings.update_downloading": "Téléchargement de la version {0}…",
+  "settings.update_up_to_date": "À jour",
+  "settings.update_failed": "Impossible de vérifier les mises à jour",
+  "settings.update_recording_wait": "La version {0} est prête — terminez l’enregistrement pour mettre à jour"
 }

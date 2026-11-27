@@ -1035,6 +1035,11 @@ impl Work {
         });
     }
 
+    /// Signals the shell's non-blocking `check_update` port to look for a newer version.
+    pub(crate) fn request_update_check(&self) {
+        (self.config.check_update)();
+    }
+
     /// Runs `config.install` in a blocking call on `work`; if it returns, reports failure to hub.
     pub(crate) fn install(&self) {
         let install = self.config.install.clone();

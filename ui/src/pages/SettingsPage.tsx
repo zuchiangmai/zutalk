@@ -78,6 +78,7 @@ export type SettingsViewProps = {
   onOpenKnowledge: () => void;
   onDiagnose: () => void;
   onToggleOverlay: () => void;
+  onCheckUpdate?: () => void;
   onUpdate: () => void;
   onOpenOutbound?: () => void;
   onOpenCaptions?: () => void;
@@ -102,6 +103,7 @@ export function SettingsView({
   onOpenKnowledge,
   onDiagnose,
   onToggleOverlay,
+  onCheckUpdate = () => {},
   onUpdate,
   onOpenOutbound,
   onOpenCaptions,
@@ -428,16 +430,52 @@ export function SettingsView({
         </div>
       </section>
 
-      {/* Update */}
-      {state.update && !recording && (
-        <section className="group">
-          <h2 className="h">{t('update')}</h2>
-          <div className="line">
-            <span className="grow">{t('settings.update_ready', state.update)}</span>
-            <Button onClick={onUpdate}>{t('update')}</Button>
-          </div>
-        </section>
-      )}
+      {/* Version & updates */}
+      {(() => {
+        const readyVersion =
+          state.update ??
+          (state.update_status.is === 'Ready' ? state.update_status.version : null);
+        const updateBusy =
+          state.update_status.is === 'Checking' || state.update_status.is === 'Downloading';
+        return (
+          <section className="group">
+            <h2 className="h">{t('settings.version_title')}</h2>
+            <div className="line">
+              <span className="grow" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span className="num" style={{ fontWeight: 500 }}>
+                  {t('settings.current_version', state.version ? `v${state.version}` : '—')}
+                </span>
+                {readyVersion ? (
+                  <span className="k">
+                    {recording
+                      ? t('settings.update_recording_wait', readyVersion)
+                      : t('settings.update_ready', readyVersion)}
+                  </span>
+                ) : state.update_status.is === 'Downloading' ? (
+                  <span className="k">
+                    {t('settings.update_downloading', state.update_status.version)}
+                  </span>
+                ) : state.update_status.is === 'Checking' ? (
+                  <span className="k">{t('settings.update_checking')}</span>
+                ) : state.update_status.is === 'UpToDate' ? (
+                  <span className="k">{t('settings.update_up_to_date')}</span>
+                ) : state.update_status.is === 'Failed' ? (
+                  <span className="k">{t('settings.update_failed')}</span>
+                ) : null}
+              </span>
+              {readyVersion ? (
+                <Button disabled={recording} onClick={onUpdate}>
+                  {t('update')}
+                </Button>
+              ) : (
+                <Pill disabled={updateBusy} onClick={onCheckUpdate}>
+                  {updateBusy ? t('settings.update_checking') : t('settings.check_update')}
+                </Pill>
+              )}
+            </div>
+          </section>
+        );
+      })()}
     </div>
   );
 }
@@ -479,6 +517,7 @@ export function SettingsPage() {
       onOpenKnowledge={() => go({ page: 'knowledge' })}
       onDiagnose={() => void diagnose()}
       onToggleOverlay={() => setOverlay(!overlayOpen)}
+      onCheckUpdate={() => void send({ do: 'CheckUpdate' })}
       onUpdate={() => void send({ do: 'Update' })}
       onOpenOutbound={() => go({ page: 'outbound' })}
       onOpenCaptions={() => go({ page: 'captions' })}

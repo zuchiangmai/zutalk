@@ -5,11 +5,13 @@
 //! `.await` in this file receives the next message from the mailbox.
 
 pub(crate) use crate::app::core::Voice;
-pub use crate::app::core::{Clip, Config, Core, Devices, Install, Outlet};
+pub use crate::app::core::{
+    CheckUpdate, Clip, Config, Core, Devices, Install, Outlet, UpdateReport,
+};
 pub use crate::app::proto::Notices;
 use crate::app::proto::{
     AuthFlow, Change, Command, Device, From, HostState, Level as SoundLevel, LocalShelf, Quota,
-    Session, Sound, State, Status,
+    Session, Sound, State, Status, UpdateStatus,
 };
 pub use crate::app::recording::{DRAFT_QUEUE_LINES, TAPE_QUEUE_BLOCKS};
 pub use crate::app::work::DESK_QUEUE_JOBS;
@@ -67,7 +69,9 @@ impl Boot {
             Boot::Starting => Err("starting"),
             Boot::Ready => Ok(()),
             Boot::Installing => match command {
-                Command::Start | Command::Import { .. } => Err("update.installing"),
+                Command::Start | Command::Import { .. } | Command::CheckUpdate => {
+                    Err("update.installing")
+                }
                 _ => Ok(()),
             },
         }
@@ -125,7 +129,7 @@ pub(crate) enum Msg {
     HostFailed { host_gen: u64, code: &'static str },
     HostViewers { host_gen: u64, viewers: u32 },
     HostStopped { host_gen: u64 },
-    Looked(Result<String, &'static str>),
+    UpdateReported(UpdateReport),
     City(Result<Calendar, End>),
     FilingReady(String, Filing),
     Filed(String, &'static str),
@@ -163,7 +167,7 @@ impl Msg {
             Msg::HostFailed { .. } => "HostFailed",
             Msg::HostViewers { .. } => "HostViewers",
             Msg::HostStopped { .. } => "HostStopped",
-            Msg::Looked(_) => "Looked",
+            Msg::UpdateReported(_) => "UpdateReported",
             Msg::City(_) => "City",
             Msg::FilingReady(_, _) => "FilingReady",
             Msg::Filed(_, _) => "Filed",
@@ -214,6 +218,8 @@ pub(crate) struct Hub {
     need_retain: bool,
     auth_gen: u64,
     host_gen: u64,
+    update_manual: bool,
+    update_told_fail: bool,
 }
 
 impl Hub {
@@ -238,6 +244,7 @@ impl Hub {
         let hub_turn_us = stats.spread("hub.turn_us");
         let refresh_merged = stats.counter("refresh.merged");
         let state = State {
+            version: env!("CARGO_PKG_VERSION").into(),
             languages: crate::live::lang::ALL.iter().map(|profile| profile.lang.into()).collect(),
             exporters: EXPORTERS.iter().map(|exporter| exporter.id.into()).collect(),
             ..State::default()
@@ -274,6 +281,8 @@ impl Hub {
             need_retain: false,
             auth_gen: 0,
             host_gen: 0,
+            update_manual: false,
+            update_told_fail: false,
         }
     }
 
@@ -600,7 +609,45 @@ impl Hub {
                     self.set_host(HostStepEvent::Stopped, "stopped");
                 }
             }
-            Msg::Looked(found) => self.state.update = Some(found?),
+            Msg::UpdateReported(report) => match report {
+                UpdateReport::Checking => {
+                    if self.state.update.is_none() {
+                        self.state.update_status = UpdateStatus::Checking;
+                    }
+                }
+                UpdateReport::Downloading(version) => {
+                    if self.state.update.is_none() {
+                        self.state.update_status = UpdateStatus::Downloading { version };
+                    }
+                }
+                UpdateReport::Ready(version) => {
+                    self.update_told_fail = false;
+                    self.state.update = Some(version.clone());
+                    self.state.update_status = UpdateStatus::Ready { version };
+                    if std::mem::take(&mut self.update_manual) {
+                        self.said.say("update.ready");
+                    }
+                }
+                UpdateReport::UpToDate => {
+                    self.update_told_fail = false;
+                    if self.state.update.is_none() {
+                        self.state.update_status = UpdateStatus::UpToDate;
+                    }
+                    if std::mem::take(&mut self.update_manual) {
+                        self.said.say("update.none");
+                    }
+                }
+                UpdateReport::Failed(c) => {
+                    let manual = std::mem::take(&mut self.update_manual);
+                    if self.state.update.is_none() {
+                        self.state.update_status = UpdateStatus::Failed;
+                    }
+                    if manual || !self.update_told_fail {
+                        self.update_told_fail = true;
+                        return Err(c);
+                    }
+                }
+            },
             Msg::City(Ok(_)) => {}
             Msg::City(Err(end)) => return Err(code(end)),
             Msg::FilingReady(id, filing) => self.start_filing(id, filing)?,
@@ -879,6 +926,21 @@ impl Hub {
                 self.work.generate_title(id)?;
             }
             Command::PickTitle { id, title, by } => self.work.pick_title(id, title, by)?,
+            Command::CheckUpdate => {
+                if let Some(version) = self.state.update.clone() {
+                    self.state.update_status = UpdateStatus::Ready { version };
+                    self.said.say("update.ready");
+                } else if matches!(
+                    self.state.update_status,
+                    UpdateStatus::Checking | UpdateStatus::Downloading { .. }
+                ) {
+                    self.update_manual = true;
+                } else {
+                    self.update_manual = true;
+                    self.state.update_status = UpdateStatus::Checking;
+                    self.work.request_update_check();
+                }
+            }
             // Installing relaunches the app, so never while recording.
             Command::Update if self.recording.is_some() => return Err("update.recording"),
             Command::Update if self.boot == Boot::Installing => return Err("update.installing"),

@@ -544,5 +544,15 @@
   "city.event_upcoming": "다가오는 및 최근 행사",
   "city.event_past": "지난 행사",
   "city.event_select": "행사 선택",
-  "city.retry": "다시 시도"
+  "city.retry": "다시 시도",
+  "code.update.none": "이미 최신 버전입니다",
+  "code.update.ready": "새 버전 준비됨 — 업데이트를 눌러 설치하세요",
+  "settings.version_title": "버전 및 업데이트",
+  "settings.current_version": "현재 버전 {0}",
+  "settings.check_update": "업데이트 확인",
+  "settings.update_checking": "업데이트 확인 중…",
+  "settings.update_downloading": "버전 {0} 다운로드 중…",
+  "settings.update_up_to_date": "최신 버전입니다",
+  "settings.update_failed": "업데이트를 확인하지 못했습니다",
+  "settings.update_recording_wait": "버전 {0} 준비됨 — 녹음이 끝나면 업데이트할 수 있습니다"
 }

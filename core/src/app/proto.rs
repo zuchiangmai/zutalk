@@ -28,16 +28,36 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use ts_rs::TS;
 
+/// Lifecycle of checking for and downloading a newer app version (`SettingsPage`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "is")]
+pub enum UpdateStatus {
+    #[default]
+    Idle,
+    Checking,
+    Downloading {
+        version: String,
+    },
+    Ready {
+        version: String,
+    },
+    UpToDate,
+    Failed,
+}
+
 /// Bounded app state sent whole whenever it changes (`PLAN.md` §2.4, `P2.md` §3.6.1).
 /// Anything that grows with recordings or history is fetched through [`Query`], never held here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct State {
-    pub me: Option<String>,     // the DID signed in on this device
-    pub auth: AuthFlow,         // explicit sign-in / create / recover state machine
+    pub version: String,             // running app version (`CARGO_PKG_VERSION`)
+    pub me: Option<String>,          // the DID signed in on this device
+    pub auth: AuthFlow,              // explicit sign-in / create / recover state machine
     pub handle: Option<String>, // primary Zu handle for `me`, cached offline and refreshed on sign-in
     pub rotation_unsaved: bool, // the identity made here has a rotation key not saved elsewhere
     pub update: Option<String>, // a newer version of the app, downloaded and ready to install
+    pub update_status: UpdateStatus, // explicit update check / download / ready state machine
     pub keys: Vec<(String, From)>,
     #[ts(type = "number | null")]
     pub left: Option<u64>, // µ$ of granted quota left, as last heard
@@ -534,6 +554,7 @@ pub enum Command {
     SignOut,
     RotationSaved,
     CopyRotation,
+    CheckUpdate,
     Update,
     OwnKey { service: String, key: Option<String> },
     Captions { show: bool },
@@ -604,6 +625,7 @@ impl std::fmt::Debug for Command {
             Command::SignOut => f.write_str("SignOut"),
             Command::RotationSaved => f.write_str("RotationSaved"),
             Command::CopyRotation => f.write_str("CopyRotation"),
+            Command::CheckUpdate => f.write_str("CheckUpdate"),
             Command::Update => f.write_str("Update"),
             Command::OwnKey { service, key } => f
                 .debug_struct("OwnKey")
@@ -686,6 +708,7 @@ impl Command {
             Command::SignOut => "SignOut",
             Command::RotationSaved => "RotationSaved",
             Command::CopyRotation => "CopyRotation",
+            Command::CheckUpdate => "CheckUpdate",
             Command::Update => "Update",
             Command::OwnKey { .. } => "OwnKey",
             Command::Captions { .. } => "Captions",
@@ -736,6 +759,7 @@ impl Command {
             | Command::SignOut
             | Command::RotationSaved
             | Command::CopyRotation
+            | Command::CheckUpdate
             | Command::Update
             | Command::OwnKey { .. }
             | Command::Captions { .. }

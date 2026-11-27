@@ -89,11 +89,13 @@ export const DEFAULT_CAPTION_PREFS = {
 };
 
 export const EMPTY: State = {
+  version: '0.9.5',
   me: null,
   auth: { is: 'Idle' },
   handle: null,
   rotation_unsaved: false,
   update: null,
+  update_status: { is: 'Idle' },
   keys: [
     ['soniox', 'Nowhere'],
     ['openrouter', 'Nowhere'],
@@ -217,6 +219,7 @@ export function mockBus(recording = false): Bus {
     quota: makeDemoQuota(),
     local_shelf: { recordings: 2, adopted: true },
     update: '0.9.1',
+    update_status: { is: 'Ready', version: '0.9.1' },
     setup: {
       spoken: ['zh', 'th'],
       shown: ['zh', 'th', 'en'],
@@ -736,6 +739,18 @@ export function mockBus(recording = false): Bus {
       s.rotation_unsaved = false;
     },
     CopyRotation: () => on({ kind: 'Notice', is: 'copied' }),
+    CheckUpdate: () => {
+      if (s.update) {
+        s.update_status = { is: 'Ready', version: s.update };
+        on({ kind: 'Notice', is: 'update.ready' });
+        return;
+      }
+      s.update_status = { is: 'Checking' };
+      later(400, () => {
+        s.update_status = { is: 'UpToDate' };
+        on({ kind: 'Notice', is: 'update.none' });
+      });
+    },
     Update: () => globalThis.location?.reload(),
     OwnKey: (c) => {
       s.keys = s.keys.map(([k, f]) => [k, k === c.service ? (c.key ? 'Own' : 'Nowhere') : f]);

@@ -130,9 +130,10 @@ fn main() {
             let runtime = tauri::async_runtime::handle();
             let _entered = runtime.inner().enter();
 
-            let install_slot = Arc::new(OnceLock::new());
-            let install = updates::installer(install_slot.clone());
-            let config = Config { old, handover_helper, clip, install, ..base };
+            let update_slot = Arc::new(OnceLock::new());
+            let check_update = updates::checker(update_slot.clone());
+            let install = updates::installer(update_slot.clone());
+            let config = Config { old, handover_helper, clip, check_update, install, ..base };
             let (core, outlet) = Core::start(config).map_err(|end| format!("{end:?}"))?;
             let shell = Tree::root("shell", core.stats());
             let ui_vitals = UiVitals {
@@ -140,7 +141,7 @@ fn main() {
                 gaps: shell.stats().counter("ui.gaps"),
             };
             let (update_tx, update_rx) = updates::channel(shell.stats());
-            let _ = install_slot.set(update_tx); // dropped: initialized once before any Install call
+            let _ = update_slot.set(update_tx); // dropped: initialized once before any update call
             let (joins_tx, joins_rx) = queue::bounded::<(String, Channel<Event>)>(
                 shell.stats(),
                 "shell.joins",
@@ -208,6 +209,27 @@ fn main() {
                 ),
             );
             updates::start(&shell, app.handle().clone(), update_rx, !tauri::is_dev());
+            #[cfg(target_os = "macos")]
+            if let Ok(menu) = tauri::menu::Menu::default(app.handle()) {
+                if let Ok(items) = menu.items()
+                    && let Some(tauri::menu::MenuItemKind::Submenu(app_menu)) = items.first()
+                    && let Ok(check_item) = tauri::menu::MenuItem::with_id(
+                        app,
+                        "check_updates",
+                        "Check for Updates…",
+                        true,
+                        None::<&str>,
+                    )
+                {
+                    let _ = app_menu.insert(&check_item, 1); // dropped: menu falls back to default items if insertion fails
+                }
+                let _ = app.set_menu(menu); // dropped: app still runs if native menu replacement fails
+                app.on_menu_event(|handle, event| {
+                    if event.id().as_ref() == "check_updates" {
+                        let _ = handle.state::<Core>().send(Command::CheckUpdate); // dropped: core busy or closing
+                    }
+                });
+            }
             let _ = app.manage(shell); // dropped: `false` only if one was managed already
             app.manage(joins_tx);
             Ok(())
