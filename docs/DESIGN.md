@@ -188,17 +188,21 @@ ZuTalk 把一场对话变成录音的人自己签名的文字。屏幕上的现�
 **做法。** 城就是一台 Zu 主机，按规范交：
 
 - **选城、选活动**都在录音的阅读页。人填城的地址（域名；本机试城可以是 `http://127.0.0.1:<端口>`），`city::calendar` 取域名确认的 DID（map.md 的 HTTPS 方法），再查 `type=ev/event&to=<城>` 得到活动；没有正文或没有 `title` 的活动选不了，不列。界面默认选离录音开始最近的一场；音频默认开。
-- **交什么**：本人的记录，`to` 写城的 DID，键里用一个随机的 `f` 替掉本机的录音 id（path.md 要键随机，记录头是公开的）——`talk/recording` 是 `About` 加上 `event`（活动记录的 `zu://` 路径）和 `audio`（每段 `{t0, file}`，不交音频时为空），`talk/line` 是当前那一次转写的每一行，`talk/speaker` 是说话人的名字。`talk/note` 不交。音频每 5 分钟一段 WAV，作文件挂在 `talk/recording` 上；读音频只有 `tape::Pass::City` 这一条。
+- **交什么**：照城的软件 pol 读录音的格式（pol `kinds/tape.ts`；`DECISIONS.md` #6），本人签名，`to` 写城的 DID，键用一个随机的 `f`（path.md 要键随机，记录头是公开的），两条记录：
+  - `tape/take`（键 `f`）：`event` 是活动的引用 `<主办人 DID>~<活动键>`；`title` 是活动的标题（没有就用录音的标题），按 UTF-16 长度截到 80；`start`、`end` 是墙钟毫秒；交音频时 `mime` 为 `audio/wav`、`parts` 每段 `{n, file, size, t0, dur, mime, lv, blob}`（不交音频时两者都不写，之前交过的音频就不再被点名）；`speakers` 是 `{sp, name}`；`text` 点名文字稿文件，`translations` 每种译文点名一个文件（`{lang, file, size, blob}`）。
+  - `arc/item`（键 `tape-f`）：`kind: "note"`、`title: "录音 · <同一标题>"`、`text: "时长 mm:ss"`、同一 `event`、`tags: ["录制"]`。pol 的档案馆靠这条笔记把录音放到活动页上。
+  - 文字稿和译文是 JSON 文件（`application/json`，CID 用 raw 编码），字段次序和 pol 的 `transcriptBytes`、`translationBytes` 一样：`{"segs":[{"t","d","sp","text"}…]}`、`{"lang","segs":[{"t","text"}…]}`，来自当前那一次转写的每一行（没有字的行不写）。签名时在内存里做好，和记录一起留着，每次重试送的字节都一样；记录交到以后先传它们，再传音频。
+  - `talk/note` 不交；本机书架上的 `talk/recording`、`talk/line`、`talk/speaker` 照旧，只是不再交给城。超出 pol 上限（分段 2000、说话人 200、译文 20 种等）的是 `city.big`。音频每 5 分钟一段 WAV，作文件挂在 `tape/take` 上；读音频只有 `tape::Pass::City` 这一条。
 - **有没有音频**：和别处同一个事实 `tape::kept`（§5.8）。界面只在 `Row.audio` 为真时给「音频」开关；`city::sign` 真要读音频之前再问一次，所以交之前、或重启后接着交之前，音频被本人销毁或被留多久的规则清扫掉，就只交文字，`talk/filing` 记下没带音频。启动时先清扫、再接着交，次序固定。交到一半才被销毁的，上传停在 `tape`。
 - **认证**：不另登录。记录自带本人的签名，文件由记录点名，规范里这两种请求都不带别的凭证。
 - **本机记下的**：`talk/filing`（在 `filings.jsonl`，键是录音 id）记城、活动、要不要音频、`f` 和状态；状态是空（在交）、`city.filed`、或停下来的代码。改状态就是同一路径多一条记录。交之前先记下，所以重启或换人登录回来会接着交。
 - **怎么交**：先现查活动还在不在，再把记录签好（一次交里各次重试送的都是同一批），分批送，主机的每个词照表 `WORDS` 读；然后一段段上传音频，记着哪几段已经送到，重试只补剩下的。会过去的（连不上、忙）按 `again` 越等越久地再试，界面的进度写着在等什么。
-- **失败是事实**：`city.address`、`city.unknown`、`city.unreachable`、`city.busy`、`city.event.gone`、`city.bad`、`city.big`、`city.full`、`city.deny`；文字到了、音频没收下是 `city.audio.big`、`city.audio.deny`。都在八种语言里有词。
+- **失败是事实**：`city.address`、`city.unknown`、`city.unreachable`、`city.busy`、`city.event.gone`、`city.bad`、`city.big`、`city.full`、`city.deny`（文字稿或译文文件没被收下，也是城自己的话：`city.big`、`city.deny` 等）；文字到了、音频没收下是 `city.audio.big`、`city.audio.deny`。都在八种语言里有词。
 - **同一座城再交**：沿用同一个 `f`，新签的记录和旧的在同一路径上并发，按 `at` 取新的；不带音频再交，`audio` 为空，旧的文件不再被点名，主机可以丢掉。
 
 测试：`core/tests/city.rs`，城是本机端口上的替身，按规范验签、查 `to`、只收被现行记录点名的文件；没有对真的城发过请求。
 
-**城那边要做的**：在城的域名上答 `/.well-known/zu-did`（一台主机跑几座城时怎么找到城的 DID，规范还没写）；收文件（blob.md）；定下 `ev/event` 正文里 `title`（字符串）和 `start`（毫秒整数）；把 `to` 是这座城的 `talk/*` 记录排成档案馆。
+**城那边要做的**：在城的域名上答 `/.well-known/zu-did`（一台主机跑几座城时怎么找到城的 DID，规范还没写）；收文件（blob.md）；定下 `ev/event` 正文里 `title`（字符串）和 `start`（毫秒整数）；档案馆读 `to` 是这座城的 `tape/take` 和 `arc/item` 笔记（pol 已有）。
 
 **没做、没证明的**：DID 文档反过来认不认这个域名（map.md 的双向核对）没查，因为城的 DID 文档怎么标还没规定；活动记录只核对了结构和正文的 CID，没去解析每个主办人的 DID 验签；不保留交出去的记录，所以重启后重试会在城里多一份同样的记录（并发，取 `at` 新的，结果不变）；撤回（送删除记录，主机随之丢掉文字和音频）没做；音频是不压缩的 WAV（每小时约 115 MB），换格式只改 `city::parts` 一处。
 

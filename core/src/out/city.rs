@@ -2,9 +2,12 @@
 //! besides its transcription that its audio may go (`tape::Pass::City`). A city is a Zu host
 //! (record.md, query.md, blob.md), and ZuTalk is no app of the city's: what goes is the person's
 //! own records, signed with the identity they already have and addressed to the city in `to`.
-//! That is the recording, its lines in every language, its speakers' names and, unless they
-//! said no, its audio as files; never its note. No request needs another proof: records are
-//! signed, and a file is taken only when a record names it.
+//! They are written as the city's own software reads a recording (pol: `kinds/tape.ts`,
+//! `market/tape`): one `tape/take` naming its transcript, a file for each language it was
+//! translated into, its speakers' names and, unless they said no, its audio as files; and one
+//! `arc/item` note that puts the take on its event's page in the archive. Never its note. No
+//! request needs another proof: records are signed, and a file is taken only when a record
+//! names it.
 
 use crate::ai::write::wav_header;
 use crate::capture::clock::wall_ms;
@@ -16,7 +19,7 @@ use crate::rt::stats::Counter;
 use crate::rt::supervise::{End, Tree, again};
 use reqwest::{Client, Response, StatusCode, header::CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as Json, json};
+use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -26,23 +29,44 @@ use ts_rs::TS;
 use zu::{Blob, Cid, Codec, Held, Path, Query, Record, Value};
 use zutalk_log::{info, warn};
 
-/// Record types delivered to a city archive (`DECISIONS.md` #6).
-/// Kept in one table so aligning with archive v0.3 (`tape/*` vs `talk/*`) is a one-table change.
+/// Record types read from and delivered to a city archive (`DECISIONS.md` #6): pol's own, so
+/// that its archive plays what is filed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveTypes {
     pub event: &'static str,
-    pub recording: &'static str,
-    pub line: &'static str,
-    pub speaker: &'static str,
+    pub take: &'static str,
+    pub note: &'static str,
 }
 
 /// Current city-archive record types (`DECISIONS.md` #6).
-pub const ARCHIVE_TYPES: ArchiveTypes = ArchiveTypes {
-    event: "ev/event",
-    recording: "talk/recording",
-    line: "talk/line",
-    speaker: "talk/speaker",
-};
+pub const ARCHIVE_TYPES: ArchiveTypes =
+    ArchiveTypes { event: "ev/event", take: "tape/take", note: "arc/item" };
+
+/// The note's key is the take's after this, as pol's archive finds a take by its note.
+const NOTE_KEY_PREFIX: &str = "tape-";
+/// The note's title before the take's, its text before the length, and its one tag, as pol's
+/// recorder writes them.
+const NOTE_TITLE_PREFIX: &str = "录音 · ";
+const NOTE_LENGTH_PREFIX: &str = "时长 ";
+const NOTE_TAG: &str = "录制";
+/// What a take is called when neither its event nor the recording has a title: pol needs one.
+const UNTITLED: &str = "录音";
+/// The media types of the audio's parts and of the transcript and translation files.
+const AUDIO_TYPE: &str = "audio/wav";
+const TEXT_TYPE: &str = "application/json";
+
+/// What pol's archive takes at most (`kinds/tape.ts`, `kinds/archive.ts`): text in UTF-16 code
+/// units, as JavaScript counts a string's length, and lists in entries. A title or a name is cut
+/// to fit; what cannot be cut without losing part of the recording is too large for the city.
+const TAKE_TITLE_UNITS: usize = 80;
+const NOTE_TITLE_UNITS: usize = 120;
+const EVENT_REF_UNITS: usize = 600;
+const SPEAKER_LABEL_UNITS: usize = 8;
+const SPEAKER_NAME_UNITS: usize = 40;
+const LANGUAGE_UNITS: usize = 40;
+const PARTS_MAX: usize = 2000;
+const SPEAKERS_MAX: usize = 200;
+const TRANSLATIONS_MAX: usize = 20;
 
 /// Progress step emitted while filing a recording to a city archive (`layers.sh`: keeps `out`
 /// independent of `app::proto`).
@@ -115,44 +139,219 @@ pub fn origin(address: &str) -> Result<String, &'static str> {
     }
 }
 
-/// What goes to the city for `filing`, signed by `me`: the recording as it reads, under the
-/// filing's key in place of its own id, saying the event it is filed to and its audio's parts,
-/// each with where it starts (none when no audio goes, so that none filed before stays named).
-/// Records are signed a millisecond apart from `at` on, as one signer's clock must run
-/// (record.md § Time).
+/// What goes to a city for one filing: the records, signed, and the text files the take names,
+/// each with its bytes, made once so that every attempt gives the same.
+#[derive(Debug, Clone, Default)]
+pub struct Papers {
+    pub held: Held,
+    pub texts: Vec<TextFile>,
+}
+
+/// A file the take names, and its bytes.
+pub type TextFile = (Blob, Vec<u8>);
+
+/// What the take says of its text: the transcript's entry, one entry a translation, and the
+/// files they name, the transcript's first.
+#[derive(Default)]
+struct Texts {
+    text: Option<Value>,
+    translations: Vec<Value>,
+    files: Vec<TextFile>,
+}
+
+/// One sentence of the transcript file, its fields in pol's order (`transcriptBytes`).
+#[derive(Serialize)]
+struct Seg<'a> {
+    t: u32,
+    d: u32,
+    sp: String,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct Transcript<'a> {
+    segs: Vec<Seg<'a>>,
+}
+
+/// One translated sentence, and one language's file, in pol's order (`translationBytes`).
+#[derive(Serialize)]
+struct Translated<'a> {
+    t: u32,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct Translation<'a> {
+    lang: &'a str,
+    segs: Vec<Translated<'a>>,
+}
+
+fn units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The longest start of `text` that is at most `max` UTF-16 code units, cut between characters.
+fn clip(text: &str, max: usize) -> String {
+    let mut used = 0;
+    text.chars()
+        .take_while(|c| {
+            used += c.len_utf16();
+            used <= max
+        })
+        .collect()
+}
+
+fn fits(fit: bool) -> Result<(), &'static str> {
+    if fit { Ok(()) } else { Err("city.big") }
+}
+
+/// A body's fields, by name, before they are a map.
+type Fields = Vec<(&'static str, Value)>;
+
+fn map(fields: Fields) -> Value {
+    Value::Map(fields.into_iter().map(|(name, value)| (name.into(), value)).collect())
+}
+
+fn text(text: &str) -> Value {
+    Value::Str(text.into())
+}
+
+fn size(file: &Blob) -> Value {
+    Value::Int(i64::try_from(file.size).unwrap_or(i64::MAX))
+}
+
+/// A length of time as mm:ss, the minutes running past 59, as pol's recorder writes it.
+fn mmss(ms: u32) -> String {
+    let seconds = ms / 1000;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// A text file the take names: JSON as pol writes it, and the entry that names it.
+fn json_file(json: &impl Serialize) -> Result<(TextFile, Fields), &'static str> {
+    let bytes = serde_json::to_vec(json).map_err(|_| "id.sign")?;
+    let file = Blob::of(&bytes, TEXT_TYPE).map_err(|_| "id.sign")?;
+    let entry =
+        vec![("file", text(&file.cid.to_string())), ("size", size(&file)), ("blob", file.value())];
+    Ok(((file, bytes), entry))
+}
+
+/// The take's transcript and its translations, one file a language, from the lines of the
+/// recording's current take. Lines with no words make no sentence, and no lines no file.
+fn transcript(recording: &Recording) -> Result<Texts, &'static str> {
+    let lines: Vec<_> = recording.lines.iter().map(|(_, said)| &said.line).collect();
+    let segs: Vec<Seg> = lines
+        .iter()
+        .filter(|line| !line.text.trim().is_empty())
+        .map(|line| Seg {
+            t: line.t0,
+            d: line.t1.saturating_sub(line.t0),
+            sp: clip(&line.speaker, SPEAKER_LABEL_UNITS),
+            text: &line.text,
+        })
+        .collect();
+    if segs.is_empty() {
+        return Ok(Texts::default());
+    }
+    let (made, entry) = json_file(&Transcript { segs })?;
+    let mut texts = Texts { text: Some(map(entry)), translations: Vec::new(), files: vec![made] };
+    let langs: BTreeSet<&String> = lines.iter().flat_map(|line| line.translations.keys()).collect();
+    fits(langs.len() <= TRANSLATIONS_MAX)?;
+    for lang in langs {
+        fits(units(lang) <= LANGUAGE_UNITS)?;
+        let segs: Vec<Translated> = lines
+            .iter()
+            .filter_map(|line| Some((line.t0, line.translations.get(lang)?)))
+            .filter(|(_, said)| !said.trim().is_empty())
+            .map(|(t, said)| Translated { t, text: said })
+            .collect();
+        if segs.is_empty() {
+            continue;
+        }
+        let (made, mut entry) = json_file(&Translation { lang, segs })?;
+        entry.insert(0, ("lang", text(lang)));
+        texts.translations.push(map(entry));
+        texts.files.push(made);
+    }
+    Ok(texts)
+}
+
+/// What goes to the city for `filing`, signed by `me`: the recording as pol's archive reads one,
+/// a `tape/take` under the filing's key naming the event it is filed to, its audio's parts
+/// (none when no audio goes, so that none filed before stays named), its speakers and its text
+/// files; then the `arc/item` note that puts it on the event's page. Records are signed a
+/// millisecond apart from `at` on, as one signer's clock must run (record.md § Time). What pol
+/// would not take is `city.big`.
 pub fn records(
     me: &Me,
     filing: &Filing,
     recording: &Recording,
     audio: &[(u32, Blob)],
     at: i64,
-) -> Result<Held, zu::Error> {
-    let key = |own: &str| own.replacen(&recording.id, &filing.key, 1);
-    let value = |json: Json| Value::from_json(&json.to_string());
-    let part = |(t0, file): &(u32, Blob)| {
-        let fields = [("t0".to_owned(), Value::Int(i64::from(*t0))), ("file".into(), file.value())];
-        Value::Map(fields.into())
-    };
-    let mut about = serde_json::to_value(&recording.about).map_err(|_| zu::Error::Json)?;
-    about["event"] = json!(filing.event);
-    let Value::Map(mut head) = value(about)? else { return Err(zu::Error::Json) };
-    head.insert("audio".into(), Value::List(audio.iter().map(part).collect()));
-    let mut bodies = vec![(ARCHIVE_TYPES.recording, filing.key.clone(), Value::Map(head))];
-    for (own, said) in &recording.lines {
-        let said = serde_json::to_value(said).map_err(|_| zu::Error::Json)?;
-        bodies.push((ARCHIVE_TYPES.line, key(own), value(said)?));
+) -> Result<Papers, &'static str> {
+    let event: Path = filing.event.parse().map_err(|_| "city.event.gone")?;
+    let event = format!("{}~{}", event.by, event.key);
+    fits(units(&event) <= EVENT_REF_UNITS)?;
+    let titles = [filing.title.trim(), recording.about.title.trim()];
+    let title =
+        clip(titles.into_iter().find(|t| !t.is_empty()).unwrap_or(UNTITLED), TAKE_TITLE_UNITS);
+    let (start, length) = (recording.about.started, recording.about.length_ms);
+    let mut take = vec![
+        ("event", text(&event)),
+        ("title", text(&title)),
+        ("start", Value::Int(start)),
+        ("end", Value::Int(start + i64::from(length))),
+    ];
+    if !audio.is_empty() {
+        fits(audio.len() <= PARTS_MAX)?;
+        let ends = audio.iter().skip(1).map(|(t0, _)| *t0).chain([length]);
+        let parts = (0..).zip(audio.iter().zip(ends)).map(|(n, ((t0, file), end))| {
+            map(vec![
+                ("n", Value::Int(n)),
+                ("file", text(&file.cid.to_string())),
+                ("size", size(file)),
+                ("t0", Value::Int(i64::from(*t0))),
+                ("dur", Value::Int(i64::from(end.saturating_sub(*t0)))),
+                ("mime", text(AUDIO_TYPE)),
+                ("lv", text("")),
+                ("blob", file.value()),
+            ])
+        });
+        take.push(("mime", text(AUDIO_TYPE)));
+        take.push(("parts", Value::List(parts.collect())));
     }
-    for (label, name) in &recording.speakers {
-        let own = format!("{}.{label}", recording.id);
-        bodies.push((ARCHIVE_TYPES.speaker, key(&own), value(json!({ "text": name }))?));
+    if !recording.speakers.is_empty() {
+        fits(recording.speakers.len() <= SPEAKERS_MAX)?;
+        let speakers = recording.speakers.iter().map(|(label, name)| {
+            let sp = text(&clip(label, SPEAKER_LABEL_UNITS));
+            map(vec![("sp", sp), ("name", text(&clip(name, SPEAKER_NAME_UNITS)))])
+        });
+        take.push(("speakers", Value::List(speakers.collect())));
     }
+    let texts = transcript(recording)?;
+    take.extend(texts.text.map(|entry| ("text", entry)));
+    if !texts.translations.is_empty() {
+        take.push(("translations", Value::List(texts.translations)));
+    }
+    let note = map(vec![
+        ("kind", text("note")),
+        ("title", text(&clip(&format!("{NOTE_TITLE_PREFIX}{title}"), NOTE_TITLE_UNITS))),
+        ("text", text(&format!("{NOTE_LENGTH_PREFIX}{}", mmss(length)))),
+        ("event", text(&event)),
+        ("tags", Value::List(vec![text(NOTE_TAG)])),
+    ]);
+    let bodies = [
+        (ARCHIVE_TYPES.take, filing.key.clone(), map(take)),
+        (ARCHIVE_TYPES.note, format!("{NOTE_KEY_PREFIX}{}", filing.key), note),
+    ];
     let mut held = Held::default();
     for (n, (ty, key, body)) in (0..).zip(bodies) {
-        let (path, cid) = (Path::new(&me.did, ty, &key)?, Cid::of(Codec::Drisl, &body.encode()));
-        held.records.push(Record::sign(&me.key, path, Some(cid), [], at + n, Some(&filing.did))?);
+        let path = Path::new(&me.did, ty, &key).map_err(|_| "id.sign")?;
+        let cid = Cid::of(Codec::Drisl, &body.encode());
+        let record = Record::sign(&me.key, path, Some(cid), [], at + n, Some(&filing.did));
+        held.records.push(record.map_err(|_| "id.sign")?);
         held.bodies.insert(cid, body);
     }
-    Ok(held)
+    Ok(Papers { held, texts: texts.files })
 }
 
 /// A host's answer if it is a success, else what its status means here.
@@ -305,14 +504,16 @@ async fn file_inner(
             };
             let attempt = async {
                 let origin = origin(&wanted.city).map_err(End::Fatal)?;
-                let (held, named) = signed
+                let (papers, named) = signed
                     .get_or_try_init(|| async {
                         step("filing", 0, 0);
                         present(&filer.http, &origin, &wanted.event).await?;
                         sign(tree, filer, id, wanted).await
                     })
                     .await?;
-                deliver(&filer.http, &origin, held).await?;
+                deliver(&filer.http, &origin, &papers.held).await?;
+                let tell = |n| step("filing", n, papers.texts.len());
+                texts(&filer.http, &origin, &papers.texts, &tell).await?;
                 if named.is_empty() {
                     return Ok(()); // no audio goes
                 }
@@ -377,7 +578,7 @@ async fn sign(
     filer: &Filer,
     id: &str,
     filing: &Filing,
-) -> Result<(Held, Vec<(u32, Blob)>), End> {
+) -> Result<(Papers, Vec<(u32, Blob)>), End> {
     let recording = filer.shelf.read(id).map_err(|_| End::Fatal("shelf"))?;
     let recording = recording.ok_or(End::Fatal("recording.gone"))?;
     // Audio destroyed since it was asked for, by the person or by their choice of how long it
@@ -385,8 +586,8 @@ async fn sign(
     let tape = filer.tape(id)?;
     let named =
         if filing.audio && tape::kept(&tape.0) { named(tree, tape).await? } else { Vec::new() };
-    let held = records(&filer.me, filing, &recording, &named, wall_ms() as i64);
-    Ok((held.map_err(|_| End::Fatal("id.sign"))?, named))
+    let papers = records(&filer.me, filing, &recording, &named, wall_ms() as i64);
+    Ok((papers.map_err(End::Fatal)?, named))
 }
 
 /// Gives the records to the host at `origin`, with their bodies, a batch at a time (record.md
@@ -419,6 +620,24 @@ async fn deliver(http: &Client, origin: &str, held: &Held) -> Result<(), End> {
     Ok(())
 }
 
+/// Gives the host the transcript and translation files the take names (blob.md § Uploading),
+/// after the take: a host takes a file only once a record names it. A refusal is the filing's,
+/// with the host's own word for it: without its text the take is not there to read.
+async fn texts(
+    http: &Client,
+    origin: &str,
+    texts: &[TextFile],
+    tell: &(dyn Fn(usize) + Sync),
+) -> Result<(), End> {
+    for (n, (file, bytes)) in texts.iter().enumerate() {
+        let url = zu::blob::upload(origin, &file.cid).map_err(|_| End::Fatal("id.sign"))?;
+        let put = http.put(url).header(CONTENT_TYPE, "application/octet-stream");
+        status(put.body(bytes.clone()).send().await.map_err(|_| End::Retry("city.unreachable"))?)?;
+        tell(n + 1);
+    }
+    Ok(())
+}
+
 /// What stops the audio once the text is there says so.
 fn audio(end: End) -> End {
     match end {
@@ -447,7 +666,7 @@ fn parts(
                     let wav = [wav_header(pcm.len() as u32 / 2), pcm].concat();
                     let file = Blob {
                         cid: Cid::of(Codec::Raw, &wav),
-                        mime: "audio/wav".into(),
+                        mime: AUDIO_TYPE.into(),
                         size: wav.len() as u64,
                     };
                     let _ = tx_block.send_blocking(Ok((t0, file, wav))); // dropped: send fails only after the filing task stopped listening

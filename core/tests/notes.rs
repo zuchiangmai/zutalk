@@ -202,11 +202,15 @@ async fn notes_work_during_live_recording_and_never_leave_to_city() {
         key: "a".repeat(32),
         state: String::new(),
     };
-    let held = city::records(&me, &filing, &recorded, &[], NOW).expect("city records built");
-    assert!(held.records.iter().all(|r| r.path.ty != NOTE));
-    for body in held.bodies.values() {
+    let papers = city::records(&me, &filing, &recorded, &[], NOW).expect("city records built");
+    assert!(papers.held.records.iter().all(|r| r.path.ty != NOTE));
+    for body in papers.held.bodies.values() {
         let json = body.to_json().expect("body json");
         assert!(!json.contains("Private live note"), "note text leaked into city payload: {json}");
+    }
+    for (_, bytes) in &papers.texts {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("Private live note"), "note text leaked into a city file: {text}");
     }
     let _ = BTreeMap::<String, String>::new();
 }

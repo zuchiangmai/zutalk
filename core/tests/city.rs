@@ -16,7 +16,9 @@ use zutalk_core::capture::tape;
 use zutalk_core::id::keys::{self, Me};
 use zutalk_core::live::lines::Line;
 use zutalk_core::out::city::{self, CITY_QUEUE_PARTS, Filer, Filing};
-use zutalk_core::record::shelf::{About, FILING, LINE, NOTE, RECORDING, SPEAKER, Said, Words};
+use zutalk_core::record::shelf::{
+    About, FILING, LINE, NOTE, RECORDING, Recording, SPEAKER, Said, Words,
+};
 use zutalk_core::rt::stats::Stats;
 use zutalk_core::rt::supervise::Tree;
 
@@ -73,7 +75,8 @@ fn recording(data: &Path, ms: u32) -> String {
 
 /// A city: a Zu host on a port of this machine. It confirms its DID, answers queries, takes
 /// records signed by whom they say and meant for it, and the files its current records name.
-/// What `refuse` names gets that answer instead: a type a word, or `blob` a status.
+/// What `refuse` names gets that answer instead: a type a word, or `audio` or `text` (the files
+/// of that kind) a status.
 #[derive(Clone, Default)]
 struct City(Arc<Mutex<Hold>>);
 
@@ -168,10 +171,14 @@ impl Respond for City {
                     .bodies
                     .values()
                     .flat_map(zu::blob::refs)
-                    .any(|b| b.cid == cid);
+                    .find(|b| b.cid == cid);
+                let kind =
+                    named.as_ref().map(|b| if b.mime == "audio/wav" { "audio" } else { "text" });
                 match hold.refuse {
-                    Some(("blob", status)) => ResponseTemplate::new(status.parse::<u16>().unwrap()),
-                    _ if !named => ResponseTemplate::new(403),
+                    Some((refused, status)) if Some(refused) == kind => {
+                        ResponseTemplate::new(status.parse::<u16>().unwrap())
+                    }
+                    _ if named.is_none() => ResponseTemplate::new(403),
                     _ if zu::blob::check(&cid, &request.body).is_err() => {
                         ResponseTemplate::new(400)
                     }
@@ -216,14 +223,15 @@ impl City {
         path.to_string()
     }
 
-    /// The bodies of the records the city holds now at the paths of `key`, by type and key.
+    /// The bodies of the records the city holds now at the paths of `key` (the take's, and its
+    /// note's `tape-<key>`), by type and key.
     fn bodies(&self, key: &str) -> BTreeMap<(String, String), serde_json::Value> {
         let held =
             self.0.lock().unwrap().current(&Query { by: Some(ME.into()), ..Query::default() });
         let body = |r: &Record| {
             serde_json::from_str(&held.bodies[&r.body.unwrap()].to_json().unwrap()).unwrap()
         };
-        let ours = held.records.iter().filter(|r| r.path.key.starts_with(key));
+        let ours = held.records.iter().filter(|r| r.path.key.ends_with(key));
         ours.map(|r| ((r.path.ty.clone(), r.path.key.clone()), body(r))).collect()
     }
 }
@@ -258,20 +266,13 @@ fn what_goes_is_the_persons_own_records_meant_for_the_city_and_never_the_note() 
         ..Filing::default()
     };
     let file = Blob::of(b"RIFF", "audio/wav").unwrap();
-    let held = city::records(&me, &filing, &read, &[(0, file.clone())], NOW).unwrap();
-    let keys: Vec<_> = held
-        .records
-        .iter()
-        .map(|r| (r.path.ty.as_str(), r.path.key.replace(&filing.key, "f")))
-        .collect();
+    let papers = city::records(&me, &filing, &read, &[(0, file.clone())], NOW).unwrap();
+    let held = &papers.held;
+    let keys: Vec<_> =
+        held.records.iter().map(|r| (r.path.ty.as_str(), r.path.key.clone())).collect();
     assert_eq!(
         keys,
-        [
-            ("talk/recording", "f".into()),
-            ("talk/line", "f.1.00000".into()),
-            ("talk/line", "f.1.00001".into()),
-            ("talk/speaker", "f.1".into())
-        ]
+        [("tape/take", filing.key.clone()), ("arc/item", format!("tape-{}", filing.key))]
     );
     for (n, record) in held.records.iter().enumerate() {
         assert_eq!(
@@ -280,10 +281,179 @@ fn what_goes_is_the_persons_own_records_meant_for_the_city_and_never_the_note() 
         );
         record.verify(|_, pubkey, _| *pubkey == key(ME).public(), |_| None).unwrap();
     }
-    let text: Vec<String> = held.bodies.values().map(|body| body.to_json().unwrap()).collect();
+    let mut text: Vec<String> = held.bodies.values().map(|body| body.to_json().unwrap()).collect();
+    text.extend(papers.texts.iter().map(|(_, bytes)| String::from_utf8(bytes.clone()).unwrap()));
     assert!(text.iter().all(|body| !body.contains("Only mine") && !body.contains(&id)), "{text:?}");
-    let head = &held.bodies[&held.records[0].body.unwrap()];
-    assert!(zu::blob::refs(head) == [file], "{head:?}");
+    let take = &held.bodies[&held.records[0].body.unwrap()];
+    let mut named = vec![file];
+    named.extend(papers.texts.iter().map(|(blob, _)| blob.clone()));
+    assert_eq!(zu::blob::refs(take), named, "{take:?}");
+    assert_eq!(papers.texts.len(), 2);
+}
+
+/// A line as these tests give it: when it starts and ends, who, what, and its translations.
+type Spoken<'a> = (u32, u32, &'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+fn lines(id: &str, said: &[Spoken]) -> Vec<(String, Said)> {
+    let line =
+        |n: usize, &(t0, t1, speaker, text, tr): &(u32, u32, &str, &str, &[(&str, &str)])| {
+            let translations = tr.iter().map(|(l, t)| ((*l).to_owned(), (*t).to_owned())).collect();
+            let line = Line {
+                t0,
+                t1,
+                speaker: speaker.into(),
+                language: "en".into(),
+                text: text.into(),
+                translations,
+                incomplete: false,
+            };
+            (format!("{id}.1.{n:05}"), Said { line, via: BTreeMap::new() })
+        };
+    said.iter().enumerate().map(|(n, s)| line(n, s)).collect()
+}
+
+fn made(
+    filing_title: &str,
+    title: &str,
+    length_ms: u32,
+    lines: Vec<(String, Said)>,
+    speakers: &[(&str, &str)],
+) -> (Filing, Recording) {
+    let about = About { started: NOW, length_ms, title: title.into(), take: 1, ..About::default() };
+    let speakers = speakers.iter().map(|(l, n)| ((*l).to_owned(), (*n).to_owned())).collect();
+    let id = format!("{NOW:011x}00000042");
+    let recording =
+        Recording { id, about, lines, speakers, note: String::new(), notes: Vec::new() };
+    let filing = Filing {
+        did: CITY.into(),
+        event: format!("zu://{ORGANIZER}/ev/event/e1"),
+        title: filing_title.into(),
+        key: "d".repeat(32),
+        ..Filing::default()
+    };
+    (filing, recording)
+}
+
+fn json_of(body: &Value) -> serde_json::Value {
+    serde_json::from_str(&body.to_json().unwrap()).unwrap()
+}
+
+#[test]
+fn the_take_names_its_event_parts_speakers_and_text_files_as_pol_reads_them() {
+    let id = format!("{NOW:011x}00000042");
+    let said = lines(
+        &id,
+        &[
+            (0, 900, "1", "Hello", &[("th", "สวัสดี")]),
+            (1_000, 1_800, "1", "   ", &[]),
+            (2_000, 2_500, "2", "Ça va \"bien\"", &[("th", "สบายดี"), ("zh", "你好")]),
+        ],
+    );
+    let long = format!("{}😀", "会".repeat(79));
+    let (filing, recording) =
+        made(&long, "Budget", 304_000, said, &[("1", "Chair"), ("2", &"n".repeat(50))]);
+    let me = Me { did: ME.into(), key: Arc::new(key(ME)) };
+    let (a, b) =
+        (Blob::of(b"RIFF-a", "audio/wav").unwrap(), Blob::of(b"RIFF-b", "audio/wav").unwrap());
+    let audio = [(0, a.clone()), (300_000, b.clone())];
+    let papers = city::records(&me, &filing, &recording, &audio, NOW).unwrap();
+    let held = &papers.held;
+    let take = json_of(&held.bodies[&held.records[0].body.unwrap()]);
+    let note = json_of(&held.bodies[&held.records[1].body.unwrap()]);
+
+    let title = "会".repeat(79);
+    assert_eq!(take["event"], format!("{ORGANIZER}~e1"));
+    assert_eq!(take["title"], title);
+    assert_eq!((take["start"].as_i64(), take["end"].as_i64()), (Some(NOW), Some(NOW + 304_000)));
+    assert_eq!(take["mime"], "audio/wav");
+    let parts = take["parts"].as_array().unwrap();
+    let want = [(0, &a, 0, 300_000), (1, &b, 300_000, 4_000)];
+    assert_eq!(parts.len(), 2);
+    for (part, (n, blob, t0, dur)) in parts.iter().zip(want) {
+        assert_eq!(part["n"], n);
+        assert_eq!(part["file"], blob.cid.to_string());
+        assert_eq!(part["size"], blob.size);
+        assert_eq!((part["t0"].as_u64(), part["dur"].as_u64()), (Some(t0), Some(dur)));
+        assert_eq!((part["mime"].as_str(), part["lv"].as_str()), (Some("audio/wav"), Some("")));
+        assert_eq!(part["blob"], json_of(&blob.value()));
+    }
+    assert_eq!(
+        take["speakers"],
+        json!([{ "sp": "1", "name": "Chair" }, { "sp": "2", "name": "n".repeat(40) }])
+    );
+
+    let transcript = r#"{"segs":[{"t":0,"d":900,"sp":"1","text":"Hello"},{"t":2000,"d":500,"sp":"2","text":"Ça va \"bien\""}]}"#;
+    let thai = r#"{"lang":"th","segs":[{"t":0,"text":"สวัสดี"},{"t":2000,"text":"สบายดี"}]}"#;
+    let chinese = r#"{"lang":"zh","segs":[{"t":2000,"text":"你好"}]}"#;
+    let files: Vec<(&str, &[u8])> =
+        papers.texts.iter().map(|(blob, bytes)| (blob.mime.as_str(), bytes.as_slice())).collect();
+    assert_eq!(
+        files,
+        [
+            ("application/json", transcript.as_bytes()),
+            ("application/json", thai.as_bytes()),
+            ("application/json", chinese.as_bytes())
+        ]
+    );
+    for (blob, bytes) in &papers.texts {
+        assert_eq!((blob.cid, blob.size), (Cid::of(Codec::Raw, bytes), bytes.len() as u64));
+    }
+    let entry = |(blob, _): &(Blob, Vec<u8>)| json!({ "file": blob.cid.to_string(), "size": blob.size, "blob": json_of(&blob.value()) });
+    assert_eq!(take["text"], entry(&papers.texts[0]));
+    let mut th = entry(&papers.texts[1]);
+    th["lang"] = json!("th");
+    let mut zh = entry(&papers.texts[2]);
+    zh["lang"] = json!("zh");
+    assert_eq!(take["translations"], json!([th, zh]));
+
+    assert_eq!(
+        note,
+        json!({
+            "kind": "note",
+            "title": format!("录音 · {title}"),
+            "text": "时长 05:04",
+            "event": format!("{ORGANIZER}~e1"),
+            "tags": ["录制"]
+        })
+    );
+}
+
+#[test]
+fn a_title_is_cut_by_utf16_length_and_long_recordings_keep_their_minutes() {
+    let (filing, recording) = made("", &"😀".repeat(70), 3 * 3_600_000 + 5_000, Vec::new(), &[]);
+    let me = Me { did: ME.into(), key: Arc::new(key(ME)) };
+    let papers = city::records(&me, &filing, &recording, &[], NOW).unwrap();
+    let held = &papers.held;
+    let take = json_of(&held.bodies[&held.records[0].body.unwrap()]);
+    let note = json_of(&held.bodies[&held.records[1].body.unwrap()]);
+    assert_eq!(take["title"], "😀".repeat(40));
+    assert_eq!(note["title"], format!("录音 · {}", "😀".repeat(40)));
+    assert_eq!(note["text"], "时长 180:05");
+}
+
+#[test]
+fn without_audio_or_lines_the_take_says_only_what_there_is() {
+    let id = format!("{NOW:011x}00000042");
+    let said = lines(&id, &[(0, 900, "1", "Hello", &[])]);
+    let (filing, recording) = made("Town hall", "Budget", 1_000, said, &[]);
+    let me = Me { did: ME.into(), key: Arc::new(key(ME)) };
+    let papers = city::records(&me, &filing, &recording, &[], NOW).unwrap();
+    let held = &papers.held;
+    let types: Vec<&str> = held.records.iter().map(|r| r.path.ty.as_str()).collect();
+    assert_eq!(types, ["tape/take", "arc/item"]);
+    let take = json_of(&held.bodies[&held.records[0].body.unwrap()]);
+    for absent in ["parts", "mime", "speakers", "translations"] {
+        assert!(take.get(absent).is_none(), "{absent}: {take}");
+    }
+    assert_eq!(papers.texts.len(), 1);
+    assert_eq!(take["text"]["file"], papers.texts[0].0.cid.to_string());
+    assert_eq!(take["title"], "Town hall");
+
+    let (filing, recording) = made(" ", "Budget", 1_000, Vec::new(), &[]);
+    let papers = city::records(&me, &filing, &recording, &[], NOW).unwrap();
+    let take = json_of(&papers.held.bodies[&papers.held.records[0].body.unwrap()]);
+    assert!(take.get("text").is_none() && papers.texts.is_empty(), "{take}");
+    assert_eq!(take["title"], "Budget");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -331,24 +501,36 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     );
     assert!(!filing.key.contains(&id) && filing.key.len() == 32);
     let bodies = city.bodies(&filing.key);
-    let head = &bodies[&("talk/recording".into(), filing.key.clone())];
+    assert_eq!(bodies.len(), 2, "{:?}", bodies.keys());
+    let take = &bodies[&("tape/take".into(), filing.key.clone())];
+    let event_ref = event.strip_prefix("zu://").unwrap().replace("/ev/event/", "~");
     assert_eq!(
-        (head["title"].as_str(), head["event"].as_str(), head["take"].as_u64()),
-        (Some("Budget"), Some(&*event), Some(1))
+        (take["title"].as_str(), take["event"].as_str(), take["start"].as_i64()),
+        (Some("Quarterly review"), Some(&*event_ref), Some(NOW))
     );
-    let line = &bodies[&("talk/line".into(), format!("{}.1.00001", filing.key))];
+    assert_eq!(take["speakers"], json!([{ "sp": "1", "name": "Chair" }]));
+    let note = &bodies[&("arc/item".into(), format!("tape-{}", filing.key))];
     assert_eq!(
-        (line["text"].as_str(), line["translations"]["th"].as_str()),
-        (Some("Thanks"), Some("ขอบคุณ"))
+        (note["kind"].as_str(), note["event"].as_str(), note["text"].as_str()),
+        (Some("note"), Some(&*event_ref), Some("时长 05:04"))
     );
-    assert_eq!(bodies[&("talk/speaker".into(), format!("{}.1", filing.key))]["text"], "Chair");
-    assert_eq!(bodies.len(), 4, "{:?}", bodies.keys()); // the note stays home
-    let parts = head["audio"].as_array().unwrap();
+    let parts = take["parts"].as_array().unwrap();
     assert_eq!(parts.iter().map(|p| p["t0"].as_u64().unwrap()).collect::<Vec<_>>(), [0, 300_000]);
     let files = city.0.lock().unwrap().files.clone();
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 4);
+    let named = |entry: &serde_json::Value| -> Vec<u8> {
+        files[&entry["file"].as_str().unwrap().parse::<Cid>().unwrap()].clone()
+    };
+    assert_eq!(
+        String::from_utf8(named(&take["text"])).unwrap(),
+        r#"{"segs":[{"t":0,"d":900,"sp":"1","text":"Hello"},{"t":1000,"d":900,"sp":"1","text":"Thanks"}]}"#
+    );
+    assert_eq!(
+        String::from_utf8(named(&take["translations"][0])).unwrap(),
+        r#"{"lang":"th","segs":[{"t":0,"text":"สวัสดี"},{"t":1000,"text":"ขอบคุณ"}]}"#
+    );
     for (part, (t0, blocks)) in parts.iter().zip([(0, 3_000), (3_000, 40)]) {
-        let cid: Cid = part["file"]["ref"]["$link"].as_str().unwrap().parse().unwrap();
+        let cid: Cid = part["file"].as_str().unwrap().parse().unwrap();
         let wav = &files[&cid];
         assert_eq!((&wav[..4], wav.len()), (&b"RIFF"[..], 44 + blocks * 3_200));
         assert_eq!(i16::from_le_bytes([wav[44], wav[45]]), t0 as i16); // where the part starts
@@ -359,8 +541,9 @@ async fn a_recording_goes_to_an_event_of_the_city_with_its_audio_and_again_witho
     app.wait_progress(|p| p.file.is_none()).await;
     let rec = app.wait_recording(&id, |r| filed(r).is_some_and(|f| !f.audio)).await;
     assert_eq!(filed(rec.as_ref()).unwrap().key, filing.key);
-    let head = &city.bodies(&filing.key)[&("talk/recording".into(), filing.key.clone())];
-    assert_eq!(head["audio"], json!([]));
+    let take = &city.bodies(&filing.key)[&("tape/take".into(), filing.key.clone())];
+    assert!(take.get("parts").is_none() && take.get("mime").is_none(), "{take}");
+    assert!(take["text"]["file"].is_string(), "{take}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -376,11 +559,13 @@ async fn each_refusal_is_said_and_kept_and_the_audio_alone_can_be_refused() {
     app.send(Command::City { address: server.uri() });
     app.wait_calendar(|c| c.is_some()).await;
     let refused = [
-        (("talk/line", "full"), "city.full"),
-        (("talk/speaker", "bad"), "city.bad"),
-        (("talk/recording", "nope"), "city.deny"),
-        (("blob", "413"), "city.audio.big"),
-        (("blob", "403"), "city.audio.deny"),
+        (("tape/take", "full"), "city.full"),
+        (("arc/item", "bad"), "city.bad"),
+        (("tape/take", "nope"), "city.deny"),
+        (("text", "403"), "city.deny"),
+        (("text", "413"), "city.big"),
+        (("audio", "413"), "city.audio.big"),
+        (("audio", "403"), "city.audio.deny"),
     ];
     for (refuse, code) in refused {
         city.0.lock().unwrap().refuse = Some(refuse);
@@ -418,8 +603,8 @@ async fn a_filing_a_restart_left_on_its_way_goes_on() {
     let mut app = App::with(config(data.path()));
     app.notice("city.filed").await;
     let bodies = city.bodies(&key);
-    assert_eq!(bodies.len(), 4, "{:?}", bodies.keys());
-    assert_eq!(city.0.lock().unwrap().files.len(), 1);
+    assert_eq!(bodies.len(), 2, "{:?}", bodies.keys());
+    assert_eq!(city.0.lock().unwrap().files.len(), 3);
     let rec = app.wait_recording(&id, |r| filed(r).is_some()).await;
     assert_eq!(filed(rec.as_ref()).unwrap().state, "city.filed");
 }
@@ -482,55 +667,14 @@ async fn reading_the_tape_is_a_named_task_and_its_queue_is_counted() {
 #[test]
 fn archive_types_table_matches_packed_records() {
     assert_eq!(city::ARCHIVE_TYPES.event, "ev/event");
-    assert_eq!(city::ARCHIVE_TYPES.recording, "talk/recording");
-    assert_eq!(city::ARCHIVE_TYPES.line, "talk/line");
-    assert_eq!(city::ARCHIVE_TYPES.speaker, "talk/speaker");
+    assert_eq!(city::ARCHIVE_TYPES.take, "tape/take");
+    assert_eq!(city::ARCHIVE_TYPES.note, "arc/item");
 
-    let data = tempfile::tempdir().unwrap();
+    let id = format!("{NOW:011x}00000042");
+    let said = lines(&id, &[(0, 500, "1", "Hi", &[])]);
+    let (filing, recording) = made("Check", "Archive check", 1_000, said, &[("1", "Host")]);
     let me = Me { did: ME.into(), key: Arc::new(key(ME)) };
-    let shelf = shelf(data.path());
-    let id = format!("{NOW:011x}00000099");
-    let about = About {
-        started: NOW,
-        length_ms: 1_000,
-        title: "Archive check".into(),
-        take: 1,
-        ..About::default()
-    };
-    shelf.put(&id, RECORDING, &[(id.clone(), Some(about))], NOW).unwrap();
-    let line = Line {
-        t0: 0,
-        t1: 500,
-        speaker: "1".into(),
-        language: "en".into(),
-        text: "Hi".into(),
-        ..Line::default()
-    };
-    shelf
-        .put(
-            &id,
-            LINE,
-            &[(format!("{id}.1.00000"), Some(Said { line, via: BTreeMap::new() }))],
-            NOW,
-        )
-        .unwrap();
-    shelf
-        .put(&id, SPEAKER, &[(format!("{id}.1"), Some(Words { text: "Host".into() }))], NOW)
-        .unwrap();
-    let rec = shelf.read(&id).unwrap().unwrap();
-    let filing = Filing {
-        city: "city.example".into(),
-        did: CITY.into(),
-        event: format!("{ORGANIZER}/ev/event/e1"),
-        title: "Check".into(),
-        audio: false,
-        key: "c".repeat(32),
-        state: String::new(),
-    };
-    let held = city::records(&me, &filing, &rec, &[], NOW).unwrap();
-    let types: Vec<&str> = held.records.iter().map(|r| r.path.ty.as_str()).collect();
-    assert_eq!(
-        types,
-        vec![city::ARCHIVE_TYPES.recording, city::ARCHIVE_TYPES.line, city::ARCHIVE_TYPES.speaker,]
-    );
+    let papers = city::records(&me, &filing, &recording, &[], NOW).unwrap();
+    let types: Vec<&str> = papers.held.records.iter().map(|r| r.path.ty.as_str()).collect();
+    assert_eq!(types, vec![city::ARCHIVE_TYPES.take, city::ARCHIVE_TYPES.note]);
 }

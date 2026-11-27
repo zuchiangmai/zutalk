@@ -590,7 +590,8 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
 const CITY_DID: &str = "did:zu:cityaudit4seas";
 const ORG_DID: &str = "did:zu:orgaudit4seas";
 
-/// Minimal in-memory Zu city host accepting `/.well-known/zu-did` and `/.well-known/zu-recs`.
+/// Minimal in-memory Zu city host accepting `/.well-known/zu-did`, `/.well-known/zu-recs` and
+/// the files its records name (`/.well-known/zu-blob/<cid>`).
 #[derive(Clone, Default)]
 struct AuditCity(Arc<Mutex<Held>>);
 
@@ -671,6 +672,16 @@ impl Respond for AuditCity {
                 }
                 let answer = ZuValue::Map([("stat".to_owned(), ZuValue::Map(stat))].into());
                 ResponseTemplate::new(200).set_body_bytes(answer.encode())
+            }
+            ("PUT", path) => {
+                let Some(Ok(cid)) =
+                    path.strip_prefix("/.well-known/zu-blob/").map(str::parse::<Cid>)
+                else {
+                    return ResponseTemplate::new(404);
+                };
+                let named = held.bodies.values().flat_map(zu::blob::refs).any(|b| b.cid == cid);
+                let fits = zu::blob::check(&cid, &request.body).is_ok();
+                ResponseTemplate::new(if named && fits { 200 } else { 403 })
             }
             _ => ResponseTemplate::new(404),
         }
