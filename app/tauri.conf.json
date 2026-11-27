@@ -46,7 +46,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "bundleVersion": "72",
+      "bundleVersion": "73",
       "minimumSystemVersion": "12.5",
       "signingIdentity": "-"
     }

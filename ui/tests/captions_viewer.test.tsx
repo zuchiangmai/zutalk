@@ -424,6 +424,54 @@ describe('Caption scenes, 0.8-parity CaptionsWindow, and mobile ViewerPage', () 
     expect(sent).toContainEqual({ do: 'Captions', show: false });
   });
 
+  it('CaptionsWindow_reveals_chrome_on_mousemove_supports_cmd_w_close_and_scopes_drag_to_self_view', () => {
+    const onClose = vi.fn();
+    const selfPrefs: CaptionPrefs = structuredClone(DEFAULT_CAPTION_PREFS);
+    const { container, rerender } = render(
+      <CaptionsWindowView
+        frame={null}
+        mode="Audience"
+        prefs={selfPrefs}
+        outbound={false}
+        onToggleMode={vi.fn()}
+        onClose={onClose}
+        onReconnect={vi.fn()}
+      />,
+    );
+
+    const root = container.querySelector('[data-window="captions"]')!;
+    const canvas = container.querySelector('.cap-canvas')!;
+    expect(root.classList.contains('chrome-on')).toBe(false);
+    // SelfView allows dragging from both root padding and interior caption canvas.
+    expect(root.hasAttribute('data-tauri-drag-region')).toBe(true);
+    expect(canvas.hasAttribute('data-tauri-drag-region')).toBe(true);
+
+    // Even if OS missed initial mouseEnter (window appeared under cursor or inactive borderless),
+    // moving the pointer inside reveals the close toolbar immediately.
+    fireEvent.mouseMove(root);
+    expect(root.classList.contains('chrome-on')).toBe(true);
+
+    // Cmd+W / Ctrl+W closes the caption window directly.
+    fireEvent.keyDown(window, { key: 'w', metaKey: true });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // Presentation scenes (Band / Stage) disable drag regions so full-width/full-screen overlays
+    // cannot be accidentally dragged off their display.
+    rerender(
+      <CaptionsWindowView
+        frame={null}
+        mode="Audience"
+        prefs={{ ...selfPrefs, scene: 'Stage' }}
+        outbound={false}
+        onToggleMode={vi.fn()}
+        onClose={onClose}
+        onReconnect={vi.fn()}
+      />,
+    );
+    expect(root.hasAttribute('data-tauri-drag-region')).toBe(false);
+    expect(canvas.hasAttribute('data-tauri-drag-region')).toBe(false);
+  });
+
   it('CaptionsWindow_auto_hides_after_10s_silence_and_wakes_on_new_frame', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_760_000_000_000));

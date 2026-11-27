@@ -6,8 +6,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use zutalk::windows::{
     CAPTION_GEO_DEBOUNCE_MS, CaptionWindowOp, CaptionWindowSpec, CaptionWindowTracker,
-    DEFAULT_SELF_VIEW_HEIGHT_PT, DEFAULT_SELF_VIEW_WIDTH_PT, DisplaySleep, GeometrySample,
-    ScreenPoints, default_scene_frame_cocoa, run_display_sleep, run_geometry_saver,
+    DEFAULT_SELF_VIEW_HEIGHT_PT, DEFAULT_SELF_VIEW_WIDTH_PT, DisplaySleep, FORCE_HIDE_OPS,
+    GeometrySample, MacCaptionPolicy, MacCollectionMode, MacWindowLevel, ScreenPoints,
+    default_scene_frame_cocoa, macos_caption_policy, run_display_sleep, run_geometry_saver,
 };
 use zutalk_core::app::proto::{
     CAPTION_MAX_EXTENT_PX, CAPTION_MIN_HEIGHT_PX, CAPTION_MIN_WIDTH_PX, CaptionPrefs, CaptionScene,
@@ -348,4 +349,97 @@ async fn display_sleep_watcher_tracks_caption_visibility_and_releases_on_drop() 
     drop(state_reg);
     handle.await.expect("display sleep watcher exits cleanly");
     tree.cancel();
+}
+
+#[test]
+fn macos_caption_policy_never_orders_front_when_hidden_and_maps_all_eight_states() {
+    // Hidden window (`currently_visible == false`) must NEVER call `orderFrontRegardless`,
+    // regardless of `pinned` or `fullscreen` — otherwise AppKit maps a `"visible": false` window
+    // onto the screen while `State.captions` remains `false`.
+    for pinned in [false, true] {
+        for fullscreen in [false, true] {
+            let policy = macos_caption_policy(false, pinned, fullscreen);
+            assert!(
+                !policy.order_front,
+                "hidden window must never order_front (pinned={pinned}, fullscreen={fullscreen}): {policy:?}"
+            );
+        }
+    }
+
+    // Visible + fullscreen (`Stage`): floating level on active Space, maximized, ordered front.
+    for pinned in [false, true] {
+        assert_eq!(
+            macos_caption_policy(true, pinned, true),
+            MacCaptionPolicy {
+                level: MacWindowLevel::Floating,
+                collection: MacCollectionMode::ActiveSpaceAuxiliary,
+                maximize_to_visible_frame: true,
+                order_front: true,
+            }
+        );
+    }
+
+    // Visible + windowed + pinned (`always_on_top == true`): status level across all Spaces.
+    assert_eq!(
+        macos_caption_policy(true, true, false),
+        MacCaptionPolicy {
+            level: MacWindowLevel::Status,
+            collection: MacCollectionMode::AllSpacesPinned,
+            maximize_to_visible_frame: false,
+            order_front: true,
+        }
+    );
+
+    // Visible + windowed + unpinned (`always_on_top == false`): normal window level, no forced front.
+    assert_eq!(
+        macos_caption_policy(true, false, false),
+        MacCaptionPolicy {
+            level: MacWindowLevel::Normal,
+            collection: MacCollectionMode::ActiveSpaceAuxiliary,
+            maximize_to_visible_frame: false,
+            order_front: false,
+        }
+    );
+}
+
+#[test]
+fn tracker_leaving_fullscreen_always_restores_always_on_top_even_when_unpinned_and_exposes_force_hide()
+ {
+    let mut tracker = CaptionWindowTracker::new();
+
+    let stage_unpinned = CaptionWindowSpec {
+        shown: true,
+        scene: CaptionScene::Stage,
+        top: false,
+        always_on_top: false,
+        click_through: false,
+        fullscreen: true,
+        geometry: None,
+    };
+    let _ = tracker.diff(stage_unpinned);
+
+    // Leaving Stage (`always_on_top: false`) into unpinned SelfView (`always_on_top: false`)
+    // MUST still emit `SetAlwaysOnTop(false)` so macOS drops from `NSFloatingWindowLevel` back to
+    // `NSNormalWindowLevel`.
+    let self_unpinned = CaptionWindowSpec {
+        shown: true,
+        scene: CaptionScene::SelfView,
+        top: false,
+        always_on_top: false,
+        click_through: false,
+        fullscreen: false,
+        geometry: None,
+    };
+    assert_eq!(
+        tracker.diff(self_unpinned),
+        vec![
+            CaptionWindowOp::SetFullscreen(false),
+            CaptionWindowOp::PlaceDefault { scene: CaptionScene::SelfView, top: false },
+            CaptionWindowOp::SetAlwaysOnTop(false),
+        ]
+    );
+
+    // Explicit close (`Command::Captions { show: false }` / `CloseRequested`) always executes
+    // idempotent `[SetFullscreen(false), Hide]` even if `State.captions` was already `false`.
+    assert_eq!(FORCE_HIDE_OPS, [CaptionWindowOp::SetFullscreen(false), CaptionWindowOp::Hide]);
 }

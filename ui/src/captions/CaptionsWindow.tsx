@@ -238,7 +238,7 @@ export function CaptionsWindowView({
     onSelectScene?.('SelfView');
   }, [onSelectScene]);
 
-  // 0.8 shortcuts: ⌃⌘F (filled fullscreen), ⌃⌘B (top banner), Escape (close menu / restore).
+  // 0.8 shortcuts: ⌃⌘F (filled fullscreen), ⌃⌘B (top banner), ⌘W (close), Escape (close menu / restore).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -250,6 +250,13 @@ export function CaptionsWindowView({
           restoreWindow();
         }
         return;
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && !e.ctrlKey === e.metaKey) {
+        if (e.key.toLowerCase() === 'w') {
+          e.preventDefault();
+          onClose();
+          return;
+        }
       }
       if (e.ctrlKey && e.metaKey && !e.altKey && !e.shiftKey) {
         const key = e.key.toLowerCase();
@@ -264,7 +271,7 @@ export function CaptionsWindowView({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isPresentation, menuOpen, restoreWindow, toggleBanner, toggleFilled]);
+  }, [isPresentation, menuOpen, onClose, restoreWindow, toggleBanner, toggleFilled]);
 
   const quiet = isCaptionQuiet(lastFrameAtMs, nowMs, style.auto_hide);
   const columns = frame?.columns ?? [];
@@ -364,8 +371,11 @@ export function CaptionsWindowView({
       data-scene={scene}
       data-mode={mode}
       data-quiet={quiet ? 'true' : 'false'}
-      data-tauri-drag-region=""
+      data-tauri-drag-region={!isPresentation ? '' : undefined}
       onMouseEnter={() => setHovering(true)}
+      onMouseMove={() => {
+        if (!hovering) setHovering(true);
+      }}
       onMouseLeave={() => {
         setHovering(false);
         setMenuOpen(false);
@@ -588,7 +598,12 @@ export function CaptionsWindowView({
       </div>
 
       {/* Scrollable, bottom-anchored caption canvas with auto-follow */}
-      <div ref={canvasRef} className="cap-canvas" onScroll={handleCanvasScroll}>
+      <div
+        ref={canvasRef}
+        className="cap-canvas"
+        data-tauri-drag-region={!isPresentation ? '' : undefined}
+        onScroll={handleCanvasScroll}
+      >
         <LiveCaptions
           columns={trimmedColumns}
           layout={mode}

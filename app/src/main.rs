@@ -44,8 +44,17 @@ struct UiVitals {
 }
 
 #[tauri::command]
-async fn dispatch(command: Command, core: State<'_, Core>) -> Result<(), String> {
-    core.send(command).map_err(str::to_owned)
+async fn dispatch(
+    command: Command,
+    app: tauri::AppHandle,
+    core: State<'_, Core>,
+) -> Result<(), String> {
+    let force_hide = matches!(command, Command::Captions { show: false });
+    let res = core.send(command).map_err(str::to_owned);
+    if force_hide {
+        let _ = windows::hide_captions(&app); // dropped: idempotent OS hide reconciles desynced window when state.captions is already false
+    }
+    res
 }
 
 #[tauri::command]
@@ -171,6 +180,7 @@ fn main() {
                     }
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
+                        let _ = windows::hide_captions(&close_handle); // dropped: immediate idempotent OS hide on window close request
                         let sent =
                             close_handle.state::<Core>().send(Command::Captions { show: false });
                         let _ = sent; // dropped: core closed on exit

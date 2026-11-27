@@ -2578,6 +2578,7 @@ mark.find {
   pointer-events: none;
   transition: opacity 0.16s var(--e-out);
 }
+.cap-win:hover .cap-bar-wrap,
 .cap-win.chrome-on .cap-bar-wrap {
   opacity: 1;
   pointer-events: auto;
@@ -2751,6 +2752,7 @@ mark.find {
   border-color: rgba(0, 0, 0, 0.14);
   color: #111;
 }
+.cap-win:hover .cap-restore,
 .cap-win.chrome-on .cap-restore {
   opacity: 1;
   pointer-events: auto;
