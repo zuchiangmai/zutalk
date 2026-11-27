@@ -72,7 +72,7 @@ pub fn sweep(server: &Server, now_ms: i64) -> usize {
 /// slot room for its signer; `slot` replaces the latest ciphertext frame (monotonic `record.at`)
 /// and returns live `viewers`; `gone` removes the room and closes all viewer streams.
 pub async fn write(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
-    let (record, body) = server.check(sent, "talk/room", None).await?;
+    let (record, body) = server.check(sent, "talk/room", true).await?;
     let body = body.unwrap_or(Value::Null);
     let said = |name| field(Some(&body), name).cloned().unwrap_or_default();
     let (id, what, frame) = (said("room"), said("do"), said("frame"));

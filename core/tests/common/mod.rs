@@ -13,7 +13,9 @@ use std::time::Duration;
 use wiremock::MockServer;
 use zu::{Cid, Codec, Doc, SecretKey, Value};
 use zutalk_core::out::host;
-use zutalk_server::{BoxFuture, Config, Directory, Invites, Minted, Refusal, Server, Upstream};
+use zutalk_server::{
+    BoxFuture, Config, Directory, Invites, Minted, NoHosts, Refusal, Server, Upstream,
+};
 
 /// `did:zu:made-up-n` has the key `[n; 32]`; any other DID has the key `[5; 32]`.
 struct Keys;
@@ -80,8 +82,13 @@ pub async fn serve_handle() -> (String, Arc<Server>, tempfile::TempDir) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let config = Config::new(&origin, dir.path(), vec![]);
-    let server =
-        Server::open(config, Arc::new(Keys), [Arc::new(Nowhere), Arc::new(Nowhere)]).unwrap();
+    let server = Server::open(
+        config,
+        Arc::new(Keys),
+        Arc::new(NoHosts),
+        [Arc::new(Nowhere), Arc::new(Nowhere)],
+    )
+    .unwrap();
     let running = server.clone();
     tokio::spawn(zutalk_server::serve(listener, running));
     (origin, server, dir)
@@ -97,7 +104,8 @@ pub async fn serve_with(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let config = Config { invites, ..Config::new(&origin, dir.path(), vec![]) };
-    let server = Server::open(config, directory, [Arc::new(Nowhere), Arc::new(Nowhere)]);
+    let server =
+        Server::open(config, directory, Arc::new(NoHosts), [Arc::new(Nowhere), Arc::new(Nowhere)]);
     tokio::spawn(zutalk_server::serve(listener, server.unwrap()));
     (origin, dir)
 }

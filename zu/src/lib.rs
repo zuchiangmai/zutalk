@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod blob;
 pub mod cid;
+pub mod city;
 pub mod did;
 pub mod key;
 pub mod login;

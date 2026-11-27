@@ -317,6 +317,7 @@ async fn start_local_server(
     let server = Server::open(
         cfg,
         plc,
+        Arc::new(zutalk_server::NoHosts),
         [Arc::new(FakeUpstream { slice: 100_000 }), Arc::new(FakeUpstream { slice: 100_000 })],
     )
     .unwrap();

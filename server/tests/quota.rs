@@ -107,7 +107,13 @@ async fn quota_tracks_per_service_daily_usage_and_resets_next_day() {
     let soniox =
         std::sync::Arc::new(Script { slice: 180_000, per_second: 50, ..Script::default() });
     let openrouter = std::sync::Arc::new(Script { slice: 500_000, ..Script::default() });
-    let reopened = zutalk_server::Server::open(cfg, keys, [soniox, openrouter]).unwrap();
+    let reopened = zutalk_server::Server::open(
+        cfg,
+        keys,
+        std::sync::Arc::new(Hosting::default()),
+        [soniox, openrouter],
+    )
+    .unwrap();
     let replayed = reopened.quota(&did(1), now());
     assert_eq!(replayed.soniox, ServiceDaily { used: 2, limit: 2, remaining: 0 });
     assert_eq!(replayed.openrouter, ServiceDaily { used: 1, limit: 1, remaining: 0 });

@@ -6,12 +6,42 @@ use std::{sync::Arc, time::Duration};
 use zu::Doc;
 use zutalk_server::{
     BoxFuture, Config, DEFAULT_DAILY_OPENROUTER_TIMES, DEFAULT_DAILY_SONIOX_TIMES, Directory,
-    Invites, OpenRouter, Refusal, Server, Soniox, serve,
+    Hosts, Invites, OpenRouter, Refusal, Server, Soniox, serve,
 };
 
 /// How long a DID's host has to give its document; the same as for any upstream
 /// (`ledger.rs`). Origin to be traced.
 const DIRECTORY_WAIT_MS: u64 = 10_000;
+
+/// How long a city's host has to answer one page of a query; the same as for a DID's document.
+const CITY_HOST_WAIT_MS: u64 = 10_000;
+
+/// The largest answer read from a city's host. A page of governance records is a few hundred
+/// bytes a record; this holds a page far larger than a host sends.
+const CITY_ANSWER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// A city's host, asked over HTTPS where the city's DID document says (`zutalk_server::host_of`).
+struct Web(reqwest::Client);
+
+impl Hosts for Web {
+    fn get<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let wait = Duration::from_millis(CITY_HOST_WAIT_MS);
+            let mut answer = self.0.get(url).timeout(wait).send().await.ok()?;
+            if answer.status() != StatusCode::OK {
+                return None;
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = answer.chunk().await.ok()? {
+                body.extend_from_slice(&chunk);
+                if body.len() > CITY_ANSWER_MAX_BYTES {
+                    return None;
+                }
+            }
+            Some(body)
+        })
+    }
+}
 
 /// DID documents fetched where `zu::did::url` says, each time: only requests that spend or
 /// make something are checked, and those are few.
@@ -54,6 +84,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coordinators = coordinators.split(',').filter(|did| !did.is_empty()).map(str::to_owned);
     let origin = env("ZUTALK_ORIGIN", "http://127.0.0.1:8000");
     let mut config = Config::new(&origin, data, coordinators.collect());
+    // The cities whose coordinators' grants count, by each city's governance chain.
+    let cities = env("ZUTALK_CITIES", "");
+    config.cities =
+        cities.split(',').map(str::trim).filter(|did| !did.is_empty()).map(str::to_owned).collect();
+    if let Some(wrong) = config.cities.iter().find(|did| !zu::did::is_did(did)) {
+        return Err(format!("ZUTALK_CITIES: {wrong} is not a DID").into());
+    }
+    zutalk_log::info!("server.cities", cities = config.cities.len());
     config.daily = [
         env("ZUTALK_DAILY_SONIOX", &DEFAULT_DAILY_SONIOX_TIMES.to_string()).parse()?,
         env("ZUTALK_DAILY_OPENROUTER", &DEFAULT_DAILY_OPENROUTER_TIMES.to_string()).parse()?,
@@ -79,8 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Charged whole, so small: a long write leases again.
         slice: env("OPENROUTER_SLICE_MICROS", "100000").parse()?,
     };
-    let server =
-        Server::open(config, Arc::new(Resolver(http)), [Arc::new(soniox), Arc::new(openrouter)])?;
+    let (directory, hosts) = (Arc::new(Resolver(http.clone())), Arc::new(Web(http)));
+    let server = Server::open(config, directory, hosts, [Arc::new(soniox), Arc::new(openrouter)])?;
     let listener = tokio::net::TcpListener::bind(env("ZUTALK_LISTEN", "127.0.0.1:8000")).await?;
     Ok(serve(listener, server).await?)
 }

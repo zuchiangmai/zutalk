@@ -5,11 +5,17 @@
 //! it keeps are ciphertext. It relays sign-ins, and sees no word of a conversation. Rate
 //! limits, TLS, and the pages it is read with are the edge's.
 
+mod city;
 mod ledger;
 mod relay;
 mod room;
 mod tasks;
 
+pub use crate::city::{
+    CITY_CACHE_MAX, CITY_DOC, CITY_FETCH_BUDGET_MS, CITY_HOST, CITY_MAX_PAGES, CITY_MAX_RECORDS,
+    CITY_REFETCH_MS, CITY_SLOW, CITY_TTL_MS, CITY_WAIT_MS, CityTimes, Hosts, NOT_COORDINATOR,
+    NOT_SERVED, NoHosts, host_of,
+};
 pub use crate::ledger::{
     DAY_MS, DEFAULT_DAILY_OPENROUTER_TIMES, DEFAULT_DAILY_SONIOX_TIMES, Invites, Minted,
     OpenRouter, QuotaReport, Service, ServiceDaily, Soniox, Upstream, daily_service, day_bounds,
@@ -47,7 +53,14 @@ pub trait Directory: Send + Sync {
 pub struct Config {
     pub origin: String,
     pub data: PathBuf,
+    /// The transition list (decision 0189): a grant signed by one of these counts, whatever
+    /// city it names. To go once the cities' chains are trusted in production.
     pub coordinators: Vec<String>,
+    /// The cities served: a grant addressed to one counts when its signer is a coordinator in
+    /// office there at its `at`, by the city's governance chain.
+    pub cities: Vec<String>,
+    /// How long a city's chain is kept, and how soon it is asked for again on a miss.
+    pub city: CityTimes,
     pub room: (usize, usize, usize, i64),
     pub relay: (usize, i64),
     pub invites: Option<Invites>,
@@ -66,6 +79,8 @@ impl Config {
             origin,
             data,
             coordinators,
+            cities: Vec::new(),
+            city: CityTimes::default(),
             room,
             relay: (1000, 300_000),
             invites: None,
@@ -77,6 +92,8 @@ impl Config {
 pub struct Server {
     pub config: Config,
     directory: Arc<dyn Directory>,
+    hosts: Arc<dyn Hosts>,
+    cities: city::Cities,
     /// The upstreams by `Service as usize`: a table, not a branch.
     upstreams: [Arc<dyn Upstream>; 2],
     book: Mutex<ledger::Book>,
@@ -114,6 +131,7 @@ impl Server {
     pub fn open(
         config: Config,
         directory: Arc<dyn Directory>,
+        hosts: Arc<dyn Hosts>,
         upstreams: [Arc<dyn Upstream>; 2],
     ) -> Result<Arc<Server>, zu::Error> {
         std::fs::create_dir_all(&config.data)?;
@@ -128,6 +146,8 @@ impl Server {
         Ok(Arc::new(Server {
             config,
             directory,
+            hosts,
+            cities: city::Cities::default(),
             upstreams,
             book,
             rooms: Mutex::new(HashMap::new()),
@@ -165,14 +185,14 @@ impl Server {
         removed
     }
 
-    /// The record in `sent`, checked: of type `ty`, its body the one signed, by one of `only`
-    /// if they are named, with a key its author's document has for its time. A request is
-    /// also made now, for this server: its body says `aud`.
+    /// The record in `sent`, checked: of type `ty`, its body the one signed, with a key its
+    /// author's document has for its time. A `request` is also made now, for this server: its
+    /// body says `aud`. Whether its author may do what it says is for the caller.
     async fn check(
         &self,
         sent: Delivery,
         ty: &str,
-        only: Option<&[String]>,
+        request: bool,
     ) -> Result<(Record, Option<Value>), Refusal> {
         let (bad, refused) =
             (|c| Refusal(StatusCode::BAD_REQUEST, c), |c| Refusal(StatusCode::UNAUTHORIZED, c));
@@ -185,11 +205,9 @@ impl Server {
         {
             return Err(bad("record"));
         }
-        if only.is_some_and(|only| !only.contains(&record.path.by)) {
-            return Err(Refusal(StatusCode::FORBIDDEN, "coordinator"));
-        } else if only.is_none() && field(body.as_ref(), "aud") != Some(&self.config.origin) {
+        if request && field(body.as_ref(), "aud") != Some(&self.config.origin) {
             return Err(refused("audience"));
-        } else if only.is_none() && now().abs_diff(record.at) > WINDOW {
+        } else if request && now().abs_diff(record.at) > WINDOW {
             return Err(refused("time"));
         }
         let doc = self.directory.doc(&record.path.by).await?;

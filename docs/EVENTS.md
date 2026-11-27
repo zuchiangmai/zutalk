@@ -213,6 +213,11 @@ grep '"snap":1' <数据目录>/logs/zutalk.jsonl
 | `server.start` | info | 服务器装好日志后写出的第一行 | `version` |
 | `server.request` | info；状态 ≥ 500 时 warn | 服务器答完一个 HTTP 请求时由中间件发出（不带路径参数与正文） | `route`（`ROUTES` 表代码，未命中为 `none`） `status` `ms` |
 | `server.sweep` | debug | 服务器执行一次过期房间清扫后发出 | `ms` `removed` |
+| `server.cities` | info | 服务器启动时读完 `ZUTALK_CITIES` 后发出 | `cities`（所服务城的个数） |
+| `grant.admit` | info | 收下一条额度时发出 | `via`（`list`：在过渡名单上；`city`：按城的治理链在任） |
+| `grant.refuse` | info | 额度验签通过、但签名者不被认时发出 | `code`（`coordinator` / `city` / `city-doc` / `city-host` / `directory`） |
+| `city.fetch` | info；失败时 warn | 服务器取完一座城的治理链（在受监督任务 `city.fetch` 里）后发出 | 成功：`code`=`ok` `records` `invitations` `discarded`（验签不过而丢掉的） `verified`（这次新验的） `terms` `ms`；失败：`code` `ms` |
+| `city.fork` | warn | 取到的治理链有分叉（两条记录列同一条为前一条，主机出错）时发出 | `forks` |
 
 ## 出了事先看什么
 

@@ -1243,6 +1243,7 @@ async fn serve_gated() -> (String, String, Arc<MakeGate>, Arc<Server>, tempfile:
     let server = Server::open(
         server_cfg,
         Arc::new(ProxyKeys),
+        Arc::new(zutalk_server::NoHosts),
         [Arc::new(ProxyNowhere), Arc::new(ProxyNowhere)],
     )
     .unwrap();

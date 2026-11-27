@@ -165,9 +165,9 @@ DMG_SIG="$(<Sparkle 工具>/bin/sign_update --account Zulangue -p hop/ZuTalk_0.9
 
 ## 5. 服务器与前端边缘部署配置
 
-### 5.1 服务器环境变量（`server/src/main.rs` 全部 16 项）
+### 5.1 服务器环境变量（`server/src/main.rs` 全部 17 项）
 
-`zutalk-server` 单进程启动，全部配置来自以下 16 个环境变量（与源码逐一核对）：
+`zutalk-server` 单进程启动，全部配置来自以下 17 个环境变量（与源码逐一核对）：
 
 | 环境变量 | 默认值 | 单位 / 格式 | 敏感级别 | 用途 |
 |---|---|---|---|---|
@@ -175,7 +175,8 @@ DMG_SIG="$(<Sparkle 工具>/bin/sign_update --account Zulangue -p hop/ZuTalk_0.9
 | `ZUTALK_LOG` | `info` | `info` / `debug` | 普通 | 日志级别；`debug` 开启每分钟 `server.sweep` 等调试日志 |
 | `ZUTALK_LISTEN` | `127.0.0.1:8000` | `ip:port` | 普通 | HTTP 监听地址（由边缘反代终结 TLS 后转发） |
 | `ZUTALK_ORIGIN` | `http://127.0.0.1:8000` | URL 前缀 | 普通 | 对外公开源站地址（如 `https://talk.example.org`），用于拼观众链接 `.../r/<id>#<key>` |
-| `ZUTALK_COORDINATORS` | `""` | 逗号分隔 DID | 普通 | 社区协调人 DID 列表，仅列表内签名者可授额与调配 |
+| `ZUTALK_CITIES` | `""` | 逗号分隔城的 DID | 普通 | 本服务器服务的城（决定 0189）。一条 `talk/grant` 的 `to` 是其中一座城、签名者在额度的 `at` 时是该城在任协调者，才收下。服务器从城的 DID 文档里 `#pol`（类型 `city`）的地址取城的治理链（`to=<城>&type=city/role&all` 与 `city/invite`，翻完 `next`），逐条验签后按 `specs/city.md` 的六条规则算；不另配主机地址。链缓存 5 分钟（`CITY_TTL_MS`）；签名者不在任时最快 10 秒（`CITY_REFETCH_MS`）重取一次，新任命不必等缓存过期。拒绝码：`coordinator`（403，不在任）、`city`（403，额度不是给所服务的城）、`city-doc`（502，城的 DID 文档没有 `#pol` 城入口）、`city-host`（502 取不到或答复不可用；504 超时）、`directory`（502，目录取不到）。启动时任一项不是 DID 就报错退出 |
+| `ZUTALK_COORDINATORS` | `""` | 逗号分隔 DID | 普通 | **仅作过渡**：列表内签名者签的额度照旧收下，不看城的链，也不问主机。新做法在正式站跑通后删掉这一项（决定 0189） |
 | `ZUTALK_DAILY_SONIOX` | `40` | 次 / UTC 日 | 普通 | 社区成员每日 Soniox 临时钥匙租借上限（`DEFAULT_DAILY_SONIOX_TIMES`） |
 | `ZUTALK_DAILY_OPENROUTER` | `30` | 次 / UTC 日 | 普通 | 社区成员每日 OpenRouter 临时钥匙租借上限（`DEFAULT_DAILY_OPENROUTER_TIMES`） |
 | `INVITES_URL` | `https://zulangue-invite.exe.xyz` | URL | 普通 | 0.8 旧版邀请服务地址，认领旧邀请时调用其 `POST /v1/retire` |

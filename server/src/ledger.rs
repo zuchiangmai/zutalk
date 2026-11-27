@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 use std::{path::Path, sync::Arc};
 use zu::{Cid, Codec, Pack, Record, Value};
+use zutalk_log::info;
 
 const QUOTA: Refusal = Refusal(StatusCode::PAYMENT_REQUIRED, "quota");
 const QUOTA_DAILY: Refusal = Refusal(StatusCode::PAYMENT_REQUIRED, "quota.daily");
@@ -296,13 +297,17 @@ impl Book {
 }
 
 /// `POST /grants`: a `talk/grant` record and its body. Whoever holds one may deliver it; what
-/// counts is that a coordinator signed it. Delivered again, it changes nothing.
+/// counts is that a coordinator signed it: one on the transition list, or one in office at its
+/// `at` in the served city it is addressed to (`city::admit`). Delivered again, it changes nothing.
 pub async fn grant(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
-    let only = Some(&server.config.coordinators[..]);
-    let (record, body) = server.check(sent, "talk/grant", only).await?;
+    let (record, body) = server.check(sent, "talk/grant", false).await?;
     if record.body.is_some() && purse(body.as_ref()).is_none() {
         return Err(Refusal(StatusCode::BAD_REQUEST, "body"));
     }
+    let via = crate::city::admit(&server, &record, now()).await.inspect_err(|refusal| {
+        info!("grant.refuse", code = refusal.1);
+    })?;
+    info!("grant.admit", via = via);
     let (cid, mut book) = (record.cid(), lock(&server.book));
     if book.at_of(&cid).is_none() {
         book.keep(record, body)?;
@@ -313,7 +318,7 @@ pub async fn grant(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
 /// `POST /quota`: a `talk/quota` record `{ aud }`. Returns the resident's balance and per-service
 /// UTC daily quota.
 pub async fn quota(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
-    let (record, _) = server.check(sent, "talk/quota", None).await?;
+    let (record, _) = server.check(sent, "talk/quota", true).await?;
     let report = server.quota(&record.path.by, now());
     Ok(Json(json!({
         "left": report.left,
@@ -328,7 +333,7 @@ pub async fn quota(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
 /// `POST /lease`: a `talk/lease` record `{ service, aud }`. The answer is a key, what the
 /// asker has left, and their updated daily quota. The request is kept only once the key is made.
 pub async fn lease(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
-    let (record, body) = server.check(sent, "talk/lease", None).await?;
+    let (record, body) = server.check(sent, "talk/lease", true).await?;
     let (cid, did) = (record.cid(), record.path.by.clone());
     let service = service(body.as_ref()).ok_or(Refusal(StatusCode::BAD_REQUEST, "service"))?;
     let upstream = server.upstreams[service as usize].clone();
@@ -374,7 +379,7 @@ pub async fn lease(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>
 /// and keeps saying how much it had; this ledger credits each token once, by its CID, so a
 /// claim cut short between the two is credited when it is sent again. The token is not kept.
 pub async fn claim(State(server): State<Arc<Server>>, Json(sent): Json<Delivery>) -> Answer {
-    let (record, body) = server.check(sent, "talk/claim", None).await?;
+    let (record, body) = server.check(sent, "talk/claim", true).await?;
     let token = field(body.as_ref(), "token").ok_or(Refusal(StatusCode::BAD_REQUEST, "body"))?;
     let token = token.clone();
     // On a supervised task of its own: what the old service retired is credited, even if the asker goes.

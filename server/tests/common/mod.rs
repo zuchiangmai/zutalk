@@ -7,12 +7,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value as Json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use zu::{Cid, Codec, Doc, Path, PublicKey, Record, SecretKey, Value};
-use zutalk_server::{BoxFuture, Config, Directory, Minted, Refusal, Server, Upstream, app, now};
+use zutalk_server::{
+    BoxFuture, Config, Directory, Hosts, Minted, Refusal, Server, Upstream, app, now,
+};
 
 pub const ORIGIN: &str = "https://talk.example";
 /// The coordinator the server trusts is `did(9)`.
@@ -27,17 +29,80 @@ pub fn did(n: u8) -> String {
     format!("did:zu:made-up-{n}")
 }
 
-/// `did(n)` has the key `secret(n)`, unless a test says otherwise.
+/// `did(n)` has the key `secret(n)`, unless a test says otherwise; a city's document names its
+/// host under `services`. While `down`, the directory cannot be reached.
 #[derive(Default)]
-pub struct Keys(pub Mutex<HashMap<String, PublicKey>>);
+pub struct Keys(
+    pub Mutex<HashMap<String, PublicKey>>,
+    pub Mutex<HashMap<String, String>>,
+    pub AtomicBool,
+);
 
 impl Directory for Keys {
     fn doc<'a>(&'a self, did_: &'a str) -> BoxFuture<'a, Result<Doc, Refusal>> {
         Box::pin(async move {
+            if self.2.load(Ordering::SeqCst) {
+                return Err(Refusal(StatusCode::BAD_GATEWAY, "directory"));
+            }
             let set = self.0.lock().unwrap().get(did_).copied();
             let made = (0..=20).find(|n| did(*n) == did_).map(|n| secret(n).public());
             let keys = set.or(made).map(|key| (key, None)).into_iter().collect();
-            Ok(Doc { did: did_.into(), keys, handles: vec![], services: BTreeMap::new() })
+            let host = self.1.lock().unwrap().get(did_).cloned();
+            let services = host.map(|host| ("pol".to_owned(), ("city".to_owned(), host)));
+            Ok(Doc {
+                did: did_.into(),
+                keys,
+                handles: vec![],
+                services: services.into_iter().collect(),
+            })
+        })
+    }
+}
+
+/// Cities' hosts in-process: each origin holds signed records and their bodies, and answers
+/// `GET /.well-known/zu-recs` as query.md says, `PAGE` records a page so `next` is followed.
+#[derive(Default)]
+pub struct Hosting {
+    pub held: Mutex<HashMap<String, zu::Held>>,
+    /// Unreachable: every request gets no answer.
+    pub down: AtomicBool,
+    /// How many requests were made.
+    pub asked: AtomicU64,
+}
+
+/// Records a page from the fake hosts.
+pub const PAGE: usize = 3;
+
+impl Hosts for Hosting {
+    fn get<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            if self.down.load(Ordering::SeqCst) {
+                return None;
+            }
+            let (origin, params) = url.split_once("/.well-known/zu-recs?")?;
+            let param = |name: &str| {
+                params.split('&').find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+            };
+            let query = zu::Query {
+                to: param("to").map(str::to_owned),
+                ty: param("type").map(str::to_owned),
+                all: param("all").is_some(),
+                ..zu::Query::default()
+            };
+            let held = self.held.lock().unwrap();
+            let held = held.get(origin)?;
+            let mut matching: Vec<&Record> =
+                held.records.iter().filter(|r| query.matches(r)).collect();
+            matching.sort_by_key(|r| std::cmp::Reverse((r.at, r.cid())));
+            let from: usize = param("from").map_or(Some(0), |from| from.parse().ok())?;
+            let page: Vec<Record> =
+                matching.iter().skip(from).take(PAGE).map(|r| (*r).clone()).collect();
+            let bodies =
+                page.iter().filter_map(|r| Some((r.body?, held.bodies.get(&r.body?)?.clone())));
+            let next = (from + PAGE < matching.len()).then(|| (from + PAGE).to_string());
+            let page = zu::Held { bodies: bodies.collect(), records: page };
+            Some(zu::query::answer(&page, next.as_deref()))
         })
     }
 }
@@ -79,6 +144,7 @@ pub struct Bench {
     pub server: Arc<Server>,
     pub app: Router,
     pub keys: Arc<Keys>,
+    pub hosts: Arc<Hosting>,
     /// A key costs 180,000 µ$: an hour at 50 µ$ a second.
     pub soniox: Arc<Script>,
     /// A key costs 500,000 µ$.
@@ -104,12 +170,12 @@ pub fn restart(bench: Bench) -> Bench {
 fn open(dir: Arc<tempfile::TempDir>, change: impl FnOnce(&mut Config)) -> Bench {
     let mut config = Config::new(ORIGIN, dir.path(), vec![did(COORDINATOR)]);
     change(&mut config);
-    let keys = Arc::new(Keys::default());
+    let (keys, hosts) = (Arc::new(Keys::default()), Arc::new(Hosting::default()));
     let soniox = Arc::new(Script { slice: 180_000, per_second: 50, ..Script::default() });
     let openrouter = Arc::new(Script { slice: 500_000, ..Script::default() });
     let upstreams: [Arc<dyn Upstream>; 2] = [soniox.clone(), openrouter.clone()];
-    let server = Server::open(config, keys.clone(), upstreams).unwrap();
-    Bench { dir, app: app(server.clone()), server, keys, soniox, openrouter }
+    let server = Server::open(config, keys.clone(), hosts.clone(), upstreams).unwrap();
+    Bench { dir, app: app(server.clone()), server, keys, hosts, soniox, openrouter }
 }
 
 /// A request, with an `Authorization` header if one is given.

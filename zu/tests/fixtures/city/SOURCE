@@ -1,0 +1,6 @@
+Test vectors for working out a city's state (specs/city.md "Working Out the State").
+
+From   https://github.com/zuchiangmai/pol, vectors/city.json (commit 5b20d51f on branch
+       feat/city-vectors), copied unchanged. How to read a case is in vectors/README.md there.
+       Written by scripts/vectors/city.ts with pol's packages/zu, from keys with fixed seeds.
+Terms  pol states no licence; both projects have the same owner.
