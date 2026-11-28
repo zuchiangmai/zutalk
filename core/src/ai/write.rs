@@ -5,7 +5,7 @@
 
 use crate::capture::clock::{BLOCK, Block, RATE};
 use crate::capture::tape::{self, Pass};
-use crate::id::keys::{From, Keys, Lease, Service};
+use crate::id::keys::{From, Keys, Lease, Ours, Service};
 use crate::knowledge::topic::{
     CONTEXT_MAX_GENERAL_ITEMS, CONTEXT_MAX_TERMS, CONTEXT_MAX_TEXT_CHARS,
     CONTEXT_MAX_TRANSLATION_TERMS, CONTEXT_PROMPT_BACKGROUND_CHARS,
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
+use std::sync::atomic::AtomicU8;
 use std::{fs, path::Path, time::Duration};
 
 /// WAV chunks buffered between the tape reader and the HTTP uploader (~3.2 s of 100 ms blocks).
@@ -64,6 +65,29 @@ pub fn owed(draft: bool, audio: bool, moved: bool, key: bool) -> Owed {
         Owed::No
     } else if !key {
         Owed::Waits("keys.none")
+    } else {
+        Owed::Yes
+    }
+}
+
+/// Pure decision for post-stop and boot auto-refinement: on a `pol` `zu-svc` city host with
+/// community quota (`From::Granted`), a live recording that already captured draft lines
+/// settles directly onto `take 0` without automatic whole-recording upload; imported audio
+/// (`!has_draft_lines`), own keys (`From::Own`), and manual `Refine` run whole-recording write.
+pub fn owed_for(
+    draft: bool,
+    audio: bool,
+    moved: bool,
+    soniox: From,
+    zu_svc_city: bool,
+    has_draft_lines: bool,
+) -> Owed {
+    if !draft || !audio || moved {
+        Owed::No
+    } else if soniox == From::Nowhere {
+        Owed::Waits("keys.none")
+    } else if soniox == From::Granted && zu_svc_city && has_draft_lines {
+        Owed::No
     } else {
         Owed::Yes
     }
@@ -758,6 +782,347 @@ impl<'a, K: Keys> Port<'a, K> {
 
 /// Maximum wall-clock wait for a single async whole-session transcription job (1 hour).
 pub const MAX_TRANSCRIBE_WAIT_MS: u64 = 3_600_000;
+/// Maximum WAV bytes sent in one `zutalk/upload` DRISL call (`provider.ts` caps at 6 MiB).
+const CITY_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+fn drisl_str<'a>(map: &'a BTreeMap<String, zu::Value>, key: &str) -> Option<&'a str> {
+    match map.get(key)? {
+        zu::Value::Str(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn drisl_i64(map: &BTreeMap<String, zu::Value>, key: &str) -> Option<i64> {
+    match map.get(key)? {
+        zu::Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn build_city_upload_context(plan: &Plan, args: &mut BTreeMap<String, zu::Value>) {
+    args.insert("model".into(), zu::Value::Str(plan.model.clone()));
+    args.insert(
+        "spoken".into(),
+        zu::Value::List(plan.spoken.iter().cloned().map(zu::Value::Str).collect()),
+    );
+    args.insert("topic".into(), zu::Value::Str(plan.topic.clone()));
+
+    let mut terms: BTreeSet<&str> = BTreeSet::new();
+    for (said, written) in &plan.terms {
+        if !said.is_empty() {
+            terms.insert(said.as_str());
+        }
+        for form in written.values() {
+            if !form.is_empty() {
+                terms.insert(form.as_str());
+            }
+        }
+    }
+    for (source, target) in &plan.translation_pairs {
+        if !source.is_empty() {
+            terms.insert(source.as_str());
+        }
+        if !target.is_empty() {
+            terms.insert(target.as_str());
+        }
+    }
+    args.insert(
+        "terms".into(),
+        zu::Value::List(
+            terms.into_iter().take(CONTEXT_MAX_TERMS).map(|s| zu::Value::Str(s.into())).collect(),
+        ),
+    );
+
+    let general: Vec<zu::Value> = plan
+        .general
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .take(CONTEXT_MAX_GENERAL_ITEMS)
+        .map(|(k, v)| {
+            zu::Value::Map(BTreeMap::from([
+                ("key".into(), zu::Value::Str(k.clone())),
+                ("value".into(), zu::Value::Str(v.clone())),
+            ]))
+        })
+        .collect();
+    args.insert("general".into(), zu::Value::List(general));
+
+    let bg: String = plan.background.trim().chars().take(CONTEXT_MAX_TEXT_CHARS).collect();
+    args.insert("text".into(), zu::Value::Str(bg));
+
+    let pairs: Vec<zu::Value> = plan
+        .translation_pairs
+        .iter()
+        .filter(|(s, t)| !s.trim().is_empty() && !t.trim().is_empty() && s != t)
+        .take(CONTEXT_MAX_TRANSLATION_TERMS)
+        .map(|(s, t)| {
+            zu::Value::Map(BTreeMap::from([
+                ("source".into(), zu::Value::Str(s.clone())),
+                ("target".into(), zu::Value::Str(t.clone())),
+            ]))
+        })
+        .collect();
+    args.insert("pairs".into(), zu::Value::List(pairs));
+}
+
+fn parse_city_tokens(list: &[zu::Value]) -> Vec<Token> {
+    list.iter()
+        .filter_map(|item| {
+            let zu::Value::Map(m) = item else {
+                return None;
+            };
+            let text = drisl_str(m, "text")?.to_owned();
+            let start_ms = drisl_i64(m, "startMs").unwrap_or(0).max(0) as u32;
+            let end_ms = drisl_i64(m, "endMs").unwrap_or(0).max(0) as u32;
+            let speaker = drisl_str(m, "speaker").unwrap_or_default().to_owned();
+            let language = drisl_str(m, "language").unwrap_or_default().to_owned();
+            Some(Token { text, start_ms, end_ms, is_final: true, speaker, language, into: None })
+        })
+        .collect()
+}
+
+async fn send_city_chunk(
+    ours: &Ours,
+    backend: &AtomicU8,
+    job_id: Option<&str>,
+    chunk: Vec<u8>,
+    done: bool,
+    plan: Option<&Plan>,
+) -> Result<Option<String>, End> {
+    let mut args = BTreeMap::new();
+    if let Some(id) = job_id {
+        args.insert("job".into(), zu::Value::Str(id.to_owned()));
+    }
+    args.insert("chunk".into(), zu::Value::Bytes(chunk));
+    args.insert("done".into(), zu::Value::Bool(done));
+    if let Some(p) = plan {
+        build_city_upload_context(p, &mut args);
+    }
+    let Some(reply) = ours.call_zu_svc("upload", zu::Value::Map(args), backend).await? else {
+        return Ok(None);
+    };
+    let zu::Value::Map(map) = reply else {
+        return Err(BAD_REPLY);
+    };
+    let id = drisl_str(&map, "job").ok_or(BAD_REPLY)?.to_owned();
+    Ok(Some(id))
+}
+
+async fn transcribe_via_city(
+    ours: &Ours,
+    backend: &AtomicU8,
+    tree: &Tree,
+    (dir, key): (&Path, &[u8; 32]),
+    length_ms: u32,
+    plan: &Plan,
+    max_poll_ms: u64,
+) -> Result<Option<(String, Vec<Token>)>, End> {
+    let samples = (length_ms / 100).saturating_mul(BLOCK as u32);
+    let (dir_buf, key_val) = (dir.to_path_buf(), *key);
+    let (tx, mut rx) = queue::bounded::<io::Result<Vec<u8>>>(
+        tree.stats(),
+        "write.wav",
+        WAV_QUEUE_CHUNKS,
+        Full::Wait,
+    );
+    let blocking_tree = tree.clone();
+    tree.spawn("write.wav", async move {
+        let tx_block = tx.clone();
+        let outcome = blocking_tree
+            .blocking("write.wav", move || {
+                let pcm =
+                    |block: Block| Ok(block.pcm.into_iter().flat_map(i16::to_le_bytes).collect());
+                if tx_block.send_blocking(Ok(wav_header(samples))).is_err() {
+                    return;
+                }
+                let read = tape::read(&dir_buf, &key_val, &Pass::Write, |block| {
+                    let _ = tx_block.send_blocking(pcm(block)); // dropped: send fails only after the upload ended
+                });
+                if let Err(e) = read {
+                    let _ = tx_block.send_blocking(Err(e)); // dropped: send fails only after the upload ended
+                }
+            })
+            .await;
+        if outcome.is_err() {
+            let _ = tx.send(Err(io::Error::other("tape read broke"))).await; // dropped: send fails only after the upload ended
+        }
+    });
+
+    let mut job_id: Option<String> = None;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(piece) = rx.recv().await {
+        let bytes = piece.map_err(|_| DISK)?;
+        if !buf.is_empty() && buf.len() + bytes.len() > CITY_UPLOAD_CHUNK_BYTES {
+            let chunk = std::mem::take(&mut buf);
+            let Some(id) =
+                send_city_chunk(ours, backend, job_id.as_deref(), chunk, false, None).await?
+            else {
+                return Ok(None);
+            };
+            job_id = Some(id);
+        }
+        buf.extend_from_slice(&bytes);
+    }
+
+    let Some(final_id) =
+        send_city_chunk(ours, backend, job_id.as_deref(), buf, true, Some(plan)).await?
+    else {
+        return Ok(None);
+    };
+
+    let poll_started = tokio::time::Instant::now();
+    loop {
+        let poll_args = BTreeMap::from([("job".into(), zu::Value::Str(final_id.clone()))]);
+        let Some(reply) = ours.call_zu_svc("job", zu::Value::Map(poll_args), backend).await? else {
+            return Ok(None);
+        };
+        let zu::Value::Map(map) = reply else {
+            return Err(BAD_REPLY);
+        };
+        if matches!(map.get("done"), Some(zu::Value::Bool(true))) {
+            if let Some(failed) = drisl_str(&map, "failed")
+                && !failed.is_empty()
+            {
+                return Err(End::Retry("transcription-failed"));
+            }
+            let model = drisl_str(&map, "model").unwrap_or(&plan.model).to_owned();
+            let Some(zu::Value::List(raw_tokens)) = map.get("tokens") else {
+                return Err(BAD_REPLY);
+            };
+            return Ok(Some((model, parse_city_tokens(raw_tokens))));
+        }
+        if poll_started.elapsed().as_millis() as u64 >= max_poll_ms {
+            return Err(End::Retry("transcription-timeout"));
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+    }
+}
+
+async fn translate_via_city(
+    ours: &Ours,
+    backend: &AtomicU8,
+    plan: &Plan,
+    said: &mut [Said],
+    ids: &[usize],
+) -> Result<Option<Vec<usize>>, End> {
+    let first = ids.first().copied().unwrap_or(0);
+    let before: Vec<zu::Value> = said[first.saturating_sub(CONTEXT)..first]
+        .iter()
+        .map(|s| {
+            zu::Value::Map(BTreeMap::from([
+                ("speaker".into(), zu::Value::Str(s.line.speaker.clone())),
+                ("lang".into(), zu::Value::Str(s.line.language.clone())),
+                ("text".into(), zu::Value::Str(s.line.text.clone())),
+            ]))
+        })
+        .collect();
+    let lines: Vec<zu::Value> = ids
+        .iter()
+        .map(|&i| {
+            let l = &said[i].line;
+            zu::Value::Map(BTreeMap::from([
+                ("id".into(), zu::Value::Int(i as i64)),
+                ("speaker".into(), zu::Value::Str(l.speaker.clone())),
+                ("lang".into(), zu::Value::Str(l.language.clone())),
+                ("text".into(), zu::Value::Str(l.text.clone())),
+            ]))
+        })
+        .collect();
+    let terms: Vec<zu::Value> = plan
+        .terms
+        .iter()
+        .take(CONTEXT_MAX_TERMS)
+        .map(|(s, written)| {
+            let w: BTreeMap<String, zu::Value> =
+                written.iter().map(|(k, v)| (k.clone(), zu::Value::Str(v.clone()))).collect();
+            zu::Value::Map(BTreeMap::from([
+                ("said".into(), zu::Value::Str(s.clone())),
+                ("written".into(), zu::Value::Map(w)),
+            ]))
+        })
+        .collect();
+    let general: Vec<zu::Value> = plan
+        .general
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .take(CONTEXT_MAX_GENERAL_ITEMS)
+        .map(|(k, v)| {
+            zu::Value::Map(BTreeMap::from([
+                ("key".into(), zu::Value::Str(k.clone())),
+                ("value".into(), zu::Value::Str(v.clone())),
+            ]))
+        })
+        .collect();
+    let pairs: Vec<zu::Value> = plan
+        .translation_pairs
+        .iter()
+        .filter(|(s, t)| !s.trim().is_empty() && !t.trim().is_empty() && s != t)
+        .take(CONTEXT_MAX_TRANSLATION_TERMS)
+        .map(|(s, t)| {
+            zu::Value::Map(BTreeMap::from([
+                ("source".into(), zu::Value::Str(s.clone())),
+                ("target".into(), zu::Value::Str(t.clone())),
+            ]))
+        })
+        .collect();
+    let bg: String = plan.background.trim().chars().take(CONTEXT_PROMPT_BACKGROUND_CHARS).collect();
+    let mut args = BTreeMap::new();
+    args.insert(
+        "into".into(),
+        zu::Value::List(plan.into.iter().cloned().map(zu::Value::Str).collect()),
+    );
+    args.insert("topic".into(), zu::Value::Str(plan.topic.clone()));
+    args.insert("terms".into(), zu::Value::List(terms));
+    args.insert("general".into(), zu::Value::List(general));
+    args.insert("background".into(), zu::Value::Str(bg));
+    args.insert("pairs".into(), zu::Value::List(pairs));
+    args.insert("before".into(), zu::Value::List(before));
+    args.insert("lines".into(), zu::Value::List(lines));
+
+    let Some(reply) = ours.call_zu_svc("translate", zu::Value::Map(args), backend).await? else {
+        return Ok(None);
+    };
+    let zu::Value::Map(map) = reply else {
+        return Err(BAD_REPLY);
+    };
+    let by = drisl_str(&map, "model").unwrap_or("deepseek-flash").to_owned();
+    let mut parsed_answers = Vec::new();
+    if let Some(zu::Value::List(raw_answers)) = map.get("answers") {
+        for item in raw_answers {
+            let zu::Value::Map(am) = item else {
+                continue;
+            };
+            let Some(id_i64) = drisl_i64(am, "id") else {
+                continue;
+            };
+            let Ok(id) = usize::try_from(id_i64) else {
+                continue;
+            };
+            let unclear = matches!(am.get("unclear"), Some(zu::Value::Bool(true)));
+            let mut facts = Vec::new();
+            if let Some(zu::Value::List(raw_facts)) = am.get("facts") {
+                for f in raw_facts {
+                    if let zu::Value::Str(fs) = f {
+                        facts.push(fs.clone());
+                    }
+                }
+            }
+            let mut to = BTreeMap::new();
+            if let Some(zu::Value::Map(to_map)) = am.get("to") {
+                for (lang, v) in to_map {
+                    if let zu::Value::Str(ts) = v {
+                        to.insert(lang.clone(), ts.clone());
+                    }
+                }
+            }
+            parsed_answers.push(Answer { id, unclear, facts, to });
+        }
+    }
+    let answer = |i: usize| parsed_answers.iter().find(|a| a.id == i);
+    let remaining =
+        ids.iter().copied().filter(|&i| !judge(&mut said[i], answer(i), &by, plan)).collect();
+    Ok(Some(remaining))
+}
 
 /// Writes the recording's next take using a caller-supplied bounded `Client` and poll budget.
 #[allow(clippy::too_many_arguments)]
@@ -774,45 +1139,100 @@ pub async fn write_with(
 ) -> End {
     let attempt = async {
         let (dir, shelved) = (tape.0, |_| End::Retry("shelf"));
-        // Both keys first when translation is expected: without them nothing is uploaded, and
-        // nothing paid for twice.
-        let soniox = Port::open(http, keys, Service::Soniox, &plan.soniox).await?;
         let expects_translation = !plan.into.is_empty()
             && (plan.spoken.is_empty()
                 || plan.into.iter().any(|into| plan.spoken.iter().any(|spoken| spoken != into)));
-        let mut translator = if expects_translation {
+        let city_soniox = keys.city_svc(Service::Soniox);
+        let soniox = if city_soniox.is_none() {
+            Some(Port::open(http, keys, Service::Soniox, &plan.soniox).await?)
+        } else {
+            None
+        };
+        let mut translator = if expects_translation && keys.city_svc(Service::OpenRouter).is_none()
+        {
             Some(Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?)
         } else {
             None
         };
         let mut journal = Journal::load(dir)?;
         journal.failed = None;
-        soniox.clear(dir, &mut journal).await?;
+        if let Some(ref port) = soniox {
+            port.clear(dir, &mut journal).await?;
+        }
         let (path, key) = (dir.to_path_buf(), *tape.1);
         let length = tree.blocking("write.length", move || tape::recover(&path, &key)).await;
         let length_ms = length.ok().and_then(Result::ok).filter(|ms| *ms > 0);
         let length_ms = length_ms.ok_or(End::Fatal("tape"))?;
         progress("transcribing", 0, 0);
-        let heard = soniox.transcribe(tree, tape, length_ms, plan, &mut journal, max_poll_ms).await;
-        // Whatever happened, nothing stays there; and until it is gone, nothing is written.
-        let cleared = soniox.clear(dir, &mut journal).await;
-        let (heard, ()) = (heard?, cleared?);
-        let via = BTreeMap::from([("text".to_string(), plan.model.clone())]);
+
+        let city_heard = if let Some((ref ours, ref backend)) = city_soniox {
+            transcribe_via_city(ours, backend, tree, tape, length_ms, plan, max_poll_ms).await?
+        } else {
+            None
+        };
+
+        let (via_model, heard) = if let Some((used_model, tokens)) = city_heard {
+            (used_model, tokens)
+        } else {
+            let port = match soniox {
+                Some(p) => p,
+                None => {
+                    let p = Port::open(http, keys, Service::Soniox, &plan.soniox).await?;
+                    if expects_translation && translator.is_none() {
+                        translator = Some(
+                            Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?,
+                        );
+                    }
+                    p.clear(dir, &mut journal).await?;
+                    p
+                }
+            };
+            let direct =
+                port.transcribe(tree, tape, length_ms, plan, &mut journal, max_poll_ms).await;
+            let cleared = port.clear(dir, &mut journal).await;
+            let (tokens, ()) = (direct?, cleared?);
+            (plan.model.clone(), tokens)
+        };
+
+        let via = BTreeMap::from([("text".to_string(), via_model)]);
         let lines = lines(&heard, &plan.spoken).into_iter();
         let mut said: Vec<Said> = lines.map(|line| Said { line, via: via.clone() }).collect();
         let foreign = |said: &Said| plan.into.iter().any(|into| *into != said.line.language);
         let todo: Vec<usize> = (0..said.len()).filter(|&i| foreign(&said[i])).collect();
         if !todo.is_empty() {
-            if translator.is_none() {
-                translator =
-                    Some(Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?);
-            }
-            if let Some(port) = &translator {
+            let mut handled_by_city = false;
+            if let Some((ours, backend)) = keys.city_svc(Service::OpenRouter) {
+                let mut legacy_fallback = false;
                 for (n, batch) in todo.chunks(BATCH).enumerate() {
                     progress("translating", n * BATCH, todo.len());
-                    // What did not pass is asked once more, alone; then it stays unclear.
-                    for i in port.translate(plan, &mut said, batch).await? {
-                        port.translate(plan, &mut said, &[i]).await?;
+                    match translate_via_city(&ours, &backend, plan, &mut said, batch).await? {
+                        Some(rem) => {
+                            for i in rem {
+                                let _ = translate_via_city(&ours, &backend, plan, &mut said, &[i]) // dropped: single-line retry judges directly into said
+                                    .await?;
+                            }
+                        }
+                        None => {
+                            legacy_fallback = true;
+                            break;
+                        }
+                    }
+                }
+                if !legacy_fallback {
+                    handled_by_city = true;
+                }
+            }
+            if !handled_by_city {
+                if translator.is_none() {
+                    translator =
+                        Some(Port::open(http, keys, Service::OpenRouter, &plan.openrouter).await?);
+                }
+                if let Some(port) = &translator {
+                    for (n, batch) in todo.chunks(BATCH).enumerate() {
+                        progress("translating", n * BATCH, todo.len());
+                        for i in port.translate(plan, &mut said, batch).await? {
+                            port.translate(plan, &mut said, &[i]).await?;
+                        }
                     }
                 }
             }

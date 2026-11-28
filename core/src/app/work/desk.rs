@@ -1485,7 +1485,9 @@ fn run_survey(
         return Ok(Survey { writes: Vec::new(), sweep: false, filings: Vec::new() });
     };
     let tapes = env.config.tapes();
-    let has_key = snap.keys.from(Service::Soniox) != From::Nowhere;
+    let soniox_from = snap.keys.from(Service::Soniox);
+    let has_key = soniox_from != From::Nowhere;
+    let zu_svc_city = snap.keys.is_zu_svc();
     let busy_set: BTreeSet<&str> = busy.iter().map(String::as_str).collect();
     let rows: Vec<(String, u32, bool)> = match env.survey_rows() {
         Some(list) => list.into_iter().map(|r| (r.id, r.take, r.moved)).collect(),
@@ -1509,7 +1511,10 @@ fn run_survey(
         if audio && write::Journal::load(&tapes.join(&id)).is_ok_and(|j| j.failed.is_some()) {
             continue;
         }
-        match write::owed(draft, audio, moved, has_key) {
+        let has_draft_lines = soniox_from == From::Granted
+            && zu_svc_city
+            && takes::read(shelf, &id, 0).is_ok_and(|v| !v.is_empty());
+        match write::owed_for(draft, audio, moved, soniox_from, zu_svc_city, has_draft_lines) {
             write::Owed::Yes => writes.push(id),
             write::Owed::Waits(reason) => {
                 skipped += 1;

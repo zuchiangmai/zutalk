@@ -361,14 +361,88 @@ pub fn build_candidates(
     out
 }
 
-/// Calls OpenRouter across [`MODELS`] with [`TITLES_TIMEOUT_MS`] per attempt, notifying
-/// `keys.refused(Service::OpenRouter)` on `401/403`. Never logs any content.
+fn parse_city_reply(reply: &zu::Value, max_t_ms: u32) -> Result<GeneratedMeta, End> {
+    let zu::Value::Map(map) = reply else {
+        return Err(End::Retry("off-form"));
+    };
+    let mut seen_titles = BTreeSet::new();
+    let mut titles = Vec::new();
+    if let Some(zu::Value::List(raw_titles)) = map.get("titles") {
+        for item in raw_titles {
+            let zu::Value::Str(raw) = item else {
+                continue;
+            };
+            let clean = sanitize_line(raw, TITLES_MAX_TITLE_CHARS);
+            if clean.is_empty() {
+                continue;
+            }
+            let key = profile("").key(&clean);
+            if seen_titles.insert(key) {
+                titles.push(clean);
+                if titles.len() >= TITLES_MAX_CANDIDATES {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut seen_tags = BTreeSet::new();
+    let mut tags = Vec::new();
+    if let Some(zu::Value::List(raw_tags)) = map.get("tags") {
+        for item in raw_tags {
+            let zu::Value::Map(tag_map) = item else {
+                continue;
+            };
+            let Some(zu::Value::Str(raw_label)) = tag_map.get("label") else {
+                continue;
+            };
+            let Some(zu::Value::Int(raw_at)) = tag_map.get("atMs") else {
+                continue;
+            };
+            let label = sanitize_line(raw_label, TITLES_MAX_TAG_CHARS);
+            if label.is_empty() {
+                continue;
+            }
+            let key = profile("").key(&label);
+            if seen_tags.insert(key) {
+                let clamped = (*raw_at).max(0).min(i64::from(max_t_ms)) as u32;
+                tags.push(ContentTag { label, at_ms: clamped });
+                if tags.len() >= TITLES_MAX_TAGS {
+                    break;
+                }
+            }
+        }
+    }
+
+    if titles.is_empty() && tags.is_empty() {
+        return Err(End::Retry("off-form"));
+    }
+    Ok(GeneratedMeta { titles, tags })
+}
+
+/// Calls the city's `zutalk/titles` `zu-svc` endpoint when using city quota, or OpenRouter across
+/// [`MODELS`] with [`TITLES_TIMEOUT_MS`] per attempt, notifying `keys.refused(Service::OpenRouter)`
+/// on `401/403`. Never logs any content.
 pub async fn generate(
     http: &reqwest::Client,
     base: &str,
     keys: &impl Keys,
     input: &TitleInput,
 ) -> Result<GeneratedMeta, End> {
+    if let Some((ours, backend)) = keys.city_svc(Service::OpenRouter) {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert(
+            "spoken".into(),
+            zu::Value::List(input.spoken.iter().cloned().map(zu::Value::Str).collect()),
+        );
+        args.insert("topicHint".into(), zu::Value::Str(input.topic_hint.clone()));
+        args.insert("excerpt".into(), zu::Value::Str(input.excerpt.clone()));
+        args.insert("maxMs".into(), zu::Value::Int(i64::from(input.max_t_ms)));
+        if let Some(reply) = ours.call_zu_svc("titles", zu::Value::Map(args), &backend).await? {
+            return parse_city_reply(&reply, input.max_t_ms);
+        }
+    }
+
     let lease = keys.lease(Service::OpenRouter).await?;
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let mut last_err = End::Retry("offline");

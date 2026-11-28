@@ -1,10 +1,13 @@
 //! Per-service UTC daily quota types, pure parsing/reset rules, and thin `POST /quota` fetch.
 
-use crate::id::keys::{Ours, Service};
+use crate::id::keys::{BACKEND_UNKNOWN, Ours, Service};
 use crate::rt::supervise::End;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
+use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU8;
 use ts_rs::TS;
+use zu::Value;
 
 /// One service's daily lease usage and remaining allowance.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -72,8 +75,58 @@ pub fn is_exhausted(quota: &Quota, service: Service, now_ms: i64) -> bool {
         .is_some_and(|entry| entry.remaining == 0)
 }
 
-/// Fetches the signed-in resident's balance and per-service daily quota from `POST /quota`.
-pub async fn fetch(ours: &Ours) -> Result<(u64, Quota), End> {
+fn drisl_i64(map: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
+    match map.get(key)? {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn drisl_u32(map: &BTreeMap<String, Value>, key: &str) -> Option<u32> {
+    u32::try_from(drisl_i64(map, key)?).ok()
+}
+
+/// Pure parser for a `zutalk/quota` or `zutalk/live` DRISL map returned by a `pol` city host.
+pub fn parse_zu_svc(value: &Value) -> Option<(u64, Quota)> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    let left = u64::try_from(drisl_i64(map, "left")?).ok()?;
+    let resets_at = drisl_i64(map, "resetsAt")?;
+    let soniox_used = drisl_u32(map, "sonioxUsed")?;
+    let soniox_limit = drisl_u32(map, "sonioxLimit")?;
+    let ai_used = drisl_u32(map, "aiUsed")?;
+    let ai_limit = drisl_u32(map, "aiLimit")?;
+    let services = vec![
+        ServiceQuota {
+            service: Service::Soniox.name().to_owned(),
+            used: soniox_used,
+            limit: soniox_limit,
+            remaining: soniox_limit.saturating_sub(soniox_used),
+        },
+        ServiceQuota {
+            service: Service::OpenRouter.name().to_owned(),
+            used: ai_used,
+            limit: ai_limit,
+            remaining: ai_limit.saturating_sub(ai_used),
+        },
+    ];
+    Some((left, Quota { resets_at, services }))
+}
+
+/// Fetches the signed-in resident's balance and daily quota using `backend` (`zu-svc` first,
+/// falling back to `POST /quota` on legacy `zutalk-server`).
+pub async fn fetch_with(ours: &Ours, backend: &AtomicU8) -> Result<(u64, Quota), End> {
+    if let Some(val) = ours.call_zu_svc("quota", Value::Map(BTreeMap::new()), backend).await? {
+        return parse_zu_svc(&val).ok_or(End::Retry("server"));
+    }
     let said = ours.ask("quota", "talk/quota", json!({})).await?;
     parse(&said).ok_or(End::Retry("server"))
+}
+
+/// Fetches the signed-in resident's balance and per-service daily quota from `POST /quota` or
+/// `/.well-known/zu-svc/zutalk/quota`.
+pub async fn fetch(ours: &Ours) -> Result<(u64, Quota), End> {
+    let probe = AtomicU8::new(BACKEND_UNKNOWN);
+    fetch_with(ours, &probe).await
 }

@@ -94,8 +94,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
-            // Our server, which relays sign-ins, issues keys and keeps rooms. Set when building.
-            let server = option_env!("ZUTALK_SERVER").unwrap_or("https://zutalk.exe.xyz");
+            let server = option_env!("ZUTALK_SERVER").unwrap_or("https://zuchiangmai.com");
+            let rooms = option_env!("ZUTALK_ROOMS").unwrap_or("https://zutalk.exe.xyz");
             let base = Config::new(data.clone(), server).from_env();
             // The log first, so that all after it is said; without one the app still starts.
             match zutalk_log::install(&base.logs(), "zutalk", base.log, cfg!(debug_assertions)) {
@@ -133,7 +133,15 @@ fn main() {
             let update_slot = Arc::new(OnceLock::new());
             let check_update = updates::checker(update_slot.clone());
             let install = updates::installer(update_slot.clone());
-            let config = Config { old, handover_helper, clip, check_update, install, ..base };
+            let config = Config {
+                rooms: rooms.into(),
+                old,
+                handover_helper,
+                clip,
+                check_update,
+                install,
+                ..base
+            };
             let (core, outlet) = Core::start(config).map_err(|end| format!("{end:?}"))?;
             let shell = Tree::root("shell", core.stats());
             let ui_vitals = UiVitals {

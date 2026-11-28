@@ -530,7 +530,7 @@ impl Work {
                                     &jobs_done,
                                     &jobs_failed,
                                     config.data.clone(),
-                                    ours,
+                                    Ours { server: config.rooms.clone(), ..ours },
                                     stale_id,
                                 );
                             }
@@ -627,7 +627,7 @@ impl Work {
                                     &jobs_done,
                                     &jobs_failed,
                                     config.data.clone(),
-                                    ours,
+                                    Ours { server: config.rooms.clone(), ..ours },
                                     stale_id,
                                 );
                             }
@@ -1172,7 +1172,8 @@ impl Work {
     /// Creates an ephemeral live room with a fresh random 32-byte key held only in RAM, writes
     /// only the room id to `<data>/host.lock`, calls `make`, and starts `host.slot` on success.
     pub(crate) fn host_make(&self, host_gen: u64) -> Result<(), &'static str> {
-        let ours = snapshot(&self.identity).ours.ok_or("sign_in.first")?;
+        let base_ours = snapshot(&self.identity).ours.ok_or("sign_in.first")?;
+        let ours = Ours { server: self.config.rooms.clone(), ..base_ours };
         let room_id = keys::fresh().map_err(code)?;
         let key = Zeroizing::new(keys::random::<32>().map_err(code)?);
         let cancel = CancellationToken::new();

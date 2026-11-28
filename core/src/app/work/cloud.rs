@@ -12,14 +12,15 @@ use crate::app::proto::{From, Progress, Writing};
 use crate::app::recording;
 use crate::capture::tape;
 use crate::id::identity;
-use crate::id::keys::{self, Chain, Ours, Secret, Service, Who};
+use crate::id::keys::{self, Chain, Keys, Ours, Secret, Service, Who};
 use crate::id::quota;
 use crate::knowledge::topic;
 use crate::live::frame::Frame;
+use crate::live::lane;
 use crate::live::lines::Line;
 use crate::out::host::{self, HOST_ARM_POLL_MS, HOST_KEEPALIVE_MS, HOST_SLOT_MS, Write};
 use crate::record::shelf::{About, Shelf, TitleBy};
-use crate::record::takes::{RefineEvent, RefineFailure, RefineStatus, refine_step};
+use crate::record::takes::{self, RefineEvent, RefineFailure, RefineStatus, refine_step};
 use crate::rt::queue::Tx;
 use crate::rt::signal::{Reading, Register};
 use crate::rt::stats::Counter;
@@ -109,7 +110,7 @@ pub(super) fn spawn_quota_net(
     tree.spawn("net.quota", async move {
         info!("job.start", kind = "quota", job = seq, waited_ms = 0u64);
         let started = std::time::Instant::now();
-        let outcome = quota::fetch(&ours).await;
+        let outcome = quota::fetch_with(&ours, chain.backend()).await;
         let ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok((left, quota_info)) => {
@@ -661,6 +662,7 @@ impl WriteCtx {
     ) {
         match sealed {
             Ok(Some(about)) if about.length_ms == 0 => {
+                self.keys.settle_live(0).await;
                 let tape_dir = self.tape();
                 let destroyed =
                     self.work_tree.blocking("tape.destroy", move || tape::destroy(&tape_dir)).await;
@@ -674,6 +676,9 @@ impl WriteCtx {
                 let _ = target; // dropped: zero-length recording is not refined
             }
             Ok(Some(about)) => {
+                let lanes = lane::plan(&about.shown).len().max(1) as u64;
+                let used_s = u64::from(about.length_ms).div_ceil(1_000).saturating_mul(lanes);
+                self.keys.settle_live(used_s).await;
                 let tape_dir = self.tape();
                 let audio = self
                     .work_tree
@@ -689,8 +694,24 @@ impl WriteCtx {
                     self.shelf = target.shelf;
                     self.keys = target.keys;
                 }
-                let key = self.keys.from(Service::Soniox) != From::Nowhere;
-                match write::owed(about.take == 0, audio, about.moved, key) {
+                let read_shelf = self.shelf.clone();
+                let read_id = self.id.clone();
+                let has_draft_lines = self
+                    .work_tree
+                    .blocking("takes.draft", move || {
+                        takes::read(&read_shelf, &read_id, 0).is_ok_and(|v| !v.is_empty())
+                    })
+                    .await
+                    .unwrap_or(false);
+                let soniox_from = self.keys.from(Service::Soniox);
+                match write::owed_for(
+                    about.take == 0,
+                    audio,
+                    about.moved,
+                    soniox_from,
+                    self.keys.is_zu_svc(),
+                    has_draft_lines,
+                ) {
                     write::Owed::Yes => {
                         if on_write_task {
                             self.write_job().await;
@@ -713,6 +734,7 @@ impl WriteCtx {
                 }
             }
             Ok(None) => {
+                self.keys.settle_live(0).await;
                 let target = self
                     .index_sync
                     .recording_sealed(self.id.clone(), self.started_by.clone())
@@ -720,6 +742,7 @@ impl WriteCtx {
                 let _ = target; // dropped: recording removed before seal
             }
             Err(_) => {
+                self.keys.settle_live(0).await;
                 let target = self
                     .index_sync
                     .recording_sealed(self.id.clone(), self.started_by.clone())
@@ -757,6 +780,29 @@ impl WriteCtx {
                         }
                         _ => return Ok(()),
                     };
+                    if !self.manual && self.keys.from(Service::Soniox) == From::Granted {
+                        let read_shelf = self.shelf.clone();
+                        let read_id = self.id.clone();
+                        let has_draft_lines = self
+                            .work_tree
+                            .blocking("takes.draft", move || {
+                                takes::read(&read_shelf, &read_id, 0).is_ok_and(|v| !v.is_empty())
+                            })
+                            .await
+                            .unwrap_or(false);
+                        if has_draft_lines {
+                            if self.keys.backend().load(Ordering::Relaxed) == keys::BACKEND_UNKNOWN
+                                && let Some((ours, backend)) = self.keys.city_svc(Service::Soniox)
+                                && let Ok((left, q)) = quota::fetch_with(&ours, &backend).await
+                            {
+                                self.keys.set_quota(left, q);
+                            }
+                            if self.keys.is_zu_svc() {
+                                self.spawn_auto_titles();
+                                return Ok(());
+                            }
+                        }
+                    }
                     if !entered_ref.swap(true, Ordering::AcqRel) {
                         let mut cur = state_ref.lock().unwrap_or_else(PoisonError::into_inner);
                         let from = cur.code();

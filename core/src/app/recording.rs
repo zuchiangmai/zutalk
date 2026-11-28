@@ -1170,6 +1170,7 @@ pub(crate) async fn run(mut start: Start) -> Done {
 
                 let mut kicks = Vec::with_capacity(streams.len());
                 if !streams.is_empty() {
+                    start.keys.begin_live(streams.len());
                     info!(
                         "topic.context",
                         rec = Id(&start.id),

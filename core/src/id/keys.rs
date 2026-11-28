@@ -9,18 +9,22 @@ use crate::id::quota::{self, Quota};
 use crate::rt::supervise::End;
 use base64::prelude::{BASE64_STANDARD, Engine};
 use keyring_core::{Entry, Error};
-use reqwest::{Client, StatusCode, header::CONTENT_TYPE};
+use reqwest::{
+    Client, StatusCode,
+    header::{AUTHORIZATION, CONTENT_TYPE},
+};
 use serde::Serialize;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::{fmt, fs, time::Duration};
 use ts_rs::TS;
 use zeroize::Zeroizing;
-use zu::{Cid, Codec, Record, SecretKey, Value, did, login};
+use zu::{Cid, Codec, Record, SecretKey, Value, auth, did, login};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Service {
@@ -68,6 +72,10 @@ pub trait Keys: Send + Sync {
     fn lease(&self, service: Service) -> impl Future<Output = Result<Lease, End>> + Send;
     /// The service refused the key just leased: do not hand the same one out again.
     fn refused(&self, service: Service);
+    /// City `zu-svc` handle when `service` draws from a signed-in city host rather than an own key.
+    fn city_svc(&self, _service: Service) -> Option<(Ours, Arc<AtomicU8>)> {
+        None
+    }
 }
 
 /// Where secrets live when it is not the system's key store: a folder only this account may
@@ -449,7 +457,8 @@ pub fn invite(path: &Path) -> Result<Option<Secret>, End> {
         read => Zeroizing::new(read.map_err(|_| End::Fatal("invite.file"))?),
     };
     let json: Json = serde_json::from_slice(&json).map_err(|_| End::Fatal("invite.file"))?;
-    let token = json["accessToken"].as_str().map(str::trim).filter(|token| !token.is_empty());
+    let raw_token = json["access_token"].as_str().or_else(|| json["accessToken"].as_str());
+    let token = raw_token.map(str::trim).filter(|token| !token.is_empty());
     let token = token.filter(|_| json["version"] == 1).ok_or(End::Fatal("invite.file"))?;
     let token = Secret::new(token);
     Ok((get("invite.carried")?.as_deref() != Some(&mark(&token))).then_some(token))
@@ -569,7 +578,114 @@ const REFUSED: [(&str, &str); 8] = [
     ("rooms", "room.rooms"),
 ];
 
+/// Unknown host protocol state before the first `zu-svc` probe.
+pub const BACKEND_UNKNOWN: u8 = 0;
+/// Host speaks Zu `/.well-known/zu-svc/zutalk/*` (`pol` city host).
+pub const BACKEND_ZU_SVC: u8 = 1;
+/// Host speaks legacy `zutalk-server` JSON routes (`/quota`, `/lease`, `/claim`).
+pub const BACKEND_LEGACY: u8 = 2;
+/// Maximum concurrent caption lanes batched in one `zutalk/live` call.
+const MAX_LIVE_LANES: usize = 4;
+/// MIME media type for DRISL-encoded `zu-svc` requests and responses.
+const DRISL_MIME: &str = "application/vnd.ipld.drisl";
+
+fn val_str<'a>(map: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
+    match map.get(key)? {
+        Value::Str(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn val_u64(map: &BTreeMap<String, Value>, key: &str) -> Option<u64> {
+    match map.get(key)? {
+        Value::Int(n) => u64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+enum ZuSvcErr {
+    Gone,
+    End(End),
+}
+
 impl Ours {
+    async fn call_zu_svc_raw(
+        &self,
+        call: &str,
+        args: Value,
+        backend: &AtomicU8,
+    ) -> Result<Option<Value>, ZuSvcErr> {
+        if backend.load(Relaxed) == BACKEND_LEGACY {
+            return Ok(None);
+        }
+        let nonce = random::<16>().map_err(ZuSvcErr::End)?;
+        let origin = self.server.trim_end_matches('/');
+        let statement = auth::sign(&self.me.key, &self.me.did, origin, wall_ms() as i64, &nonce)
+            .map_err(|_| ZuSvcErr::End(End::Fatal("id.sign")))?;
+        let url = format!("{origin}/.well-known/zu-svc/zutalk/{call}");
+        let reply = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, statement)
+            .header(CONTENT_TYPE, DRISL_MIME)
+            .body(args.encode())
+            .send()
+            .await
+            .map_err(|_| ZuSvcErr::End(End::Retry("offline")))?;
+        let status = reply.status();
+        let is_drisl = reply
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("drisl"));
+        let bytes = reply.bytes().await.map_err(|_| ZuSvcErr::End(End::Retry("offline")))?;
+        if status == StatusCode::NOT_FOUND && !is_drisl {
+            backend.store(BACKEND_LEGACY, Relaxed);
+            return Ok(None);
+        }
+        backend.store(BACKEND_ZU_SVC, Relaxed);
+        if status.is_success() {
+            let decoded = Value::decode(&bytes).map_err(|_| ZuSvcErr::End(End::Retry("server")))?;
+            return Ok(Some(decoded));
+        }
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ZuSvcErr::End(End::Fatal("id.refused")));
+        }
+        let decoded = Value::decode(&bytes);
+        let map = match decoded.as_ref() {
+            Ok(Value::Map(m)) => Some(m),
+            _ => None,
+        };
+        let word = map.and_then(|m| val_str(m, "err")).unwrap_or("");
+        let text = map.and_then(|m| val_str(m, "text")).unwrap_or("");
+        if word == "gone" {
+            return Err(ZuSvcErr::Gone);
+        }
+        Err(ZuSvcErr::End(match word {
+            "quota" if text.contains("daily") => End::Fatal("keys.quota.daily"),
+            "quota" | "deny" => End::Fatal("keys.quota"),
+            "full" => End::Fatal("keys.quota.daily"),
+            "big" => End::Fatal("city.big"),
+            "bad" => End::Fatal("request-refused"),
+            _ => End::Retry("server"),
+        }))
+    }
+
+    /// Calls `POST {server}/.well-known/zu-svc/zutalk/{call}` with a fresh `zu::auth` statement
+    /// and DRISL body. Returns `Ok(None)` when the server is a legacy `zutalk-server` without
+    /// `zu-svc` routes so callers fall back seamlessly.
+    pub async fn call_zu_svc(
+        &self,
+        call: &str,
+        args: Value,
+        backend: &AtomicU8,
+    ) -> Result<Option<Value>, End> {
+        self.call_zu_svc_raw(call, args, backend).await.map_err(|err| match err {
+            ZuSvcErr::Gone => End::Retry("server"),
+            ZuSvcErr::End(end) => end,
+        })
+    }
+
     /// Sends `body`, with this server as its `aud`, as a fresh record of type `ty`.
     pub async fn ask(&self, route: &str, ty: &str, mut body: Json) -> Result<Json, End> {
         let failed = |_| End::Fatal("id.sign");
@@ -633,11 +749,25 @@ impl From {
     }
 }
 
+struct LiveSession {
+    lanes: usize,
+    session_id: Option<String>,
+    queued: Vec<Lease>,
+}
+
+impl Default for LiveSession {
+    fn default() -> Self {
+        Self { lanes: 1, session_id: None, queued: Vec::new() }
+    }
+}
+
 /// The person's own key for a service if they set one, else the issuer's. A key the service
 /// refused is not handed out again until it is replaced.
 pub struct Chain {
     refused: Mutex<Vec<Service>>,
     issuer: Option<Ours>,
+    backend: Arc<AtomicU8>,
+    live: Mutex<LiveSession>,
     left: AtomicU64, // µ$ of granted quota, as the issuer last said; `MAX`: not heard yet
     quota: Mutex<Option<Quota>>,
 }
@@ -647,8 +777,53 @@ impl Chain {
         Self {
             refused: Mutex::default(),
             issuer,
+            backend: Arc::new(AtomicU8::new(BACKEND_UNKNOWN)),
+            live: Mutex::new(LiveSession::default()),
             left: AtomicU64::new(u64::MAX),
             quota: Mutex::new(None),
+        }
+    }
+
+    pub fn backend(&self) -> &Arc<AtomicU8> {
+        &self.backend
+    }
+
+    /// True once this chain's issuer is confirmed to be a `pol` `zu-svc` city host.
+    pub fn is_zu_svc(&self) -> bool {
+        self.backend.load(Relaxed) == BACKEND_ZU_SVC
+    }
+
+    /// Prepares a fresh live-caption session with `lanes` concurrent WebSocket streams so the
+    /// first lease call mints all initial single-use keys in one batch.
+    pub fn begin_live(&self, lanes: usize) {
+        let mut guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.lanes = lanes.clamp(1, MAX_LIVE_LANES);
+        guard.session_id = None;
+        guard.queued.clear();
+    }
+
+    /// Settles the active `zu-svc` live-caption session at `used_lane_seconds`, refunding unused
+    /// reserved time back to the resident's balance.
+    pub async fn settle_live(&self, used_lane_seconds: u64) {
+        let session_id = {
+            let mut guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.queued.clear();
+            guard.session_id.take()
+        };
+        let (Some(id), Some(issuer)) = (session_id, self.issuer.as_ref()) else {
+            return;
+        };
+        if self.backend.load(Relaxed) != BACKEND_ZU_SVC {
+            return;
+        }
+        let mut args = BTreeMap::new();
+        args.insert("session".into(), Value::Str(id));
+        args.insert("usedSeconds".into(), Value::Int(used_lane_seconds as i64));
+        if let Ok(Some(Value::Map(map))) =
+            issuer.call_zu_svc("settle", Value::Map(args), &self.backend).await
+            && let Some(left) = val_u64(&map, "left")
+        {
+            self.left.store(left, Relaxed);
         }
     }
 
@@ -683,10 +858,19 @@ impl Chain {
         }
     }
 
-    /// Carries the hours left on a 0.8 community invite into what is granted here. The token
-    /// goes to our server, which has the old service retire it, and is kept nowhere.
+    /// Carries the hours left on a 0.8 community invite into what is granted here. On a `pol`
+    /// city host (`zu-svc`), quota comes directly from city residency and `talk/grant` records,
+    /// so `zutalk/quota` refreshes the balance and retires the local invite prompt.
     pub async fn claim(&self, token: &Secret) -> Result<(), End> {
         let issuer = self.issuer.as_ref().ok_or(End::Fatal("sign_in.first"))?;
+        if let Some(val) =
+            issuer.call_zu_svc("quota", Value::Map(BTreeMap::new()), &self.backend).await?
+        {
+            if let Some((left, q)) = quota::parse_zu_svc(&val) {
+                self.set_quota(left, q);
+            }
+            return Ok(());
+        }
         let said = issuer.ask("claim", "talk/claim", json!({ "token": token.expose() })).await?;
         self.left.store(said["left"].as_u64().unwrap_or(0), Relaxed);
         if let Some(q) = said.get("quota").and_then(quota::parse_quota)
@@ -695,6 +879,82 @@ impl Chain {
             *guard = Some(q);
         }
         Ok(())
+    }
+
+    async fn lease_live_zu_svc(&self, issuer: &Ours) -> Result<Option<Lease>, End> {
+        {
+            let mut guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(next) = guard.queued.pop() {
+                return Ok(Some(next));
+            }
+        }
+        let (existing_session, lanes) = {
+            let guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+            (guard.session_id.clone(), guard.lanes.max(1))
+        };
+        let mut args = BTreeMap::new();
+        if let Some(ref id) = existing_session {
+            args.insert("session".into(), Value::Str(id.clone()));
+            args.insert("count".into(), Value::Int(1));
+        } else {
+            args.insert("lanes".into(), Value::Int(lanes as i64));
+            args.insert("count".into(), Value::Int(lanes as i64));
+        }
+        let reply = match issuer.call_zu_svc_raw("live", Value::Map(args), &self.backend).await {
+            Err(ZuSvcErr::Gone) if existing_session.is_some() => {
+                {
+                    let mut guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+                    guard.session_id = None;
+                }
+                let mut fresh_args = BTreeMap::new();
+                fresh_args.insert("lanes".into(), Value::Int(lanes as i64));
+                fresh_args.insert("count".into(), Value::Int(1));
+                issuer.call_zu_svc("live", Value::Map(fresh_args), &self.backend).await?
+            }
+            Err(ZuSvcErr::Gone) => return Err(End::Retry("server")),
+            Err(ZuSvcErr::End(end)) => return Err(end),
+            Ok(ok) => ok,
+        };
+        let Some(val) = reply else {
+            return Ok(None);
+        };
+        let Value::Map(ref map) = val else {
+            return Err(End::Retry("server"));
+        };
+        let session_id = val_str(map, "session").ok_or(End::Retry("server"))?.to_owned();
+        let cap_s = val_u64(map, "sessionCapS");
+        let session_cap = cap_s.map(|s| {
+            let cap_ms = s.saturating_mul(MS_PER_S);
+            Duration::from_millis(cap_ms)
+        });
+        let Some(Value::List(raw_keys)) = map.get("keys") else {
+            return Err(End::Retry("server"));
+        };
+        let mut leases: Vec<Lease> = raw_keys
+            .iter()
+            .filter_map(|item| match item {
+                Value::Str(k) if !k.is_empty() => {
+                    Some(Lease { key: Secret::new(k.clone()), session_cap })
+                }
+                _ => None,
+            })
+            .collect();
+        if leases.is_empty() {
+            return Err(End::Retry("server"));
+        }
+        if let Some((left, q)) = quota::parse_zu_svc(&val) {
+            self.set_quota(left, q);
+        } else if let Some(left) = val_u64(map, "left") {
+            self.left.store(left, Relaxed);
+        }
+        let first = leases.remove(0);
+        {
+            let mut guard = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.session_id = Some(session_id);
+            leases.reverse();
+            guard.queued.extend(leases);
+        }
+        Ok(Some(first))
     }
 }
 
@@ -709,6 +969,11 @@ impl Keys for Chain {
         } else {
             "keys.none"
         }))?;
+        if service == Service::Soniox
+            && let Some(lease) = self.lease_live_zu_svc(issuer).await?
+        {
+            return Ok(lease);
+        }
         let (lease, left, quota) = issuer.issue(service).await?;
         self.left.store(left, Relaxed);
         if let Some(q) = quota
@@ -721,5 +986,12 @@ impl Keys for Chain {
 
     fn refused(&self, service: Service) {
         self.refused.lock().iter_mut().for_each(|refused| refused.push(service));
+    }
+
+    fn city_svc(&self, service: Service) -> Option<(Ours, Arc<AtomicU8>)> {
+        if self.has_own(service) || self.backend.load(Relaxed) == BACKEND_LEGACY {
+            return None;
+        }
+        Some((self.issuer.clone()?, self.backend.clone()))
     }
 }

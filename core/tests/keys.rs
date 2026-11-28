@@ -92,6 +92,11 @@ fn the_old_apps_invite_is_read_from_its_one_file_left_as_it_is_and_carried_once(
         keys::invite(&file).expect("it reads").map(|t| t.expose().to_owned()).as_deref(),
         Some("another")
     );
+    fs::write(&file, br#"{"version":1,"access_token":" zl-snake \n"}"#).unwrap();
+    assert_eq!(
+        keys::invite(&file).expect("it reads").map(|t| t.expose().to_owned()).as_deref(),
+        Some("zl-snake")
+    );
     for damaged in
         [&br#"{"version":2,"accessToken":"t"}"#[..], br#"{"version":1,"accessToken":" "}"#, b"{"]
     {

@@ -54,8 +54,10 @@ pub enum UpdateReport {
 pub struct Config {
     /// The app's own folder: settings, records, tapes, secrets, logs.
     pub data: PathBuf,
-    /// Ours: relays the sign-in, issues keys, keeps rooms.
+    /// Ours: relays the sign-in and serves city `zu-svc` quota, transcription, and AI calls.
     pub server: String,
+    /// Ephemeral ciphertext caption-sharing room server (`/rooms`).
+    pub rooms: String,
     /// Soniox's real-time endpoint, a WebSocket.
     pub realtime: String,
     /// Soniox's API: whole-recording transcripts.
@@ -100,7 +102,8 @@ impl Config {
         });
         let devices: Devices = Arc::new(audio::devices);
         let (dial, reels, drafts) = (wire::dial(), tape::reels(), shelf::drafts());
-        let (server, directory, old) = (server.into(), zu::did::DIRECTORY.into(), None);
+        let (server, rooms, directory, old) =
+            (server.into(), server.into(), zu::did::DIRECTORY.into(), None);
         // Without a shell to give them, nothing can be put on the clipboard, checked, or installed.
         let (clip, check_update, install): (Clip, CheckUpdate, Install) =
             (Arc::new(|_| false), Arc::new(|| {}), Arc::new(|| {}));
@@ -108,6 +111,7 @@ impl Config {
         Self {
             data,
             server,
+            rooms,
             realtime,
             soniox,
             openrouter,
