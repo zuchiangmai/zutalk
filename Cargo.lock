@@ -7206,7 +7206,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zu"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "aes-gcm",
  "curve25519-dalek",
@@ -7240,7 +7240,7 @@ dependencies = [
 
 [[package]]
 name = "zutalk"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "base64 0.23.1",
  "objc2",
@@ -7259,7 +7259,7 @@ dependencies = [
 
 [[package]]
 name = "zutalk-core"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -7295,7 +7295,7 @@ dependencies = [
 
 [[package]]
 name = "zutalk-log"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "zutalk-server"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "aes-gcm",
  "axum",
